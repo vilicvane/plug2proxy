@@ -1,0 +1,11 @@
+{
+  "references": [
+    {
+      "path": "packages/plug2proxy/src/library"
+    },
+    {
+      "path": "packages/plug2proxy/src/cli"
+    }
+  ],
+  "files": []
+}

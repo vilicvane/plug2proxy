@@ -1,0 +1,22 @@
+{
+  "extends": "@mufan/code-boilerplates/typescript",
+  "options": {
+    "name": "plug2proxy",
+    "license": "MIT",
+    "author": "vilicvane",
+    "packages": [
+      {
+        "name": "plug2proxy",
+        "tsProjects": [
+          {
+            "name": "library"
+          },
+          {
+            "name": "cli",
+            "references": ["library"]
+          }
+        ]
+      }
+    ]
+  }
+}
