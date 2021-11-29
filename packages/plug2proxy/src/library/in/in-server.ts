@@ -234,12 +234,14 @@ export class InServer {
 
     let jet = await this.retrieveJet();
 
-    debugConnect('requesting %s %s via proxy', options.method, options.url);
+    debugRequest('requesting %s %s via proxy', options.method, options.url);
 
     jet.write({
       type: 'request',
       options,
     });
+
+    pipeBufferStreamToJet(request, jet);
 
     let {status, headers} = await new Promise<OutInResponseData>(
       (resolve, reject) => {
@@ -257,7 +259,6 @@ export class InServer {
 
     response.writeHead(status, headers);
 
-    pipeBufferStreamToJet(request, jet);
     pipeJetToBufferStream(jet, response);
   }
 

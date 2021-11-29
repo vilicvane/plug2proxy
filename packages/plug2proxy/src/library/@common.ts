@@ -2,7 +2,7 @@ import {Duplex, Readable, Transform, Writable} from 'stream';
 
 import {StreamJet} from 'socket-jet';
 
-import {InOutData, StreamChunkData} from './types';
+import {InOutData, StreamChunkData, StreamEndData} from './types';
 
 // create a case-insensitive RegExp to match "hop by hop" headers
 export const HOP_BY_HOP_HEADERS_REGEX = new RegExp(
@@ -68,4 +68,12 @@ export function pipeBufferStreamToJet(
       }),
     )
     .pipe(jet as Writable, {end: false});
+
+  source.on('end', () => {
+    let data: StreamEndData = {
+      type: 'stream-end',
+    };
+
+    jet.write(data);
+  });
 }
