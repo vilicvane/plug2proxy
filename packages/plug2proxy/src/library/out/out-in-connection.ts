@@ -79,13 +79,15 @@ export class OutInConnection {
     });
 
     socket.on('timeout', () => {
-      debug('out-in connection to %s timed out %s', this.remoteAddress);
+      debug('out-in connection to %s timed out', this.remoteAddress);
       socket.end();
     });
 
     this.socket = socket;
 
-    let jet = new StreamJet<InOutData, OutInData, Net.Socket>(socket);
+    let jet = new StreamJet<InOutData, OutInData, Net.Socket>(socket, {
+      heartbeat: true,
+    });
 
     jet.on('error', error => {
       debug(

@@ -47,7 +47,9 @@ export class InServer {
 
       let authorized = false;
 
-      let jet = new StreamJet<OutInData, InOutData, Net.Socket>(socket);
+      let jet = new StreamJet<OutInData, InOutData, Net.Socket>(socket, {
+        heartbeat: true,
+      });
 
       jet.on('error', error => {
         debug(

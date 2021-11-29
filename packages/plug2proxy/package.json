@@ -16,7 +16,7 @@
     "maxmind": "^4.3.2",
     "micromatch": "^4.0.4",
     "netmask": "^2.0.2",
-    "socket-jet": "^0.2.15",
+    "socket-jet": "^0.2.17",
     "tslib": "^2.3.1"
   }
 }
