@@ -5,7 +5,18 @@
   "author": "vilicvane",
   "main": "bld/library/index.js",
   "types": "bld/library/index.d.ts",
+  "bin": "bld/cli/main.js",
   "dependencies": {
+    "@types/debug": "^4.1.7",
+    "@types/micromatch": "^4.0.2",
+    "@types/netmask": "^1.0.30",
+    "@types/node": "^16.11.10",
+    "debug": "^4.3.3",
+    "main-function": "^0.1.4",
+    "maxmind": "^4.3.2",
+    "micromatch": "^4.0.4",
+    "netmask": "^2.0.2",
+    "socket-jet": "^0.2.14",
     "tslib": "^2.3.1"
   }
 }

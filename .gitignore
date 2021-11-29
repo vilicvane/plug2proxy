@@ -7,3 +7,7 @@ npm-debug.log
 # TypeScript Build Artifacts
 bld/
 .bld-cache/
+# Temporary
+*.crt
+*.key
+*.p2p.js
