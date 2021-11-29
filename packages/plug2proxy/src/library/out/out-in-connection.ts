@@ -20,6 +20,8 @@ import {
 
 import {OutClient} from './out-client';
 
+const CONNECTION_TIMEOUT = 60_000;
+
 export interface OutInConnectionOptions {
   server: TLS.ConnectionOptions;
 }
@@ -41,6 +43,9 @@ export class OutInConnection {
     }
 
     let socket = TLS.connect(options, () => {
+      socket.setTimeout(CONNECTION_TIMEOUT);
+      socket.setKeepAlive(true);
+
       if (socket.remoteAddress) {
         this.remoteAddress = socket.remoteAddress;
       }
@@ -73,11 +78,14 @@ export class OutInConnection {
       debug('out-in connection to %s ended', this.remoteAddress);
     });
 
+    socket.on('timeout', () => {
+      debug('out-in connection to %s timed out %s', this.remoteAddress);
+      socket.end();
+    });
+
     this.socket = socket;
 
-    let jet = new StreamJet<InOutData, OutInData, Net.Socket>(socket, {
-      heartbeat: true,
-    });
+    let jet = new StreamJet<InOutData, OutInData, Net.Socket>(socket);
 
     jet.on('error', error => {
       debug(
