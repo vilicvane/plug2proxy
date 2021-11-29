@@ -23,6 +23,10 @@ export function pipeJetToBufferStream(
   jet: StreamJet<unknown, unknown, Duplex>,
   destination: Writable,
 ): void {
+  let onError = (): void => {
+    destination.end();
+  };
+
   jet
     .pipe(
       new Transform({
@@ -37,6 +41,8 @@ export function pipeJetToBufferStream(
               jet.unpipe();
               jet.resume();
               destination.end();
+
+              jet.off('error', onError);
               break;
             default:
               throw new Error(`Unexpected Jet data "${data.type}"`);
@@ -45,6 +51,8 @@ export function pipeJetToBufferStream(
       }),
     )
     .pipe(destination);
+
+  jet.once('error', onError);
 }
 
 export function pipeBufferStreamToJet(

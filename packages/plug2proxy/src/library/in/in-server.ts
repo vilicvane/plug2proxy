@@ -116,11 +116,11 @@ export class InServer {
 
     let connected: boolean;
 
-    let onData: ((data: OutInData) => void) | undefined;
+    let cleanUpJet: (() => void) | undefined;
 
     try {
       connected = await new Promise<boolean>((resolve, reject) => {
-        onData = data => {
+        let onData = (data: OutInData): void => {
           switch (data.type) {
             case 'connected':
               resolve(true);
@@ -134,19 +134,18 @@ export class InServer {
         };
 
         jet.once('data', onData);
-
         jet.once('error', reject);
-      });
 
-      if (onData) {
-        jet.off('data', onData);
-      }
+        cleanUpJet = () => {
+          jet.off('data', onData);
+          jet.off('error', reject);
+        };
+      });
+      cleanUpJet?.();
 
       inSocket.write('HTTP/1.1 200 Connection established\r\n\r\n');
     } catch (error) {
-      if (onData) {
-        jet.off('data', onData);
-      }
+      cleanUpJet?.();
 
       debugConnect('connect error %s:%d', host, port);
 

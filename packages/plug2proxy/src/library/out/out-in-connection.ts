@@ -136,7 +136,14 @@ export class OutInConnection {
 
     this.retrieve();
 
-    let route = await client.router.route(host!);
+    let route: string;
+
+    try {
+      route = await client.router.route(host!);
+    } catch (error: any) {
+      debugConnect('route error %s %s', host, error.code ?? error.message);
+      route = 'direct';
+    }
 
     debugConnect('routed %s %s', route, host);
 
