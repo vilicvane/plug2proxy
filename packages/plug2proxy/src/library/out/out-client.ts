@@ -13,14 +13,16 @@ const IDLE_CONNECTION_SCALING_SCHEDULE_DELAY = 1_000;
 const IDLE_CONNECTION_CLEAN_UP_SCHEDULE_INTERVAL = 10_000;
 
 const INITIAL_CONNECTIONS_DEFAULT = 2;
-const SCALE_MULTIPLIER_DEFAULT = 1;
+const IDLE_SCALE_MULTIPLIER_DEFAULT = 1;
+const IDLE_MAX_CONNECTIONS_DEFAULT = 20;
 
 export interface OutClientOptions {
   password?: string;
   server: TLS.ConnectionOptions;
   connections?: {
     initial?: number;
-    scaleMultiplier?: number;
+    idleScaleMultiplier?: number;
+    idleMax?: number;
   };
 }
 
@@ -32,18 +34,21 @@ export class OutClient {
   private idleConnectionScalingTimeout: NodeJS.Timeout | undefined;
 
   private initialConnections: number;
-  private scaleMultiplier: number;
+  private idleMaxConnections: number;
+  private idleScaleMultiplier: number;
 
   constructor(readonly router: Router, readonly options: OutClientOptions) {
     let {
       connections: {
         initial = INITIAL_CONNECTIONS_DEFAULT,
-        scaleMultiplier = SCALE_MULTIPLIER_DEFAULT,
+        idleScaleMultiplier = IDLE_SCALE_MULTIPLIER_DEFAULT,
+        idleMax = IDLE_MAX_CONNECTIONS_DEFAULT,
       } = {},
     } = options;
 
     this.initialConnections = initial;
-    this.scaleMultiplier = scaleMultiplier;
+    this.idleMaxConnections = idleMax;
+    this.idleScaleMultiplier = idleScaleMultiplier;
 
     this.createIdleConnections(initial);
 
@@ -127,10 +132,14 @@ export class OutClient {
 
     let idleConnectionSet = this.idleConnectionSet;
 
-    let targetSize = Math.max(
-      Math.round(this.retrievedAts.length * this.scaleMultiplier),
-      this.initialConnections,
+    let targetSize = Math.min(
+      Math.max(
+        Math.round(this.retrievedAts.length * this.idleScaleMultiplier),
+        this.initialConnections,
+      ),
+      this.idleMaxConnections,
     );
+
     let deficiency = targetSize - idleConnectionSet.size;
 
     if (deficiency > 0) {
