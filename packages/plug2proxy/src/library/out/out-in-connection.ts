@@ -75,7 +75,9 @@ export class OutInConnection {
 
     this.socket = socket;
 
-    let jet = new StreamJet<InOutData, OutInData, Net.Socket>(socket);
+    let jet = new StreamJet<InOutData, OutInData, Net.Socket>(socket, {
+      heartbeat: true,
+    });
 
     jet.on('error', error => {
       debug(
