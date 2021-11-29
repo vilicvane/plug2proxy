@@ -10,7 +10,7 @@ const RETRIEVED_AT_WINDOW = 2_000;
 const MAX_IDLE_DURATION = 2 * 60_000;
 
 const IDLE_CONNECTION_SCALING_SCHEDULE_DELAY = 1_000;
-const IDLE_CONNECTION_CLEAN_UP_SCHEDULE_DELAY = 10_000;
+const IDLE_CONNECTION_CLEAN_UP_SCHEDULE_INTERVAL = 10_000;
 
 const INITIAL_CONNECTIONS_DEFAULT = 2;
 const SCALE_MULTIPLIER_DEFAULT = 1;
@@ -49,13 +49,8 @@ export class OutClient {
     this.createIdleConnections(initial);
 
     setInterval(() => {
-      let now = Date.now();
-
-      for (let connection of this.idleConnectionSet) {
-        if (now - connection.idledAt > MAX_IDLE_DURATION) {
-        }
-      }
-    }, MAX_IDLE_DURATION / 2);
+      this.cleanUpIdleConnections();
+    }, IDLE_CONNECTION_CLEAN_UP_SCHEDULE_INTERVAL);
   }
 
   retrieveIdleConnection(connection: OutInConnection): OutInConnection {
@@ -147,8 +142,6 @@ export class OutClient {
         idleConnectionSet.size,
       );
     }
-
-    this.cleanUpIdleConnections();
   }
 
   private scheduleIdleConnectionScaling(): void {
@@ -170,17 +163,7 @@ export class OutClient {
       }
     }
 
-    this.scheduleIdleConnectionCleanUp();
-  }
-
-  private scheduleIdleConnectionCleanUp(): void {
-    if (this.idleConnectionCleanUpTimeout) {
-      clearTimeout(this.idleConnectionCleanUpTimeout);
-    }
-
-    this.idleConnectionCleanUpTimeout = setTimeout(() => {
-      this.cleanUpIdleConnections();
-    }, IDLE_CONNECTION_CLEAN_UP_SCHEDULE_DELAY);
+    this.scaleIdleConnections();
   }
 
   private createIdleConnections(count: number): void {
