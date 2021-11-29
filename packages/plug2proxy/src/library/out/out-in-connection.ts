@@ -93,17 +93,17 @@ export class OutInConnection {
       switch (data.type) {
         case 'connect':
           this.connect(data.options).catch(() => {
-            socket.destroy();
+            socket.end();
           });
           break;
         case 'request':
           this.request(data.options).catch(() => {
-            socket.destroy();
+            socket.end();
           });
           break;
         case 'route':
           this.route(data.host).catch(() => {
-            socket.destroy();
+            socket.end();
           });
           break;
         case 'error':
@@ -270,7 +270,6 @@ export class OutInConnection {
 
       // if the client closes the connection prematurely,
       // then close the upstream socket
-
       request.destroy();
     });
   }

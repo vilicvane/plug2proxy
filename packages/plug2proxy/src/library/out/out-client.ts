@@ -30,7 +30,6 @@ export class OutClient {
   private retrievedAts: number[] = [];
 
   private idleConnectionScalingTimeout: NodeJS.Timeout | undefined;
-  private idleConnectionCleanUpTimeout: NodeJS.Timeout | undefined;
 
   private initialConnections: number;
   private scaleMultiplier: number;
@@ -84,13 +83,13 @@ export class OutClient {
 
     idleConnectionSet.delete(connection);
 
-    this.scheduleIdleConnectionScaling();
-
     debug(
       'removed idle connection to %s, now %d idle in total',
       connection.remoteAddress,
       idleConnectionSet.size,
     );
+
+    this.scheduleIdleConnectionScaling();
   }
 
   addIdleConnection(connection: OutInConnection): void {
@@ -149,9 +148,13 @@ export class OutClient {
       clearTimeout(this.idleConnectionScalingTimeout);
     }
 
-    this.idleConnectionScalingTimeout = setTimeout(() => {
+    if (this.idleConnectionSet.size > 0) {
+      this.idleConnectionScalingTimeout = setTimeout(() => {
+        this.scaleIdleConnections();
+      }, IDLE_CONNECTION_SCALING_SCHEDULE_DELAY);
+    } else {
       this.scaleIdleConnections();
-    }, IDLE_CONNECTION_SCALING_SCHEDULE_DELAY);
+    }
   }
 
   private cleanUpIdleConnections(): void {
@@ -159,7 +162,7 @@ export class OutClient {
 
     for (let connection of this.idleConnectionSet) {
       if (now - connection.idledAt > MAX_IDLE_DURATION) {
-        connection.socket.destroy();
+        connection.socket.end();
       }
     }
 
