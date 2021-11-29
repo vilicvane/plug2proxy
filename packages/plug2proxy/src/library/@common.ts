@@ -70,6 +70,8 @@ export function pipeBufferStreamToJet(
     .pipe(jet as Writable, {end: false});
 
   source.on('end', () => {
+    source.unpipe();
+
     let data: StreamEndData = {
       type: 'stream-end',
     };
