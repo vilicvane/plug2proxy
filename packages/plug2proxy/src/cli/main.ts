@@ -24,7 +24,7 @@ type Config =
   | {
       mode: 'out';
       router: RouterOptions;
-      client: OutClientOptions;
+      clients: OutClientOptions[];
     };
 
 main(async ([configModulePath]) => {
@@ -36,7 +36,10 @@ main(async ([configModulePath]) => {
     const _inProxy = new InProxy(inServer, config.proxy);
   } else {
     const router = new Router(config.router);
-    const _outClient = new OutClient(router, config.client);
+
+    for (let clientOptions of config.clients) {
+      const _outClient = new OutClient(router, clientOptions);
+    }
   }
 
   await BACKGROUND;
