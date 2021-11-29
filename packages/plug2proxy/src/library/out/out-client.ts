@@ -6,15 +6,17 @@ import {Router} from '../router';
 import {OutInConnection} from './out-in-connection';
 
 const RETRIEVED_AT_WINDOW = 2_000;
-const SCALE_MULTIPLIER = 1;
-
 const IDLE_CONNECTION_SCHEDULE_DELAY = 1_000;
+
+const INITIAL_CONNECTIONS_DEFAULT = 2;
+const SCALE_MULTIPLIER_DEFAULT = 1;
 
 export interface OutClientOptions {
   password?: string;
   server: TLS.ConnectionOptions;
-  connections: {
-    initial: number;
+  connections?: {
+    initial?: number;
+    scaleMultiplier?: number;
   };
 }
 
@@ -25,10 +27,19 @@ export class OutClient {
 
   private idleConnectionScalingTimeout: NodeJS.Timeout | undefined;
 
+  private initialConnections: number;
+  private scaleMultiplier: number;
+
   constructor(readonly router: Router, readonly options: OutClientOptions) {
     let {
-      connections: {initial},
+      connections: {
+        initial = INITIAL_CONNECTIONS_DEFAULT,
+        scaleMultiplier = SCALE_MULTIPLIER_DEFAULT,
+      } = {},
     } = options;
+
+    this.initialConnections = initial;
+    this.scaleMultiplier = scaleMultiplier;
 
     this.createIdleConnections(initial);
   }
@@ -90,15 +101,11 @@ export class OutClient {
       this.idleConnectionScalingTimeout = undefined;
     }
 
-    let {
-      connections: {initial},
-    } = this.options;
-
     let idleConnectionSet = this.idleConnectionSet;
 
     let targetSize = Math.max(
-      Math.round(this.retrievedAts.length * SCALE_MULTIPLIER),
-      initial,
+      Math.round(this.retrievedAts.length * this.scaleMultiplier),
+      this.initialConnections,
     );
     let deficiency = targetSize - idleConnectionSet.size;
 
