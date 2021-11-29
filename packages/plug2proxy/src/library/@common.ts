@@ -69,6 +69,16 @@ export function pipeBufferStreamToJet(
     )
     .pipe(jet as Writable, {end: false});
 
+  source.on('error', () => {
+    source.unpipe();
+
+    let data: StreamEndData = {
+      type: 'stream-end',
+    };
+
+    jet.write(data);
+  });
+
   source.on('end', () => {
     source.unpipe();
 
