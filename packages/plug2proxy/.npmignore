@@ -1,0 +1,8 @@
+*
+
+!/src/library/**/*.ts
+!/src/cli/**/*.ts
+!/bld/library/**
+!/bld/cli/**
+
+*.tsbuildinfo
