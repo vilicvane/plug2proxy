@@ -38,6 +38,8 @@ export class Connection extends StreamJet<
 
   private stage: 'wait-for-connect' | 'ready' | 'busy' | 'removed';
 
+  lastAction: string | undefined;
+
   constructor(client: Client) {
     let socket = TLS.connect(client.connectOptions);
 
@@ -55,23 +57,26 @@ export class Connection extends StreamJet<
 
     socket.setTimeout(client.connectionInitialPingTimeout);
 
-    socket.on('timeout', () => {
-      this.debug('socket timed out');
-      socket.end();
-    });
+    socket
+      .on('timeout', () => {
+        this.debug('socket timed out');
+        socket.end();
+      })
+      .on('secureConnect', () => {
+        this.remoteAddress = socket.remoteAddress;
+        this.stage = 'ready';
 
-    socket.on('secureConnect', () => {
-      this.remoteAddress = socket.remoteAddress;
-      this.stage = 'ready';
+        this.write({
+          type: 'ready',
+          id: this.id,
+          password: client.password,
+        });
 
-      this.write({
-        type: 'ready',
-        id: this.id,
-        password: client.password,
+        this.add();
       });
 
-      this.add();
-    });
+    this.on('pause', () => debug('⏸️'));
+    this.on('resume', () => debug('🔥'));
 
     this.on('data', packet => {
       switch (packet.type) {
@@ -108,19 +113,31 @@ export class Connection extends StreamJet<
     })
       .on('close', () => {
         this.debug('connection close');
+        // Redundancy.
+        this.remove();
+      })
+      .on('end', () => {
+        this.debug('connection end');
         this.remove();
       })
       .on('error', error => {
         this.debug('connection error %e', error);
+        this.remove();
       });
 
     this.client = client;
+  }
+
+  debug(format: string, ...args: any[]): void {
+    debug(`[%s] ${format}`, this.id, ...args);
   }
 
   private async connect(options: InOutConnectOptions): Promise<void> {
     let client = this.client;
 
     let {host, port} = options;
+
+    this.lastAction = `connect ${host}:${port}`;
 
     this.debug('connect %s:%d', host, port);
 
@@ -163,9 +180,17 @@ export class Connection extends StreamJet<
 
         pipeBufferStreamToJet(outSocket, this);
         pipeJetToBufferStream(this, outSocket);
+
+        outSocket.on('end', () => {
+          this.debug('out socket end');
+        });
+
+        outSocket.on('close', () => {
+          this.debug('out socket close');
+        });
       })
       .on('error', error => {
-        this.debug('connection error %e', error);
+        this.debug('out socket error %e', error);
 
         if (connectionEstablished) {
           this.write({
@@ -181,6 +206,8 @@ export class Connection extends StreamJet<
 
   private async request({url, ...options}: InOutRequestOptions): Promise<void> {
     let {method} = options;
+
+    this.lastAction = `request ${method} ${url}`;
 
     this.debug('request %s %s', method, url);
 
@@ -244,6 +271,8 @@ export class Connection extends StreamJet<
   }
 
   private async route(host: string): Promise<void> {
+    this.lastAction = `route ${host}`;
+
     this.retrieve();
 
     let sourceRoute = await this.client.router.route(host!);
@@ -285,11 +314,7 @@ export class Connection extends StreamJet<
 
   private remove(): void {
     this.stage = 'removed';
-    this.client.removeIdleConnection(this);
-  }
-
-  private debug(format: string, ...args: any[]): void {
-    debug(`[%s] ${format}`, this.id, ...args);
+    this.client.removeConnection(this);
   }
 
   private static lastId = 0;

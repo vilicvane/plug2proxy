@@ -28,7 +28,7 @@ export class Connection extends StreamJet<
     socket.setTimeout(server.connectionPingPongInterval);
 
     socket.on('timeout', () => {
-      this.idlePing();
+      void this.ping();
     });
 
     this.on('data', packet => {
@@ -69,7 +69,8 @@ export class Connection extends StreamJet<
       if (packet.id) {
         this._id += `<-${packet.id}`;
 
-        this.idlePing(
+        void this.ping(
+          [],
           server.connectionPingPongInterval * EXPECTED_PING_SPAN_MULTIPLIER,
         );
       }
@@ -78,10 +79,16 @@ export class Connection extends StreamJet<
     })
       .on('close', () => {
         this.debug('connection close');
+        // Redundancy.
+        server.dropConnection(this);
+      })
+      .on('end', () => {
+        this.debug('connection end');
         server.dropConnection(this);
       })
       .on('error', error => {
         this.debug('connection error %e', error);
+        server.dropConnection(this);
       });
   }
 
@@ -108,6 +115,10 @@ export class Connection extends StreamJet<
     span?: number,
     toPause = false,
   ): Promise<void> {
+    if (!this.writable) {
+      this.debug('ping ignored');
+    }
+
     const server = this.server;
 
     let timestamp = Date.now();
@@ -156,7 +167,10 @@ export class Connection extends StreamJet<
       );
     } catch (error) {
       this.debug('ping error %e', error);
-      this.end();
+
+      if (this.writable) {
+        this.end();
+      }
     } finally {
       pingPongEventSession.end();
     }
@@ -168,17 +182,6 @@ export class Connection extends StreamJet<
 
   debug(format: string, ...args: any[]): void {
     debug(`[%s] ${format}`, this.id, ...args);
-  }
-
-  private idlePing(span?: number): void {
-    if (!this.writable) {
-      return;
-    }
-
-    this.ping([], span).catch(error => {
-      this.debug('connection ping/pong error %e', error);
-      this.end();
-    });
   }
 
   private static lastId = 0;

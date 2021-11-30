@@ -199,14 +199,28 @@ export class Proxy {
       eventSession.end();
     }
 
+    if (inSocket.destroyed) {
+      server.returnConnection(connection);
+      return;
+    }
+
     writeHTTPHead(inSocket, 200, 'OK');
 
     pipeBufferStreamToJet(inSocket, connection);
     pipeJetToBufferStream(connection, inSocket);
 
+    inSocket.on('end', () => {
+      connection.debug('in socket ended %s', url);
+      server.returnConnection(connection);
+    });
+
+    inSocket.on('error', () => {
+      connection.debug('in socket error %s', url);
+      server.returnConnection(connection);
+    });
+
     inSocket.on('close', () => {
       connection.debug('in socket closed %s', url);
-      server.returnConnection(connection);
     });
   }
 
@@ -214,6 +228,10 @@ export class Proxy {
     options: InOutConnectOptions,
     inSocket: Net.Socket,
   ): void {
+    if (!inSocket.writable) {
+      return;
+    }
+
     let {host, port} = options;
 
     debugConnect('direct connect %s:%d', host, port);
@@ -357,11 +375,6 @@ export class Proxy {
       }
 
       connection.resume();
-
-      if (request.destroyed) {
-        server.returnConnection(connection);
-        return;
-      }
     } else {
       try {
         connection = await server.claimConnection([
@@ -449,6 +462,11 @@ export class Proxy {
       }
     }
 
+    if (request.destroyed) {
+      server.returnConnection(connection);
+      return;
+    }
+
     connection.debug('requesting %s %s via proxy', method, url);
 
     connection.write({
@@ -534,6 +552,10 @@ export class Proxy {
     request: HTTP.IncomingMessage,
     response: HTTP.ServerResponse,
   ): void {
+    if (!response.writable) {
+      return;
+    }
+
     let {method} = options;
 
     debugRequest('direct request %s %s', method, url);

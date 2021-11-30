@@ -166,7 +166,10 @@ export class Server {
 
   dropConnection(connection: Connection): void {
     _.pull(this.connections, connection);
-    connection.end();
+
+    if (connection.writable) {
+      connection.end();
+    }
   }
 
   pushConnection(connection: Connection): void {

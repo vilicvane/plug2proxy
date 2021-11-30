@@ -2,7 +2,7 @@ import {Duplex, Readable, Transform, Writable} from 'stream';
 
 import {StreamJet} from 'socket-jet';
 
-import {StreamPacket} from './packets';
+import {InOutPacket, OutInPacket, StreamPacket} from './packets';
 
 // create a case-insensitive RegExp to match "hop by hop" headers
 export const HOP_BY_HOP_HEADERS_REGEX = new RegExp(
@@ -29,23 +29,34 @@ export function pipeJetToBufferStream(
 ): void {
   let transform = new Transform({
     writableObjectMode: true,
-    transform(data: StreamPacket, _encoding, callback) {
-      switch (data.type) {
+    transform(packet: InOutPacket | OutInPacket, _encoding, callback) {
+      switch (packet.type) {
         case 'stream-chunk':
-          this.push(data.chunk);
+          this.push(packet.chunk);
           callback();
           break;
         case 'stream-end':
           this.push(null);
           callback();
           break;
+        case 'ping':
+        case 'pong':
+          break;
+        default:
+          jet.unpipe();
+          jet.resume();
       }
     },
   });
 
   jet.pipe(transform).pipe(destination);
 
-  destination.on('unpipe', () => {
+  destination.on('end', () => {
+    jet.unpipe();
+    jet.resume();
+  });
+
+  destination.on('error', () => {
     jet.unpipe();
     jet.resume();
   });

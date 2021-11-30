@@ -45,6 +45,8 @@ export interface ClientOptions {
 }
 
 export class Client {
+  private connectionSet = new Set<Connection>();
+  private pendingConnectionSet = new Set<Connection>();
   private idleConnectionSet = new Set<Connection>();
 
   private retrievedAts: number[] = [];
@@ -103,39 +105,40 @@ export class Client {
 
     this.scaleIdleConnections();
 
-    debug(
-      'retrieved idle connection to %s, now %d idle in total',
+    connection.debug(
+      'retrieved idle connection to %s',
       connection.remoteAddress,
-      idleConnectionSet.size,
     );
+    this.debugStats();
 
     return connection;
   }
 
-  removeIdleConnection(connection: Connection): void {
+  removeConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
+    let pendingConnectionSet = this.pendingConnectionSet;
+    let connectionSet = this.connectionSet;
 
     idleConnectionSet.delete(connection);
+    pendingConnectionSet.delete(connection);
+    connectionSet.delete(connection);
 
-    debug(
-      'removed idle connection to %s, now %d idle in total',
-      connection.remoteAddress,
-      idleConnectionSet.size,
-    );
+    connection.debug('removed connection to %s', connection.remoteAddress);
+    this.debugStats();
 
     this.scheduleIdleConnectionScaling();
   }
 
   addIdleConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
+    let pendingConnectionSet = this.pendingConnectionSet;
 
     idleConnectionSet.add(connection);
+    pendingConnectionSet.delete(connection);
 
-    debug(
-      'added idle connection to %s, now %d idle in total',
-      connection.remoteAddress,
-      idleConnectionSet.size,
-    );
+    connection.debug('added idle connection to %s', connection.remoteAddress);
+
+    this.debugStats();
   }
 
   returnIdleConnection(connection: Connection): void {
@@ -143,21 +146,16 @@ export class Client {
 
     idleConnectionSet.add(connection);
 
-    debug(
-      'returned idle connection to %s, now %d idle in total',
-      connection.remoteAddress,
-      idleConnectionSet.size,
-    );
+    debug('returned idle connection to %s', connection.remoteAddress);
+
+    this.debugStats();
   }
 
   private scaleIdleConnections(): void {
     if (this.idleConnectionScalingTimeout) {
       clearTimeout(this.idleConnectionScalingTimeout);
-
       this.idleConnectionScalingTimeout = undefined;
     }
-
-    let idleConnectionSet = this.idleConnectionSet;
 
     let targetSize = Math.min(
       Math.max(
@@ -168,16 +166,16 @@ export class Client {
       ),
       this.connectionIdleMax,
     );
-
-    let deficiency = targetSize - idleConnectionSet.size;
+    let idleConnectionSet = this.idleConnectionSet;
+    let pendingConnectionSet = this.pendingConnectionSet;
+    let deficiency =
+      targetSize - (idleConnectionSet.size + pendingConnectionSet.size);
 
     if (deficiency > 0) {
       this.createIdleConnections(deficiency);
     } else {
-      debug(
-        'skipped idle connection scaling, now %d idle in total',
-        idleConnectionSet.size,
-      );
+      debug('skipped idle connection scaling', idleConnectionSet.size);
+      this.debugStats();
     }
   }
 
@@ -204,8 +202,37 @@ export class Client {
   }
 
   private createIdleConnections(count: number): void {
+    let connectionSet = this.connectionSet;
+    let pendingConnectionSet = this.pendingConnectionSet;
+
     for (let i = 0; i < count; i++) {
-      new Connection(this);
+      let connection = new Connection(this);
+      connectionSet.add(connection);
+      pendingConnectionSet.add(connection);
+    }
+  }
+
+  private debugStats(): void {
+    let connectionSet = this.connectionSet;
+    let idleConnectionSet = this.idleConnectionSet;
+    let pendingConnectionSet = this.pendingConnectionSet;
+
+    debug(
+      'all %d / idle %d / pending %d',
+      connectionSet.size,
+      idleConnectionSet.size,
+      pendingConnectionSet.size,
+    );
+
+    for (let connection of connectionSet) {
+      if (
+        idleConnectionSet.has(connection) ||
+        pendingConnectionSet.has(connection)
+      ) {
+        continue;
+      }
+
+      connection.debug('still active, last action %s', connection.lastAction);
     }
   }
 }
