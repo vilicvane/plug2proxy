@@ -75,9 +75,6 @@ export class Connection extends StreamJet<
         this.add();
       });
 
-    this.on('pause', () => debug('⏸️'));
-    this.on('resume', () => debug('🔥'));
-
     this.on('data', packet => {
       switch (packet.type) {
         case 'ping':
