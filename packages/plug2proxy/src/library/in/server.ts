@@ -11,8 +11,9 @@ import {Connection} from './connection';
 const debug = Debug('p2p:in:server');
 
 const CONNECTION_PING_PONG_TIMEOUT_DEFAULT = 1000;
-const CONNECTION_PING_PONG_INTERVAL_DEFAULT = 5000;
-const CONNECTION_CLAIM_ATTEMPTS_DEFAULT = 3;
+const CONNECTION_PING_PONG_INTERVAL_DEFAULT = 30_000;
+const CONNECTION_CLAIM_PING_DEFAULT = true;
+const CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT = 3;
 
 export interface ServerOptions {
   password?: string;
@@ -21,7 +22,8 @@ export interface ServerOptions {
   connection?: {
     pingPongTimeout?: number;
     pingPongInterval?: number;
-    claimAttempts?: number;
+    claimPing?: boolean;
+    claimPingAttempts?: number;
   };
 }
 
@@ -32,7 +34,8 @@ export class Server {
   readonly password: string | undefined;
   readonly connectionPingPongTimeout: number;
   readonly connectionPingPongInterval: number;
-  readonly connectionClaimAttempts: number;
+  readonly connectionClaimPing: boolean;
+  readonly connectionClaimPingAttempts: number;
 
   readonly tlsServer: TLS.Server;
 
@@ -45,14 +48,16 @@ export class Server {
         connectionPingPongTimeout = CONNECTION_PING_PONG_TIMEOUT_DEFAULT,
       pingPongInterval:
         connectionPingPongInterval = CONNECTION_PING_PONG_INTERVAL_DEFAULT,
-      claimAttempts:
-        connectionClaimAttempts = CONNECTION_CLAIM_ATTEMPTS_DEFAULT,
+      claimPing: connectionClaimPing = CONNECTION_CLAIM_PING_DEFAULT,
+      claimPingAttempts:
+        connectionClaimPingAttempts = CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT,
     } = {},
   }: ServerOptions) {
     this.password = password;
     this.connectionPingPongTimeout = connectionPingPongTimeout;
     this.connectionPingPongInterval = connectionPingPongInterval;
-    this.connectionClaimAttempts = connectionClaimAttempts;
+    this.connectionClaimPing = connectionClaimPing;
+    this.connectionClaimPingAttempts = connectionClaimPingAttempts;
 
     let tlsServer = TLS.createServer(tlsOptions, socket => {
       new Connection(socket, this);
@@ -63,30 +68,44 @@ export class Server {
     this.tlsServer = tlsServer;
   }
 
-  async claimConnection(packets?: InOutPacket[]): Promise<Connection> {
-    let attempts = this.connectionClaimAttempts;
+  async claimConnection(packets: InOutPacket[] = []): Promise<Connection> {
+    if (this.connectionClaimPing) {
+      let attempts = this.connectionClaimPingAttempts;
 
-    for (let attempt = 0; attempt < attempts; attempt++) {
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        let connection = await this.retrieveConnection();
+
+        connection.setIdle(false);
+
+        try {
+          await connection.ping(packets);
+
+          connection.debug('connection claimed');
+
+          return connection;
+        } catch (error) {
+          connection.debug(
+            'claim ping error %e (attempt %d)',
+            error,
+            attempt + 1,
+          );
+        }
+      }
+
+      throw new Error(
+        `Failed to claim connection after ${attempts} attempt(s)`,
+      );
+    } else {
       let connection = await this.retrieveConnection();
 
       connection.setIdle(false);
 
-      try {
-        await connection.ping(packets);
-
-        connection.debug('connection claimed');
-
-        return connection;
-      } catch (error) {
-        connection.debug(
-          'claim ping error %e (attempt %d)',
-          error,
-          attempt + 1,
-        );
+      for (let packet of packets) {
+        connection.write(packet);
       }
-    }
 
-    throw new Error(`Failed to claim connection after ${attempts} attempt(s)`);
+      return connection;
+    }
   }
 
   returnConnection(connection: Connection): void {
