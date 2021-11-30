@@ -1,18 +1,15 @@
 import * as Net from 'net';
 import * as TLS from 'tls';
 
-import Debug from 'debug';
 import _ from 'lodash';
 
 import {InOutPacket} from '../packets';
 
 import {Connection} from './connection';
 
-const debug = Debug('p2p:in:server');
-
 const CONNECTION_PING_PONG_TIMEOUT_DEFAULT = 1000;
 const CONNECTION_PING_PONG_INTERVAL_DEFAULT = 30_000;
-const CONNECTION_CLAIM_PING_DEFAULT = false;
+const CONNECTION_CLAIM_PING_DEFAULT = true;
 const CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT = 3;
 
 export interface ServerOptions {
@@ -112,7 +109,7 @@ export class Server {
         connection.setIdle(false);
 
         try {
-          await connection.ping(packets);
+          await connection.ping(packets, undefined, true);
 
           connection.debug('connection claimed');
 
@@ -134,6 +131,8 @@ export class Server {
 
       connection.setIdle(false);
 
+      connection.pause();
+
       for (let packet of packets) {
         connection.write(packet);
       }
@@ -144,9 +143,16 @@ export class Server {
 
   returnConnection(connection: Connection): void {
     if (connection.idle) {
-      debug('trying to return an idle connection');
+      connection.debug('tried to return an idle connection');
       return;
     }
+
+    if (connection.isPaused()) {
+      connection.debug('trying to return a paused connection');
+      connection.resume();
+    }
+
+    connection.debug('return connection');
 
     connection.write({
       type: 'return',
@@ -171,6 +177,8 @@ export class Server {
     } else {
       this.connections.push(connection);
     }
+
+    connection.debug('connection pushed');
   }
 
   private async retrieveConnection(): Promise<Connection> {

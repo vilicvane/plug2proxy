@@ -131,6 +131,8 @@ export class Proxy {
       return;
     }
 
+    connection.resume();
+
     if (inSocket.destroyed) {
       server.returnConnection(connection);
       return;
@@ -144,9 +146,11 @@ export class Proxy {
           .on('data', (packet: OutInPacket) => {
             switch (packet.type) {
               case 'connection-established':
+                connection.pause();
                 resolve('proxy');
                 break;
               case 'connection-direct':
+                connection.pause();
                 resolve('direct');
                 break;
               case 'connection-error':
@@ -170,6 +174,8 @@ export class Proxy {
             reject(new Error('Connection closed before establish')),
           );
       });
+
+      connection.resume();
 
       this.setCachedRoute(host, route);
 
@@ -200,7 +206,6 @@ export class Proxy {
 
     inSocket.on('close', () => {
       connection.debug('in socket closed %s', url);
-
       server.returnConnection(connection);
     });
   }
@@ -351,6 +356,8 @@ export class Proxy {
         return;
       }
 
+      connection.resume();
+
       if (request.destroyed) {
         server.returnConnection(connection);
         return;
@@ -374,6 +381,8 @@ export class Proxy {
         return;
       }
 
+      connection.resume();
+
       if (request.destroyed) {
         server.returnConnection(connection);
         return;
@@ -389,6 +398,7 @@ export class Proxy {
             .on('data', (packet: OutInPacket) => {
               switch (packet.type) {
                 case 'route-result':
+                  connection.pause();
                   resolve(packet.route);
                   break;
                 case 'pong':
@@ -409,6 +419,8 @@ export class Proxy {
               reject(new Error('Connection closed before "route-result"')),
             );
         });
+
+        connection.resume();
 
         connection.debug('routed %s %s', route, host);
 
@@ -464,6 +476,7 @@ export class Proxy {
           .on('data', packet => {
             switch (packet.type) {
               case 'request-response':
+                connection.pause();
                 resolve(packet);
                 break;
               case 'pong':
@@ -484,6 +497,8 @@ export class Proxy {
             reject(new Error('Connection closed before response')),
           );
       });
+
+      connection.resume();
     } catch (error) {
       connection.debug('response error %e', error);
 
@@ -508,9 +523,8 @@ export class Proxy {
 
     pipeJetToBufferStream(connection, response);
 
-    response.on('finish', () => {
-      connection.debug('response finished %s %s', method, url);
-
+    response.on('close', () => {
+      connection.debug('response close');
       server.returnConnection(connection);
     });
   }

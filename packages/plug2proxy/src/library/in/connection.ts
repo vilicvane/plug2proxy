@@ -75,8 +75,6 @@ export class Connection extends StreamJet<
       }
 
       server.pushConnection(this);
-
-      this.debug('connection pushed');
     })
       .on('close', () => {
         this.debug('connection close');
@@ -105,7 +103,11 @@ export class Connection extends StreamJet<
    * @param span With in which time span should the other side expect another
    * ping.
    */
-  async ping(packets: InOutPacket[] = [], span?: number): Promise<void> {
+  async ping(
+    packets: InOutPacket[] = [],
+    span?: number,
+    toPause = false,
+  ): Promise<void> {
     const server = this.server;
 
     let timestamp = Date.now();
@@ -132,6 +134,12 @@ export class Connection extends StreamJet<
               }
 
               if (packet.timestamp === timestamp) {
+                if (toPause) {
+                  this.pause();
+                }
+
+                this.debug('pong received');
+
                 resolve();
               } else {
                 this.debug(
@@ -147,6 +155,8 @@ export class Connection extends StreamJet<
         server.connectionPingPongTimeout,
       );
     } catch (error) {
+      this.debug('ping error %e', error);
+      this.end();
     } finally {
       pingPongEventSession.end();
     }
@@ -161,6 +171,10 @@ export class Connection extends StreamJet<
   }
 
   private idlePing(span?: number): void {
+    if (!this.writable) {
+      return;
+    }
+
     this.ping([], span).catch(error => {
       this.debug('connection ping/pong error %e', error);
       this.end();

@@ -24,7 +24,7 @@ export function pipeJetToBufferStream(
   destination: Writable,
 ): void;
 export function pipeJetToBufferStream(
-  jet: StreamJet<StreamPacket, StreamPacket, Duplex>,
+  jet: StreamJet<unknown, unknown, Duplex>,
   destination: Writable,
 ): void {
   let transform = new Transform({
@@ -38,19 +38,17 @@ export function pipeJetToBufferStream(
         case 'stream-end':
           this.push(null);
           callback();
-
-          jet.unpipe(this);
-
-          if (jet.listenerCount('data') > 0) {
-            jet.resume();
-          }
-
           break;
       }
     },
   });
 
   jet.pipe(transform).pipe(destination);
+
+  destination.on('unpipe', () => {
+    jet.unpipe();
+    jet.resume();
+  });
 }
 
 export function pipeBufferStreamToJet(
