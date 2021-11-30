@@ -196,7 +196,7 @@ export class Client {
 
     for (let connection of this.idleConnectionSet) {
       if (now - connection.idledAt > MAX_IDLE_DURATION) {
-        connection.destroy();
+        connection.end();
       }
     }
 

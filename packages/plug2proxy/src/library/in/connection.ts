@@ -163,7 +163,7 @@ export class Connection extends StreamJet<
   private idlePing(span?: number): void {
     this.ping([], span).catch(error => {
       this.debug('connection ping/pong error %e', error);
-      this.destroy();
+      this.end();
     });
   }
 

@@ -160,7 +160,7 @@ export class Server {
 
   dropConnection(connection: Connection): void {
     _.pull(this.connections, connection);
-    connection.destroy();
+    connection.end();
   }
 
   pushConnection(connection: Connection): void {
