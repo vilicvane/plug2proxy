@@ -11,25 +11,53 @@ const CACHE_EXPIRATION_DEFAULT = 10 * 60_000;
 export type RouterRule = (
   | {
       type: 'ip';
+      /**
+       * 支持 "loopback", "private" 或类似 "10.0.0.0/24" 的格式。
+       */
       match: string | string[];
     }
   | {
       type: 'geoip';
+      /**
+       * 支持 MaxMind GeoLite2 数据中的 country.iso_code 字段，如 "CN"。需要下载并配置
+       * 数据库文件，见下方 `geoIPDatabase` 参数。
+       */
       match: string | string[];
     }
   | {
       type: 'domain';
+      /**
+       * 域名，支持 micromatch 格式。如 ["baidu.com", "*.baidu.com"]。
+       */
       match: string | string[];
     }
 ) & {
+  /**
+   * 是否反向匹配。
+   */
   negate?: boolean;
+  /**
+   * 路由名称，配合 Plug2Proxy `Client` 使用时仅支持 'proxy' 和 'direct'。
+   */
   route: string;
 };
 
 export interface RouterOptions {
+  /**
+   * 路由规则。
+   */
   rules: RouterRule[];
+  /**
+   * 默认路由名称，配合 Plug2Proxy `Client` 使用时仅支持 'proxy' 和 'direct'。
+   */
   fallback: string;
+  /**
+   * 路由匹配缓存时间（毫秒）。
+   */
   cacheExpiration?: number;
+  /**
+   * MaxMind GeoLite2 国家数据库文件地址（mmdb 格式）。
+   */
   geoIPDatabase?: string;
 }
 
@@ -105,15 +133,19 @@ export class Router {
           }
 
           match = match.reduce((matches, match) => {
-            if (match === 'private') {
-              return [
-                ...matches,
-                '10.0.0.0/8',
-                '172.16.0.0/12',
-                '192.168.0.0/16',
-              ];
-            } else {
-              return [...matches, match];
+            switch (match) {
+              case 'private':
+                return [
+                  ...matches,
+                  '10.0.0.0/8',
+                  '172.16.0.0/12',
+                  '192.168.0.0/16',
+                ];
+              case 'loopback':
+                return [...matches, '127.0.0.0/8'];
+
+              default:
+                return [...matches, match];
             }
           }, [] as string[]);
 

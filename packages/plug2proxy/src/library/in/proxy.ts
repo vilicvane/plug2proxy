@@ -39,6 +39,16 @@ const debugConnect = Debug('p2p:in:proxy:connect');
 const debugRequest = Debug('p2p:in:proxy:request');
 
 export interface ProxyOptions {
+  /**
+   * 代理入口监听选项，如：
+   *
+   * ```json
+   * {
+   *   "host": "127.0.0.1",
+   *   "port": 8000
+   * }
+   * ```
+   */
   listen: Net.ListenOptions;
 }
 

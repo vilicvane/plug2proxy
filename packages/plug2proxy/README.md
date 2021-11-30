@@ -1,7 +1,7 @@
-# plug2proxy
+# 插入代理 Plug2Proxy
 
-Just another awesome magic.
+[项目说明](../../README.md)
 
-## License
+## 授权协议
 
-MIT License.
+MIT 协议

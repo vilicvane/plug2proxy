@@ -16,13 +16,47 @@ const CONNECTION_CLAIM_PING_DEFAULT = false;
 const CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT = 3;
 
 export interface ServerOptions {
+  /**
+   * 明文密码（TLS 中传输）。
+   */
   password?: string;
+  /**
+   * 监听选项，供代理出口连接（注意此端口通常需要在防火墙中允许）。如：
+   *
+   * ```json
+   * {
+   *   "port": 8001
+   * }
+   * ```
+   */
   listen: Net.ListenOptions;
+  /**
+   * TLS 选项，配置证书等。如：
+   *
+   * ```json
+   * {
+   *   "cert": "-----BEGIN CERTIFICATE-----\n[...]\n-----END CERTIFICATE-----",
+   *   "key": "-----BEGIN PRIVATE KEY-----\n[...]\n-----END PRIVATE KEY-----",
+   * }
+   * ```
+   */
   tls: TLS.TlsOptions;
   connection?: {
+    /**
+     * ping/pong 超时时间。
+     */
     pingPongTimeout?: number;
+    /**
+     * ping/pong 间隔时间。
+     */
     pingPongInterval?: number;
+    /**
+     * 是否在获取建立连接时进行一次 ping/pong。
+     */
     claimPing?: boolean;
+    /**
+     * 建立连接时进行 ping/pong 的尝试次数，每次都会换一个连接。
+     */
     claimPingAttempts?: number;
   };
 }

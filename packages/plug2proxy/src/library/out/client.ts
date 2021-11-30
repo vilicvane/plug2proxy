@@ -21,7 +21,20 @@ const CONNECTION_IDLE_MAX_DEFAULT = 50;
 const CONNECTION_IDLE_SCALE_MULTIPLIER_DEFAULT = 1;
 
 export interface ClientOptions {
+  /**
+   * 明文密码（TLS 中传输）。
+   */
   password?: string;
+  /**
+   * 代理入口服务器连接选项。如：
+   *
+   * ```json
+   * {
+   *   "host": "example.com",
+   *   "port": 8001
+   * }
+   * ```
+   */
   connect: TLS.ConnectionOptions;
   connection?: {
     initialPingTimeout?: number;
