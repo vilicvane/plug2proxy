@@ -1,2 +1,1 @@
-export * from './in-proxy';
-export * from './in-server';
+export * as In from './namespace';

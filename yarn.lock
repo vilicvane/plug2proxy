@@ -98,6 +98,11 @@
   resolved "https://registry.yarnpkg.com/@types/json5/-/json5-0.0.29.tgz#ee28707ae94e11d2b827bcbe5270bcea7f3e71ee"
   integrity sha1-7ihweulOEdK4J7y+UnC86n8+ce4=
 
+"@types/lodash@^4.14.177":
+  version "4.14.177"
+  resolved "https://registry.yarnpkg.com/@types/lodash/-/lodash-4.14.177.tgz#f70c0d19c30fab101cad46b52be60363c43c4578"
+  integrity sha512-0fDwydE2clKe9MNfvXHBHF9WEahRuj+msTuQqOmAApNORFvhMYZKNGGJdCzuhheVjMps/ti0Ak/iJPACMaevvw==
+
 "@types/micromatch@^4.0.2":
   version "4.0.2"
   resolved "https://registry.yarnpkg.com/@types/micromatch/-/micromatch-4.0.2.tgz#ce29c8b166a73bf980a5727b1e4a4d099965151d"
@@ -1400,10 +1405,10 @@ slash@^3.0.0:
   resolved "https://registry.yarnpkg.com/slash/-/slash-3.0.0.tgz#6539be870c165adbd5240220dbe361f1bc4d4634"
   integrity sha512-g9Q1haeby36OSStwb4ntCGGGaKsaVSjQ68fBxoQcutl5fS1vuY18H3wSt3jFyFtrkx+Kz0V1G85A4MyAdDMi2Q==
 
-socket-jet@^0.2.17:
-  version "0.2.17"
-  resolved "https://registry.yarnpkg.com/socket-jet/-/socket-jet-0.2.17.tgz#e7b1ecfa9da5256c93ce1ed9145cbfd0f7a21963"
-  integrity sha512-ZPz/49eVAV7PpdwSfIr7V6LADvR/viTSPokMqxime7AJUYRj+VBIRJQtMs/M+qGu9mPHUhtzIiMYp0XUSi/oOg==
+socket-jet@^0.2.18:
+  version "0.2.18"
+  resolved "https://registry.yarnpkg.com/socket-jet/-/socket-jet-0.2.18.tgz#ded70b26891d2bad5de97fe295761dd613ba29b5"
+  integrity sha512-WbR0msS5jWR7dFVATquh34u3JHdy7SQMfHuqka+30Xcw+/OOfRBnWvF6qsKLpnXv6bj8KNmcwuEm4TGLZAOKWw==
   dependencies:
     bson "^4.0.4"
 
@@ -1488,7 +1493,7 @@ tsconfig-paths@^3.11.0:
     minimist "^1.2.0"
     strip-bom "^3.0.0"
 
-tslang@^0.1.25:
+tslang@^0.1.25, tslang@^0.1.26:
   version "0.1.26"
   resolved "https://registry.yarnpkg.com/tslang/-/tslang-0.1.26.tgz#0f1c6c1456853fdab57e6c452a9f4c32ef42bfe8"
   integrity sha512-hZXxLsJ22njkcyLI2XQDcAOBI9eVbwYJPtUhAwjzJSl7x0266LrPbaRuSJmnKIA3kWJiVBqZwVTXCIMZ6yM0MA==

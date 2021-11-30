@@ -1,9 +1,12 @@
 import * as TLS from 'tls';
 
-import {debug} from '../debug';
+import Debug from 'debug';
+
 import {Router} from '../router';
 
-import {OutInConnection} from './out-in-connection';
+import {Connection} from './connection';
+
+const debug = Debug('p2p:out:client');
 
 const RETRIEVED_AT_WINDOW = 2_000;
 
@@ -12,52 +15,65 @@ const MAX_IDLE_DURATION = 2 * 60_000;
 const IDLE_CONNECTION_SCALING_SCHEDULE_DELAY = 1_000;
 const IDLE_CONNECTION_CLEAN_UP_SCHEDULE_INTERVAL = 10_000;
 
-const INITIAL_CONNECTIONS_DEFAULT = 2;
-const IDLE_SCALE_MULTIPLIER_DEFAULT = 1;
-const IDLE_MAX_CONNECTIONS_DEFAULT = 20;
+const CONNECTION_INITIAL_PING_TIMEOUT_DEFAULT = 1_000;
+const CONNECTION_IDLE_MIN_DEFAULT = 2;
+const CONNECTION_IDLE_MAX_DEFAULT = 20;
+const CONNECTION_IDLE_SCALE_MULTIPLIER_DEFAULT = 1;
 
-export interface OutClientOptions {
+export interface ClientOptions {
   password?: string;
-  server: TLS.ConnectionOptions;
-  connections?: {
-    initial?: number;
-    idleScaleMultiplier?: number;
+  connect: TLS.ConnectionOptions;
+  connection?: {
+    initialPingTimeout?: number;
+    idleMin?: number;
     idleMax?: number;
+    idleScaleMultiplier?: number;
   };
 }
 
-export class OutClient {
-  private idleConnectionSet = new Set<OutInConnection>();
+export class Client {
+  private idleConnectionSet = new Set<Connection>();
 
   private retrievedAts: number[] = [];
 
   private idleConnectionScalingTimeout: NodeJS.Timeout | undefined;
 
-  private initialConnections: number;
-  private idleMaxConnections: number;
-  private idleScaleMultiplier: number;
+  readonly password: string | undefined;
+  readonly connectOptions: TLS.ConnectionOptions;
+  readonly connectionInitialPingTimeout: number;
+  readonly connectionIdleMin: number;
+  readonly connectionIdleMax: number;
+  readonly connectionIdleScaleMultiplier: number;
 
-  constructor(readonly router: Router, readonly options: OutClientOptions) {
+  constructor(readonly router: Router, readonly options: ClientOptions) {
     let {
-      connections: {
-        initial = INITIAL_CONNECTIONS_DEFAULT,
-        idleScaleMultiplier = IDLE_SCALE_MULTIPLIER_DEFAULT,
-        idleMax = IDLE_MAX_CONNECTIONS_DEFAULT,
+      password,
+      connect: connectOptions,
+      connection: {
+        initialPingTimeout:
+          connectionInitialPingTimeout = CONNECTION_INITIAL_PING_TIMEOUT_DEFAULT,
+        idleMin: connectionIdleMin = CONNECTION_IDLE_MIN_DEFAULT,
+        idleMax: connectionIdleMax = CONNECTION_IDLE_MAX_DEFAULT,
+        idleScaleMultiplier:
+          connectionIdleScaleMultiplier = CONNECTION_IDLE_SCALE_MULTIPLIER_DEFAULT,
       } = {},
     } = options;
 
-    this.initialConnections = initial;
-    this.idleMaxConnections = idleMax;
-    this.idleScaleMultiplier = idleScaleMultiplier;
+    this.password = password;
+    this.connectOptions = connectOptions;
+    this.connectionInitialPingTimeout = connectionInitialPingTimeout;
+    this.connectionIdleMin = connectionIdleMin;
+    this.connectionIdleMax = connectionIdleMax;
+    this.connectionIdleScaleMultiplier = connectionIdleScaleMultiplier;
 
-    this.createIdleConnections(initial);
+    this.createIdleConnections(connectionIdleMin);
 
     setInterval(() => {
       this.cleanUpIdleConnections();
     }, IDLE_CONNECTION_CLEAN_UP_SCHEDULE_INTERVAL);
   }
 
-  retrieveIdleConnection(connection: OutInConnection): OutInConnection {
+  retrieveIdleConnection(connection: Connection): Connection {
     let now = Date.now();
 
     let idleConnectionSet = this.idleConnectionSet;
@@ -83,7 +99,7 @@ export class OutClient {
     return connection;
   }
 
-  removeIdleConnection(connection: OutInConnection): void {
+  removeIdleConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
 
     idleConnectionSet.delete(connection);
@@ -97,8 +113,12 @@ export class OutClient {
     this.scheduleIdleConnectionScaling();
   }
 
-  addIdleConnection(connection: OutInConnection): void {
+  addIdleConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
+
+    if (idleConnectionSet.has(connection)) {
+      throw new Error('oops');
+    }
 
     idleConnectionSet.add(connection);
 
@@ -109,10 +129,12 @@ export class OutClient {
     );
   }
 
-  returnIdleConnection(connection: OutInConnection): void {
+  returnIdleConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
 
-    connection.idledAt = Date.now();
+    if (idleConnectionSet.has(connection)) {
+      throw new Error('oops r');
+    }
 
     idleConnectionSet.add(connection);
 
@@ -134,10 +156,12 @@ export class OutClient {
 
     let targetSize = Math.min(
       Math.max(
-        Math.round(this.retrievedAts.length * this.idleScaleMultiplier),
-        this.initialConnections,
+        Math.round(
+          this.retrievedAts.length * this.connectionIdleScaleMultiplier,
+        ),
+        this.connectionIdleMin,
       ),
-      this.idleMaxConnections,
+      this.connectionIdleMax,
     );
 
     let deficiency = targetSize - idleConnectionSet.size;
@@ -157,13 +181,9 @@ export class OutClient {
       clearTimeout(this.idleConnectionScalingTimeout);
     }
 
-    if (this.idleConnectionSet.size > 0) {
-      this.idleConnectionScalingTimeout = setTimeout(() => {
-        this.scaleIdleConnections();
-      }, IDLE_CONNECTION_SCALING_SCHEDULE_DELAY);
-    } else {
+    this.idleConnectionScalingTimeout = setTimeout(() => {
       this.scaleIdleConnections();
-    }
+    }, IDLE_CONNECTION_SCALING_SCHEDULE_DELAY);
   }
 
   private cleanUpIdleConnections(): void {
@@ -171,7 +191,7 @@ export class OutClient {
 
     for (let connection of this.idleConnectionSet) {
       if (now - connection.idledAt > MAX_IDLE_DURATION) {
-        connection.socket.end();
+        connection.destroy();
       }
     }
 
@@ -180,7 +200,7 @@ export class OutClient {
 
   private createIdleConnections(count: number): void {
     for (let i = 0; i < count; i++) {
-      new OutInConnection(this);
+      new Connection(this);
     }
   }
 }

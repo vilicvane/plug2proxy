@@ -1,2 +1,1 @@
-export * from './out-client';
-export * from './out-in-connection';
+export * as Out from './namespace';

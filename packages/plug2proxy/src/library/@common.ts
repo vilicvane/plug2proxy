@@ -2,7 +2,7 @@ import {Duplex, Readable, Transform, Writable} from 'stream';
 
 import {StreamJet} from 'socket-jet';
 
-import {InOutData, StreamChunkData, StreamEndData} from './types';
+import {StreamPacket} from './packets';
 
 // create a case-insensitive RegExp to match "hop by hop" headers
 export const HOP_BY_HOP_HEADERS_REGEX = new RegExp(
@@ -22,82 +22,76 @@ export const HOP_BY_HOP_HEADERS_REGEX = new RegExp(
 export function pipeJetToBufferStream(
   jet: StreamJet<unknown, unknown, Duplex>,
   destination: Writable,
+): void;
+export function pipeJetToBufferStream(
+  jet: StreamJet<StreamPacket, StreamPacket, Duplex>,
+  destination: Writable,
 ): void {
-  let onEndOrError = (): void => {
-    jet.unpipe();
-    jet.resume();
-    destination.end();
-  };
+  let transform = new Transform({
+    writableObjectMode: true,
+    transform(data: StreamPacket, _encoding, callback) {
+      switch (data.type) {
+        case 'stream-chunk':
+          this.push(data.chunk);
+          callback();
+          break;
+        case 'stream-end':
+          this.push(null);
+          callback();
 
-  jet
-    .pipe(
-      new Transform({
-        writableObjectMode: true,
-        transform(data: InOutData, _encoding, callback) {
-          switch (data.type) {
-            case 'stream-chunk':
-              this.push(data.chunk);
-              callback();
-              break;
-            case 'stream-end':
-              jet.unpipe();
-              jet.resume();
-              destination.end();
+          jet.unpipe(this);
 
-              jet.off('error', onEndOrError);
-              jet.off('end', onEndOrError);
-              break;
-            default:
-              throw new Error(`Unexpected Jet data "${data.type}"`);
+          if (jet.listenerCount('data') > 0) {
+            jet.resume();
           }
-        },
-      }),
-    )
-    .pipe(destination);
 
-  jet.once('error', onEndOrError);
-  jet.on('end', onEndOrError);
+          break;
+      }
+    },
+  });
+
+  jet.pipe(transform).pipe(destination);
 }
 
 export function pipeBufferStreamToJet(
   source: Readable,
   jet: StreamJet<unknown, unknown, Duplex>,
+): void;
+export function pipeBufferStreamToJet(
+  source: Readable,
+  jet: StreamJet<StreamPacket, StreamPacket, Duplex>,
 ): void {
-  source
-    .pipe(
-      new Transform({
-        readableObjectMode: true,
-        transform(chunk: Buffer, _encoding, callback) {
-          let data: StreamChunkData = {
-            type: 'stream-chunk',
-            chunk,
-          };
+  let transform = new Transform({
+    readableObjectMode: true,
+    transform(chunk: Buffer, _encoding, callback) {
+      this.push({
+        type: 'stream-chunk',
+        chunk,
+      });
 
-          this.push(data);
+      callback();
+    },
+    flush(callback) {
+      this.push({
+        type: 'stream-end',
+      });
 
-          callback();
-        },
-      }),
-    )
-    .pipe(jet as Writable, {end: false});
-
-  source.on('error', () => {
-    source.unpipe();
-
-    let data: StreamEndData = {
-      type: 'stream-end',
-    };
-
-    jet.write(data);
+      callback();
+    },
   });
 
-  source.on('end', () => {
-    source.unpipe();
+  source.pipe(transform).pipe(jet as Writable, {end: false});
+}
 
-    let data: StreamEndData = {
-      type: 'stream-end',
-    };
+export function writeHTTPHead(
+  socket: Writable,
+  status: number,
+  message: string,
+  end = false,
+): void {
+  socket.write(`HTTP/1.1 ${status} ${message}\r\n\r\n`);
 
-    jet.write(data);
-  });
+  if (end) {
+    socket.end();
+  }
 }

@@ -4,27 +4,18 @@ import * as Path from 'path';
 
 import main, {BACKGROUND} from 'main-function';
 
-import {
-  InProxy,
-  InProxyOptions,
-  InServer,
-  InServerOptions,
-  OutClient,
-  OutClientOptions,
-  Router,
-  RouterOptions,
-} from '../library';
+import {In, Out, Router, RouterOptions} from '../library';
 
 type Config =
   | {
       mode: 'in';
-      server: InServerOptions;
-      proxy: InProxyOptions;
+      server: In.ServerOptions;
+      proxy: In.ProxyOptions;
     }
   | {
       mode: 'out';
       router: RouterOptions;
-      clients: OutClientOptions[];
+      clients: Out.ClientOptions[];
     };
 
 main(async ([configModulePath]) => {
@@ -32,13 +23,13 @@ main(async ([configModulePath]) => {
   const config: Config = require(Path.resolve(configModulePath));
 
   if (config.mode === 'in') {
-    const inServer = new InServer(config.server);
-    const _inProxy = new InProxy(inServer, config.proxy);
+    const inServer = new In.Server(config.server);
+    const _inProxy = new In.Proxy(inServer, config.proxy);
   } else {
     const router = new Router(config.router);
 
     for (let clientOptions of config.clients) {
-      const _outClient = new OutClient(router, clientOptions);
+      const _outClient = new Out.Client(router, clientOptions);
     }
   }
 
