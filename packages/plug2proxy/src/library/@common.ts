@@ -27,6 +27,8 @@ export function pipeJetToBufferStream(
   jet: StreamJet<unknown, unknown, Duplex>,
   destination: Writable,
 ): void {
+  let cleanedUp = false;
+
   let transform = new Transform({
     writableObjectMode: true,
     transform(packet: InOutPacket | OutInPacket, _encoding, callback) {
@@ -38,28 +40,34 @@ export function pipeJetToBufferStream(
         case 'stream-end':
           this.push(null);
           callback();
+
+          cleanUp();
           break;
         case 'ping':
         case 'pong':
           break;
         default:
-          jet.unpipe();
-          jet.resume();
+          cleanUp();
+          break;
       }
     },
   });
 
   jet.pipe(transform).pipe(destination);
 
-  destination.on('end', () => {
-    jet.unpipe();
-    jet.resume();
-  });
+  destination.on('end', cleanUp);
+  destination.on('error', cleanUp);
 
-  destination.on('error', () => {
+  function cleanUp(): void {
+    if (cleanedUp) {
+      return;
+    }
+
+    cleanedUp = true;
+
     jet.unpipe();
     jet.resume();
-  });
+  }
 }
 
 export function pipeBufferStreamToJet(
