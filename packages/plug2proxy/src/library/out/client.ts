@@ -10,14 +10,14 @@ const debug = Debug('p2p:out:client');
 
 const RETRIEVED_AT_WINDOW = 2_000;
 
-const MAX_IDLE_DURATION = 2 * 60_000;
+const MAX_IDLE_DURATION = 5 * 60_000;
 
 const IDLE_CONNECTION_SCALING_SCHEDULE_DELAY = 1_000;
 const IDLE_CONNECTION_CLEAN_UP_SCHEDULE_INTERVAL = 10_000;
 
 const CONNECTION_INITIAL_PING_TIMEOUT_DEFAULT = 1_000;
-const CONNECTION_IDLE_MIN_DEFAULT = 2;
-const CONNECTION_IDLE_MAX_DEFAULT = 20;
+const CONNECTION_IDLE_MIN_DEFAULT = 5;
+const CONNECTION_IDLE_MAX_DEFAULT = 50;
 const CONNECTION_IDLE_SCALE_MULTIPLIER_DEFAULT = 1;
 
 export interface ClientOptions {
@@ -116,10 +116,6 @@ export class Client {
   addIdleConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
 
-    if (idleConnectionSet.has(connection)) {
-      throw new Error('oops');
-    }
-
     idleConnectionSet.add(connection);
 
     debug(
@@ -131,10 +127,6 @@ export class Client {
 
   returnIdleConnection(connection: Connection): void {
     let idleConnectionSet = this.idleConnectionSet;
-
-    if (idleConnectionSet.has(connection)) {
-      throw new Error('oops r');
-    }
 
     idleConnectionSet.add(connection);
 
