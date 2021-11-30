@@ -232,7 +232,7 @@ export class Client {
         continue;
       }
 
-      connection.debug('still active, last action %s', connection.lastAction);
+      // connection.debug('still active, last action %s', connection.lastAction);
     }
   }
 }
