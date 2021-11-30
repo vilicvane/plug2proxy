@@ -1405,10 +1405,10 @@ slash@^3.0.0:
   resolved "https://registry.yarnpkg.com/slash/-/slash-3.0.0.tgz#6539be870c165adbd5240220dbe361f1bc4d4634"
   integrity sha512-g9Q1haeby36OSStwb4ntCGGGaKsaVSjQ68fBxoQcutl5fS1vuY18H3wSt3jFyFtrkx+Kz0V1G85A4MyAdDMi2Q==
 
-socket-jet@^0.2.19:
-  version "0.2.19"
-  resolved "https://registry.yarnpkg.com/socket-jet/-/socket-jet-0.2.19.tgz#0680e04aa07335e7fb6a457b727004e51e8d8ac6"
-  integrity sha512-Z2Qmgi+F+l4fbTvkNEq24JDJTpcuIl0pipXY8+fHN1pC72PgCdKUqfFj4cZ6wjiykzCdz4WhKrYXkLvlgDk7ew==
+socket-jet@^0.2.20:
+  version "0.2.20"
+  resolved "https://registry.yarnpkg.com/socket-jet/-/socket-jet-0.2.20.tgz#c54065c0101ebe09d29d52551026a49307927ed3"
+  integrity sha512-c3IB0x0URlVbzvX4TofNZljhOvP0nl+dlRZUnVYPOUpFjlbeTiZqvEhsnU+EFjrBPmWunn8XTTTG3uZ1YNidAg==
   dependencies:
     bson "^4.0.4"
 
