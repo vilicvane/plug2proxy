@@ -40,13 +40,13 @@ export function pipeJetToBufferStream(
         case 'stream-end':
           this.push(null);
           callback();
-
           cleanUp();
           break;
         case 'ping':
         case 'pong':
           break;
         default:
+          this.push(null);
           cleanUp();
           break;
       }
