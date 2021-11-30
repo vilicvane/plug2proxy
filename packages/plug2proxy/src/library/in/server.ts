@@ -12,7 +12,7 @@ const debug = Debug('p2p:in:server');
 
 const CONNECTION_PING_PONG_TIMEOUT_DEFAULT = 1000;
 const CONNECTION_PING_PONG_INTERVAL_DEFAULT = 30_000;
-const CONNECTION_CLAIM_PING_DEFAULT = true;
+const CONNECTION_CLAIM_PING_DEFAULT = false;
 const CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT = 3;
 
 export interface ServerOptions {
