@@ -246,19 +246,25 @@ export class Connection extends StreamJet<
     request.on('error', (error: any) => {
       this.debug('request error %s', error.code ?? error.message);
 
-      if (!responded) {
-        if (error.code === 'ENOTFOUND') {
-          this.write({
-            type: 'request-response',
-            status: 404,
-          });
-        } else {
-          this.write({
-            type: 'request-response',
-            status: 500,
-          });
-        }
+      if (responded) {
+        return;
       }
+
+      if (error.code === 'ENOTFOUND') {
+        this.write({
+          type: 'request-response',
+          status: 404,
+        });
+      } else {
+        this.write({
+          type: 'request-response',
+          status: 500,
+        });
+      }
+
+      this.write({
+        type: 'stream-end',
+      });
     });
   }
 
