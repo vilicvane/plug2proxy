@@ -111,18 +111,13 @@ export class Server {
 
         connection.setIdle(false);
 
-        try {
-          await connection.ping(packets, undefined, true);
+        let okay = await connection.ping(packets, undefined, true);
 
+        if (okay) {
           connection.debug('connection claimed');
-
           return connection;
-        } catch (error) {
-          connection.debug(
-            'claim ping error %e (attempt %d)',
-            error,
-            attempt + 1,
-          );
+        } else {
+          connection.debug('claim ping failed (attempt %d)', attempt + 1);
         }
       }
 

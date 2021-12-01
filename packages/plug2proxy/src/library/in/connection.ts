@@ -110,10 +110,10 @@ export class Connection extends StreamJet<
     packets: InOutPacket[] = [],
     span?: number,
     toPause = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.writable) {
       this.debug('ping ignored');
-      return;
+      return false;
     }
 
     const server = this.server;
@@ -166,10 +166,12 @@ export class Connection extends StreamJet<
       this.debug('ping error %e', error);
       server.dropConnection(this);
 
-      throw error;
+      return false;
     } finally {
       pingPongEventSession.end();
     }
+
+    return true;
   }
 
   setIdle(idle: boolean): void {
