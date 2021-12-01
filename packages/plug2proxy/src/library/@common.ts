@@ -55,8 +55,7 @@ export function pipeJetToBufferStream(
 
   jet.pipe(transform).pipe(destination);
 
-  destination.on('end', cleanUp);
-  destination.on('error', cleanUp);
+  destination.on('close', cleanUp);
 
   function cleanUp(): void {
     if (cleanedUp) {
@@ -78,6 +77,8 @@ export function pipeBufferStreamToJet(
   source: Readable,
   jet: StreamJet<StreamPacket, StreamPacket, Duplex>,
 ): void {
+  let cleanedUp = false;
+
   let transform = new Transform({
     readableObjectMode: true,
     transform(chunk: Buffer, _encoding, callback) {
@@ -89,15 +90,27 @@ export function pipeBufferStreamToJet(
       callback();
     },
     flush(callback) {
-      this.push({
-        type: 'stream-end',
-      });
+      cleanUp();
 
       callback();
     },
   });
 
   source.pipe(transform).pipe(jet as Writable, {end: false});
+
+  source.on('close', cleanUp);
+
+  function cleanUp(): void {
+    if (cleanedUp) {
+      return;
+    }
+
+    cleanedUp = true;
+
+    transform.push({
+      type: 'stream-end',
+    });
+  }
 }
 
 export function writeHTTPHead(

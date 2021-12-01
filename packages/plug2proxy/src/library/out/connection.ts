@@ -180,10 +180,6 @@ export class Connection extends StreamJet<
 
         outSocket.on('close', () => {
           this.debug('out socket close');
-
-          this.write({
-            type: 'stream-end',
-          });
         });
       })
       .on('error', error => {
