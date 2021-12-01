@@ -1,11 +1,14 @@
 import * as Net from 'net';
 import * as TLS from 'tls';
 
+import Debug from 'debug';
 import _ from 'lodash';
 
 import {InOutPacket} from '../packets';
 
 import {Connection} from './connection';
+
+const debug = Debug('p2p:in:server');
 
 const CONNECTION_PING_PONG_TIMEOUT_DEFAULT = 1000;
 const CONNECTION_PING_PONG_INTERVAL_DEFAULT = 30_000;
@@ -187,17 +190,14 @@ export class Server {
   private async retrieveConnection(): Promise<Connection> {
     let connections = this.connections;
 
-    let connection =
-      connections.length > 0
-        ? connections.splice(_.random(connections.length - 1), 1)[0]
-        : undefined;
+    debug('retrieve connection, %d available', connections.length);
 
-    if (!connection) {
-      connection = await new Promise<Connection>(resolve => {
+    if (connections.length > 0) {
+      return connections.splice(_.random(connections.length - 1), 1)[0];
+    } else {
+      return new Promise<Connection>(resolve => {
         this.connectionResolvers.push(resolve);
       });
     }
-
-    return connection;
   }
 }

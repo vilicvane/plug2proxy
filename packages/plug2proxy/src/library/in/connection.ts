@@ -149,8 +149,6 @@ export class Connection extends StreamJet<
                   this.pause();
                 }
 
-                this.debug('pong received');
-
                 resolve();
               } else {
                 this.debug(
