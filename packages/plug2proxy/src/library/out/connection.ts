@@ -178,22 +178,18 @@ export class Connection extends StreamJet<
         pipeBufferStreamToJet(outSocket, this);
         pipeJetToBufferStream(this, outSocket);
 
-        outSocket.on('end', () => {
-          this.debug('out socket end');
-        });
-
         outSocket.on('close', () => {
           this.debug('out socket close');
+
+          this.write({
+            type: 'stream-end',
+          });
         });
       })
       .on('error', error => {
         this.debug('out socket error %e', error);
 
-        if (connectionEstablished) {
-          this.write({
-            type: 'stream-end',
-          });
-        } else {
+        if (!connectionEstablished) {
           this.write({
             type: 'connection-error',
           });
