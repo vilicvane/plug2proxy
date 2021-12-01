@@ -234,11 +234,11 @@ export class Proxy {
       })
       .on('close', () => {
         connection.debug('in socket closed %s', url);
-        server.returnConnection(connection);
         cleanUp();
       })
       .on('error', () => {
         connection.debug('in socket error %s', url);
+        cleanUp();
       });
 
     function cleanUp(): void {
