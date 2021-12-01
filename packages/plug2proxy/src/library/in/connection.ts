@@ -111,6 +111,7 @@ export class Connection extends StreamJet<
   ): Promise<void> {
     if (!this.writable) {
       this.debug('ping ignored');
+      return;
     }
 
     const server = this.server;

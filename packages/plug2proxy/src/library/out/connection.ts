@@ -78,10 +78,12 @@ export class Connection extends StreamJet<
     this.on('data', packet => {
       switch (packet.type) {
         case 'ping':
-          this.write({
-            type: 'pong',
-            timestamp: packet.timestamp,
-          });
+          if (this.writable) {
+            this.write({
+              type: 'pong',
+              timestamp: packet.timestamp,
+            });
+          }
 
           if (packet.span) {
             this.debug('set socket timeout %d', packet.span);
@@ -103,6 +105,7 @@ export class Connection extends StreamJet<
           break;
         case 'error':
           console.info('in-out connection error', packet.code);
+          this.remove();
           break;
         default:
           break;
