@@ -140,6 +140,11 @@ export class Server {
   }
 
   returnConnection(connection: Connection): void {
+    if (!connection.writable) {
+      connection.debug('tried to return a finished connection');
+      return;
+    }
+
     if (connection.idle) {
       connection.debug('tried to return an idle connection');
       return;

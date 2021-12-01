@@ -83,8 +83,13 @@ export class Connection extends StreamJet<
         this.debug('connection close');
         server.dropConnection(this);
       })
+      .on('end', () => {
+        this.debug('connection close');
+        server.dropConnection(this);
+      })
       .on('error', error => {
         this.debug('connection error %e', error);
+        server.dropConnection(this);
       });
   }
 
