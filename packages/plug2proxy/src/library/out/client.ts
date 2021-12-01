@@ -234,7 +234,7 @@ export class Client {
     );
 
     debug(
-      'active ',
+      'active %s',
       `[${activeConnections.map(connection => connection.id).join(',')}]`,
     );
   }
