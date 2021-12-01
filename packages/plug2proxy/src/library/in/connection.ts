@@ -84,7 +84,7 @@ export class Connection extends StreamJet<
         server.dropConnection(this);
       })
       .on('end', () => {
-        this.debug('connection close');
+        this.debug('connection ended');
         server.dropConnection(this);
       })
       .on('error', error => {
@@ -162,15 +162,15 @@ export class Connection extends StreamJet<
                 );
               }
             })
-            .once('close', resolve)
-            .once('error', reject);
+            .on('close', () =>
+              reject(new Error('Connection closed before ping/pong complete')),
+            )
+            .on('error', reject);
         }),
         server.connectionPingPongTimeout,
       );
     } catch (error) {
       this.debug('ping error %e', error);
-      server.dropConnection(this);
-
       return false;
     } finally {
       pingPongEventSession.end();

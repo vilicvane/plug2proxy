@@ -181,6 +181,10 @@ export class Connection extends StreamJet<
         pipeBufferStreamToJet(outSocket, this);
         pipeJetToBufferStream(this, outSocket);
 
+        outSocket.on('end', () => {
+          this.debug('out socket closed');
+        });
+
         outSocket.on('close', () => {
           this.debug('out socket closed');
         });
