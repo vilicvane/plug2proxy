@@ -169,10 +169,10 @@ export class Proxy {
                 break;
             }
           })
-          .once('error', reject)
-          .once('close', () =>
+          .on('close', () =>
             reject(new Error('Connection closed before establish')),
-          );
+          )
+          .on('error', reject);
       });
 
       connection.resume();
@@ -209,19 +209,14 @@ export class Proxy {
     pipeBufferStreamToJet(inSocket, connection);
     pipeJetToBufferStream(connection, inSocket);
 
-    inSocket.on('end', () => {
-      connection.debug('in socket ended %s', url);
-      server.returnConnection(connection);
-    });
-
-    inSocket.on('error', () => {
-      connection.debug('in socket error %s', url);
-      server.returnConnection(connection);
-    });
-
-    inSocket.on('close', () => {
-      connection.debug('in socket closed %s', url);
-    });
+    inSocket
+      .on('close', () => {
+        connection.debug('in socket closed %s', url);
+        server.returnConnection(connection);
+      })
+      .on('error', () => {
+        connection.debug('in socket error %s', url);
+      });
   }
 
   private directConnect(
@@ -427,10 +422,10 @@ export class Proxy {
                   break;
               }
             })
-            .once('error', reject)
-            .once('close', () =>
+            .on('close', () =>
               reject(new Error('Connection closed before "route-result"')),
-            );
+            )
+            .on('error', reject);
         });
 
         connection.resume();
@@ -510,10 +505,10 @@ export class Proxy {
                 break;
             }
           })
-          .once('error', reject)
-          .once('close', () =>
+          .on('close', () =>
             reject(new Error('Connection closed before response')),
-          );
+          )
+          .on('error', reject);
       });
 
       connection.resume();
