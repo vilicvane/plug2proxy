@@ -55,6 +55,8 @@ export function pipeJetToBufferStream(
 
   jet.pipe(transform).pipe(destination);
 
+  destination.on('end', cleanUp);
+  destination.on('error', cleanUp);
   destination.on('close', cleanUp);
 
   function cleanUp(): void {
@@ -107,9 +109,11 @@ export function pipeBufferStreamToJet(
 
     cleanedUp = true;
 
-    transform.push({
-      type: 'stream-end',
-    });
+    if (transform.writable) {
+      transform.push({
+        type: 'stream-end',
+      });
+    }
   }
 }
 

@@ -240,7 +240,7 @@ export class Proxy {
 
     inSocket
       .on('end', () => {
-        connection.debug('in socket closed %s', url);
+        connection.debug('in socket ended %s', url);
         cleanUp();
       })
       .on('close', () => {
