@@ -146,7 +146,10 @@ export class Client {
 
     idleConnectionSet.add(connection);
 
-    debug('returned idle connection to %s', connection.remoteAddress);
+    connection.debug(
+      'returned idle connection to %s',
+      connection.remoteAddress,
+    );
 
     this.debugStats();
   }
@@ -224,15 +227,15 @@ export class Client {
       pendingConnectionSet.size,
     );
 
-    for (let connection of connectionSet) {
-      if (
-        idleConnectionSet.has(connection) ||
-        pendingConnectionSet.has(connection)
-      ) {
-        continue;
-      }
+    let activeConnections = Array.from(connectionSet).filter(
+      connection =>
+        !idleConnectionSet.has(connection) &&
+        !pendingConnectionSet.has(connection),
+    );
 
-      // connection.debug('still active, last action %s', connection.lastAction);
-    }
+    debug(
+      'active ',
+      activeConnections.map(connection => connection.id).join(', '),
+    );
   }
 }

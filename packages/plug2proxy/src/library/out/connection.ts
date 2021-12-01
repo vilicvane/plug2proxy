@@ -28,7 +28,7 @@ export class Connection extends StreamJet<
   OutInPacket,
   TLS.TLSSocket
 > {
-  private id: string;
+  id: string;
 
   remoteAddress: string | undefined;
 
