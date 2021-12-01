@@ -22,6 +22,8 @@ export class Connection extends StreamJet<
   private _idle = true;
   private _authorized = false;
 
+  latency = Infinity;
+
   constructor(socket: Net.Socket, readonly server: Server) {
     super(socket);
 
@@ -143,6 +145,8 @@ export class Connection extends StreamJet<
                 if (toPause) {
                   this.pause();
                 }
+
+                this.latency = Date.now() - timestamp;
 
                 resolve();
               } else {

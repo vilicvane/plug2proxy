@@ -193,7 +193,7 @@ export class Server {
     debug('retrieve connection, %d available', connections.length);
 
     if (connections.length > 0) {
-      return connections.splice(_.random(connections.length - 1), 1)[0];
+      return _.minBy(connections, connection => connection.latency)!;
     } else {
       return new Promise<Connection>(resolve => {
         this.connectionResolvers.push(resolve);
