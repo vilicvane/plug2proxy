@@ -179,7 +179,7 @@ export class Connection extends StreamJet<
         pipeJetToBufferStream(this, outSocket);
 
         outSocket.on('close', () => {
-          this.debug('out socket close');
+          this.debug('out socket closed');
         });
       })
       .on('error', error => {

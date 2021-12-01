@@ -93,9 +93,15 @@ export class Proxy {
 
     let url = request.url!;
 
-    inSocket.on('error', error => {
-      debugConnect('in socket error %s %e', url, error);
-    });
+    let closed = false;
+
+    inSocket
+      .on('close', () => {
+        closed = true;
+      })
+      .on('error', error => {
+        debugConnect('in socket error %s %e', url, error);
+      });
 
     let [host, portString] = url.split(':');
 
@@ -124,7 +130,7 @@ export class Proxy {
     } catch (error) {
       debugConnect('failed to claim connection %e', error);
 
-      if (inSocket.writable) {
+      if (!closed) {
         writeHTTPHead(inSocket, 503, 'Service Unavailable', true);
       }
 
@@ -133,7 +139,7 @@ export class Proxy {
 
     connection.resume();
 
-    if (inSocket.destroyed) {
+    if (closed) {
       connection.debug('in socket closed before tunnelling %s:%s', host, port);
       server.returnConnection(connection);
       return;
@@ -184,7 +190,11 @@ export class Proxy {
 
       if (route === 'direct') {
         server.returnConnection(connection);
-        this.directConnect(options, inSocket);
+
+        if (!closed) {
+          this.directConnect(options, inSocket);
+        }
+
         return;
       }
     } catch (error) {
@@ -197,6 +207,7 @@ export class Proxy {
         );
 
         writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
+
         server.dropConnection(connection);
       } else {
         connection.debug('failed to established tunnel %s:%s', host, port);
@@ -212,7 +223,7 @@ export class Proxy {
       eventSession.end();
     }
 
-    if (inSocket.destroyed) {
+    if (closed) {
       connection.debug('in socket closed before tunnel established');
       server.returnConnection(connection);
       return;
@@ -256,10 +267,6 @@ export class Proxy {
     options: InOutConnectOptions,
     inSocket: Net.Socket,
   ): void {
-    if (!inSocket.writable) {
-      return;
-    }
-
     let {host, port} = options;
 
     debugConnect('direct connect %s:%d', host, port);
@@ -386,6 +393,12 @@ export class Proxy {
       return;
     }
 
+    let closed = false;
+
+    response.on('close', () => {
+      closed = true;
+    });
+
     let connection: Connection;
 
     if (route) {
@@ -394,7 +407,7 @@ export class Proxy {
       } catch (error) {
         debugRequest('failed to claim connection %e', error);
 
-        if (response.writable) {
+        if (!closed) {
           response.writeHead(503);
           response.end();
         }
@@ -414,7 +427,7 @@ export class Proxy {
       } catch (error) {
         debugRequest('failed to claim connection %e', error);
 
-        if (response.writable) {
+        if (!closed) {
           response.writeHead(503);
           response.end();
         }
@@ -424,7 +437,7 @@ export class Proxy {
 
       connection.resume();
 
-      if (request.destroyed) {
+      if (closed) {
         server.returnConnection(connection);
         return;
       }
@@ -469,7 +482,11 @@ export class Proxy {
 
         if (route === 'direct') {
           server.returnConnection(connection);
-          this.directRequest(options, request, response);
+
+          if (!closed) {
+            this.directRequest(options, request, response);
+          }
+
           return;
         }
       } catch (error) {
@@ -490,7 +507,7 @@ export class Proxy {
       }
     }
 
-    if (request.destroyed) {
+    if (closed) {
       server.returnConnection(connection);
       return;
     }
@@ -548,7 +565,7 @@ export class Proxy {
     } catch (error) {
       connection.debug('response error %e', error);
 
-      if (response.writable) {
+      if (!closed) {
         response.writeHead(500);
         response.end();
       }
@@ -560,7 +577,7 @@ export class Proxy {
       eventSession.end();
     }
 
-    if (response.destroyed) {
+    if (closed) {
       server.returnConnection(connection);
       return;
     }
@@ -580,10 +597,6 @@ export class Proxy {
     request: HTTP.IncomingMessage,
     response: HTTP.ServerResponse,
   ): void {
-    if (!response.writable) {
-      return;
-    }
-
     let {method} = options;
 
     debugRequest('direct request %s %s', method, url);
