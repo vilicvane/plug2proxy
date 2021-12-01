@@ -225,14 +225,31 @@ export class Proxy {
     pipeBufferStreamToJet(inSocket, connection);
     pipeJetToBufferStream(connection, inSocket);
 
+    let cleanedUp = false;
+
     inSocket
+      .on('end', () => {
+        connection.debug('in socket closed %s', url);
+        cleanUp();
+      })
       .on('close', () => {
         connection.debug('in socket closed %s', url);
         server.returnConnection(connection);
+        cleanUp();
       })
       .on('error', () => {
         connection.debug('in socket error %s', url);
       });
+
+    function cleanUp(): void {
+      if (cleanedUp) {
+        return;
+      }
+
+      cleanedUp = true;
+
+      server.returnConnection(connection);
+    }
   }
 
   private directConnect(

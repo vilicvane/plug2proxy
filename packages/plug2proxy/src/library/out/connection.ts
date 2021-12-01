@@ -302,6 +302,10 @@ export class Connection extends StreamJet<
   }
 
   private remove(): void {
+    if (this.stage === 'removed') {
+      return;
+    }
+
     this.stage = 'removed';
     this.client.removeConnection(this);
   }
