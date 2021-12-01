@@ -134,9 +134,12 @@ export class Proxy {
     connection.resume();
 
     if (inSocket.destroyed) {
+      connection.debug('in socket closed before tunnelling %s:%s', host, port);
       server.returnConnection(connection);
       return;
     }
+
+    connection.debug('start tunnel %s:%s', host, port);
 
     let eventSession = refEventEmitter(connection);
 
@@ -186,11 +189,21 @@ export class Proxy {
       }
     } catch (error) {
       if (error) {
+        connection.debug(
+          'failed to established tunnel %s:%s %e',
+          host,
+          port,
+          error,
+        );
+
         writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
         server.dropConnection(connection);
       } else {
+        connection.debug('failed to established tunnel %s:%s', host, port);
+
         // Return connection on "connection-error".
         writeHTTPHead(inSocket, 502, 'Bad Gateway', true);
+
         server.returnConnection(connection);
       }
 
@@ -200,9 +213,12 @@ export class Proxy {
     }
 
     if (inSocket.destroyed) {
+      connection.debug('in socket closed before tunnel established');
       server.returnConnection(connection);
       return;
     }
+
+    connection.debug('tunnel established %s:%s', host, port);
 
     writeHTTPHead(inSocket, 200, 'OK');
 
