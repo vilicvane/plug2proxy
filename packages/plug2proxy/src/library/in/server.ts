@@ -193,7 +193,11 @@ export class Server {
     debug('retrieve connection, %d available', connections.length);
 
     if (connections.length > 0) {
-      return _.minBy(connections, connection => connection.latency)!;
+      let connection = _.minBy(connections, connection => connection.latency)!;
+
+      _.pull(connections, connection);
+
+      return connection;
     } else {
       return new Promise<Connection>(resolve => {
         this.connectionResolvers.push(resolve);
