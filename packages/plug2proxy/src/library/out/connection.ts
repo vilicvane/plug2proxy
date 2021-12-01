@@ -210,7 +210,7 @@ export class Connection extends StreamJet<
     let request = HTTP.request(url, options, response => {
       let status = response.statusCode!;
 
-      this.debug('response %s %s %d', status);
+      this.debug('response %d', status);
 
       let headers: {[key: string]: string | string[]} = {};
 
