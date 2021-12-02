@@ -30,7 +30,9 @@ export class Connection extends StreamJet<
     socket.setTimeout(server.connectionPingPongInterval);
 
     socket.on('timeout', () => {
-      void this.ping();
+      if (this.idle) {
+        void this.ping();
+      }
     });
 
     this.on('data', packet => {
@@ -171,7 +173,6 @@ export class Connection extends StreamJet<
       );
     } catch (error) {
       this.debug('ping error %e', error);
-
       server.dropConnection(this);
 
       return false;

@@ -130,6 +130,11 @@ export class Client {
   }
 
   addIdleConnection(connection: Connection): void {
+    if (!this.connectionSet.has(connection)) {
+      connection.debug('tried to add a removed connection');
+      return;
+    }
+
     let idleConnectionSet = this.idleConnectionSet;
     let pendingConnectionSet = this.pendingConnectionSet;
 
@@ -142,6 +147,11 @@ export class Client {
   }
 
   returnIdleConnection(connection: Connection): void {
+    if (!this.connectionSet.has(connection)) {
+      connection.debug('tried to return a removed connection');
+      return;
+    }
+
     let idleConnectionSet = this.idleConnectionSet;
 
     idleConnectionSet.add(connection);

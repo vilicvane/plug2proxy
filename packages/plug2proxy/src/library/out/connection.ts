@@ -59,8 +59,10 @@ export class Connection extends StreamJet<
 
     socket
       .on('timeout', () => {
-        this.debug('socket timed out');
-        socket.end();
+        if (this.stage !== 'busy') {
+          this.debug('socket timed out');
+          socket.end();
+        }
       })
       .on('secureConnect', () => {
         this.remoteAddress = socket.remoteAddress;
