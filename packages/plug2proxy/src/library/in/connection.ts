@@ -171,6 +171,9 @@ export class Connection extends StreamJet<
       );
     } catch (error) {
       this.debug('ping error %e', error);
+
+      server.dropConnection(this);
+
       return false;
     } finally {
       pingPongEventSession.end();

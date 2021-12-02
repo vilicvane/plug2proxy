@@ -55,7 +55,6 @@ export class Connection extends StreamJet<
       client.connectionInitialPingTimeout,
     );
 
-    socket.setKeepAlive(true);
     socket.setTimeout(client.connectionInitialPingTimeout);
 
     socket
@@ -166,8 +165,6 @@ export class Connection extends StreamJet<
     this.debug('connecting %s:%d', host, port);
 
     let outSocket = Net.createConnection(options);
-
-    outSocket.setKeepAlive(true);
 
     let connectionEstablished = false;
 
