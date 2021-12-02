@@ -55,6 +55,7 @@ export function pipeJetToBufferStream(
 
   jet.pipe(transform).pipe(destination);
 
+  transform.on('error', cleanUp);
   destination.on('error', cleanUp);
   destination.on('end', cleanUp);
   destination.on('close', cleanUp);
@@ -99,6 +100,7 @@ export function pipeBufferStreamToJet(
 
   source.pipe(transform).pipe(jet as Writable, {end: false});
 
+  transform.on('error', cleanUp);
   source.on('error', cleanUp);
   source.on('end', cleanUp);
   source.on('close', cleanUp);
