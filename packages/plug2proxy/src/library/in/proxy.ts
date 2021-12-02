@@ -1,26 +1,13 @@
 import * as HTTP from 'http';
+import * as HTTP2 from 'http2';
 import * as Net from 'net';
 import * as OS from 'os';
 import {URL} from 'url';
 
-import Debug from 'debug';
-
-import {
-  HOP_BY_HOP_HEADERS_REGEX,
-  pipeBufferStreamToJet,
-  pipeJetToBufferStream,
-  writeHTTPHead,
-} from '../@common';
+import {HOP_BY_HOP_HEADERS_REGEX, writeHTTPHead} from '../@common';
 import {groupRawHeaders, refEventEmitter} from '../@utils';
-import {
-  InOutConnectOptions,
-  InOutRequestOptions,
-  OutInPacket,
-  OutInRequestResponsePacket,
-} from '../packets';
 import {InRoute} from '../types';
 
-import {Connection} from './connection';
 import {Server} from './server';
 
 const HOSTNAME = OS.hostname();
@@ -34,9 +21,6 @@ const {
 const VIA = `1.1 ${HOSTNAME} (${PACKAGE_NAME}/${PACKAGE_VERSION})`;
 
 const ROUTE_CACHE_EXPIRATION = 10 * 60_000;
-
-const debugConnect = Debug('p2p:in:proxy:connect');
-const debugRequest = Debug('p2p:in:proxy:request');
 
 export interface ProxyOptions {
   /**
@@ -66,7 +50,15 @@ export class Proxy {
     httpServer.on('connect', this.onHTTPServerConnect);
     httpServer.on('request', this.onHTTPServerRequest);
 
-    httpServer.listen(listenOptions);
+    httpServer.listen(listenOptions, () => {
+      let address = httpServer.address();
+
+      if (typeof address !== 'string') {
+        address = `${address?.address}:${address?.port}`;
+      }
+
+      console.info('proxy address:', address);
+    });
 
     this.httpServer = httpServer;
   }
@@ -91,204 +83,143 @@ export class Proxy {
   ): Promise<void> {
     const server = this.server;
 
-    let url = request.url!;
-
-    let closed = false;
-
     inSocket
       .on('close', () => {
-        closed = true;
+        console.debug('in socket "close":', url);
       })
-      .on('error', error => {
-        debugConnect('in socket error %s %e', url, error);
+      .on('error', (error: any) => {
+        console.error('in socket error:', url, error.code, error.message);
       });
+
+    let url = request.url!;
 
     let [host, portString] = url.split(':');
 
     let port = Number(portString) || 443;
 
-    let options: InOutConnectOptions = {
-      host,
-      port,
-    };
-
-    debugConnect('connect %s:%d', host, port);
+    console.info(`connect ${host}:${port}.`);
 
     if (this.getCachedRoute(host) === 'direct') {
-      return this.directConnect(options, inSocket);
-    }
-
-    let connection: Connection;
-
-    try {
-      connection = await server.claimConnection([
-        {
-          type: 'connect',
-          options,
-        },
-      ]);
-    } catch (error) {
-      debugConnect('failed to claim connection %e', error);
-
-      if (!closed) {
-        writeHTTPHead(inSocket, 503, 'Service Unavailable', true);
-      }
-
+      this.directConnect(host, port, inSocket);
       return;
     }
 
-    connection.resume();
+    let sessionStream = await server.getSessionStream();
 
-    if (closed) {
-      connection.debug('in socket closed before tunnelling %s:%s', host, port);
-      server.returnConnection(connection);
-      return;
-    }
+    let id = Proxy.getNextId();
 
-    connection.debug('start tunnel %s:%s', host, port);
+    let connectEventSession = refEventEmitter(server.http2SecureServer).on(
+      'stream',
+      (
+        outStream: HTTP2.ServerHttp2Stream,
+        headers: HTTP2.IncomingHttpHeaders,
+      ) => {
+        if (headers.id !== id) {
+          if (server.http2SecureServer.listenerCount('stream') === 1) {
+            console.error(
+              'received unexpected request:',
+              headers.type,
+              headers.id,
+            );
+          }
 
-    let eventSession = refEventEmitter(connection);
-
-    try {
-      let route = await new Promise<InRoute>((resolve, reject) => {
-        eventSession
-          .on('data', (packet: OutInPacket) => {
-            switch (packet.type) {
-              case 'connection-established':
-                connection.pause();
-                resolve('proxy');
-                break;
-              case 'connection-direct':
-                connection.pause();
-                resolve('direct');
-                break;
-              case 'connection-error':
-                reject();
-                break;
-              case 'pong':
-                break;
-              default:
-                reject(
-                  new Error(
-                    `Unexpected out-in packet, expecting "connection-established"/"connection-direct"/"connection-error", received ${JSON.stringify(
-                      packet.type,
-                    )}`,
-                  ),
-                );
-                break;
-            }
-          })
-          .on('close', () =>
-            reject(new Error('Connection closed before establish')),
-          )
-          .on('error', reject);
-      });
-
-      connection.resume();
-
-      this.setCachedRoute(host, route);
-
-      if (route === 'direct') {
-        server.returnConnection(connection);
-
-        if (!closed) {
-          this.directConnect(options, inSocket);
+          return;
         }
 
-        return;
-      }
-    } catch (error) {
-      if (error) {
-        connection.debug(
-          'failed to established tunnel %s:%s %e',
-          host,
-          port,
-          error,
-        );
+        outStream.respond();
 
-        writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
+        connectEventSession.end();
 
-        server.dropConnection(connection);
-      } else {
-        connection.debug('failed to established tunnel %s:%s', host, port);
+        if (headers.type === 'connect-direct') {
+          console.info(`routed ${host} to direct.`);
 
-        // Return connection on "connection-error".
-        writeHTTPHead(inSocket, 502, 'Bad Gateway', true);
+          this.setCachedRoute(host, 'direct');
+          this.directConnect(host, port, inSocket);
+          outStream.end();
+          return;
+        }
 
-        server.returnConnection(connection);
-      }
+        if (headers.type !== 'connect-ok') {
+          console.error('unexpected request type:', headers.type);
 
-      return;
-    } finally {
-      eventSession.end();
-    }
+          writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
+          outStream.end();
+          return;
+        }
 
-    if (closed) {
-      connection.debug('in socket closed before tunnel established');
-      server.returnConnection(connection);
-      return;
-    }
+        console.info(`connected ${host}:${port}.`);
 
-    connection.debug('tunnel established %s:%s', host, port);
+        writeHTTPHead(inSocket, 200, 'OK');
 
-    writeHTTPHead(inSocket, 200, 'OK');
+        inSocket.pipe(outStream);
+        outStream.pipe(inSocket);
 
-    pipeBufferStreamToJet(inSocket, connection);
-    pipeJetToBufferStream(connection, inSocket);
+        inSocket
+          .on('end', () => {
+            console.debug('in socket "end".');
+          })
+          .on('error', (error: any) => {
+            console.error('in socket error:', error.code, error.message);
+            outStream.end();
+          });
 
-    let cleanedUp = false;
+        outStream.on('error', (error: any) => {
+          console.error('out stream error:', error.code, error.message);
+          inSocket.end();
+        });
+      },
+    );
 
-    inSocket
-      .on('end', () => {
-        connection.debug('in socket ended %s', url);
-        cleanUp();
-      })
-      .on('close', () => {
-        connection.debug('in socket closed %s', url);
-        cleanUp();
-      })
-      .on('error', () => {
-        connection.debug('in socket error %s', url);
-        cleanUp();
-      });
+    sessionStream.pushStream(
+      {type: 'connect', id, host, port},
+      (error: any, pushStream) => {
+        if (error) {
+          console.error('connect error:', error.code, error.message);
 
-    function cleanUp(): void {
-      if (cleanedUp) {
-        return;
-      }
+          writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
+          connectEventSession.end();
 
-      cleanedUp = true;
+          return;
+        }
 
-      server.returnConnection(connection);
-    }
+        pushStream.end();
+      },
+    );
   }
 
   private directConnect(
-    options: InOutConnectOptions,
+    host: string,
+    port: number,
     inSocket: Net.Socket,
   ): void {
-    let {host, port} = options;
-
-    debugConnect('direct connect %s:%d', host, port);
+    console.info(`direct connect ${host}:${port}.`);
 
     let responded = false;
 
-    let outSocket = Net.createConnection(options);
+    let outSocket = Net.createConnection({host, port});
+
+    inSocket.pipe(outSocket);
+    outSocket.pipe(inSocket);
+
+    inSocket
+      .on('end', () => {
+        console.debug('in socket "end".');
+      })
+      .on('error', (error: any) => {
+        console.error('in socket error:', error.code, error.message);
+        outSocket.end();
+      });
 
     outSocket
       .on('connect', () => {
         writeHTTPHead(inSocket, 200, 'OK');
-
         responded = true;
-
-        outSocket.on('end', () => {
-          debugConnect('out socket to %s:%d ended', host, port);
-        });
       })
       .on('error', (error: any) => {
-        debugConnect('out socket to %s:%d error %e', host, port, error);
+        console.error('direct out socket error:', error.code, error.message);
 
         if (responded) {
+          inSocket.end();
           return;
         }
 
@@ -298,9 +229,6 @@ export class Proxy {
           writeHTTPHead(inSocket, 502, 'Bad Gateway', true);
         }
       });
-
-    inSocket.pipe(outSocket);
-    outSocket.pipe(inSocket);
   }
 
   private async request(
@@ -309,24 +237,20 @@ export class Proxy {
   ): Promise<void> {
     const server = this.server;
 
-    // proxy the request HTTP method
     let method = request.method!;
     let url = request.url!;
 
-    debugRequest('request %s %s', method, url);
+    console.info('request:', method, url);
 
-    let inSocket = request.socket;
-
-    let remoteAddress = inSocket.remoteAddress!;
+    let remoteAddress = request.socket.remoteAddress!;
 
     let parsedURL = new URL(url);
 
     if (parsedURL.protocol !== 'http:') {
-      debugRequest('unsupported protocol %s %s', method, url);
+      console.error('unsupported protocol:', url);
 
       // only "http://" is supported, "https://" should use CONNECT method
-      response.writeHead(400);
-      response.end();
+      response.writeHead(400).end();
       return;
     }
 
@@ -380,16 +304,14 @@ export class Proxy {
       headers.Via = VIA;
     }
 
-    let options = {method, url, headers};
-
     let host = new URL(url).hostname;
 
     let route = this.getCachedRoute(host);
 
-    debugRequest('route cache %s %s', route ?? '(none)', host);
+    console.info(`route cache ${host}:`, route ?? '(none)');
 
     if (route === 'direct') {
-      this.directRequest(options, request, response);
+      this.directRequest(method, url, headers, request, response);
       return;
     }
 
@@ -399,212 +321,174 @@ export class Proxy {
       closed = true;
     });
 
-    let connection: Connection;
+    let sessionStream = await server.getSessionStream();
 
-    if (route) {
-      try {
-        connection = await server.claimConnection();
-      } catch (error) {
-        debugRequest('failed to claim connection %e', error);
+    if (closed) {
+      console.info('request closed after getting session stream:', method, url);
+      return;
+    }
 
-        if (!closed) {
-          response.writeHead(503);
-          response.end();
-        }
+    let id = Proxy.getNextId();
 
-        return;
-      }
+    if (!route) {
+      let routeEventSession = refEventEmitter<InRoute, HTTP2.Http2SecureServer>(
+        server.http2SecureServer,
+      ).on(
+        'stream',
+        (
+          outStream: HTTP2.ServerHttp2Stream,
+          headers: HTTP2.IncomingHttpHeaders,
+        ) => {
+          if (headers.id !== id) {
+            if (server.http2SecureServer.listenerCount('stream') === 1) {
+              console.error(
+                'received unexpected request:',
+                headers.type,
+                headers.id,
+              );
+            }
 
-      connection.resume();
-    } else {
-      try {
-        connection = await server.claimConnection([
-          {
-            type: 'route',
-            host,
-          },
-        ]);
-      } catch (error) {
-        debugRequest('failed to claim connection %e', error);
+            return;
+          }
 
-        if (!closed) {
-          response.writeHead(503);
-          response.end();
-        }
+          outStream.respond();
+          outStream.end();
 
-        return;
-      }
+          if (headers.type !== 'route-result') {
+            console.error('unexpected request type:', headers.type);
+            response.writeHead(500).end();
+            return;
+          }
 
-      connection.resume();
+          routeEventSession.end(headers.route as InRoute);
+        },
+      );
+
+      sessionStream.pushStream(
+        {
+          id,
+          type: 'route',
+          host,
+        },
+        (error: any, pushStream) => {
+          if (error) {
+            console.warn('route error:', error.code, error.message);
+            return;
+          }
+
+          pushStream.end();
+        },
+      );
+
+      route = (await routeEventSession.endedPromise)!;
 
       if (closed) {
-        server.returnConnection(connection);
+        console.debug('request closed after getting routed.');
         return;
       }
+    }
 
-      connection.debug('wait for route result %s', host);
+    console.info('request via proxy:', method, url);
 
-      let eventSession = refEventEmitter(connection);
-
-      try {
-        let route = await new Promise<InRoute>((resolve, reject) => {
-          eventSession
-            .on('data', (packet: OutInPacket) => {
-              switch (packet.type) {
-                case 'route-result':
-                  connection.pause();
-                  resolve(packet.route);
-                  break;
-                case 'pong':
-                  break;
-                default:
-                  reject(
-                    new Error(
-                      `Unexpected out-in packet, expecting "route-result", received ${JSON.stringify(
-                        packet.type,
-                      )}`,
-                    ),
-                  );
-                  break;
-              }
-            })
-            .on('close', () =>
-              reject(new Error('Connection closed before "route-result"')),
-            )
-            .on('error', reject);
-        });
-
-        connection.resume();
-
-        connection.debug('routed %s %s', route, host);
-
-        this.setCachedRoute(host, route);
-
-        if (route === 'direct') {
-          server.returnConnection(connection);
-
-          if (!closed) {
-            this.directRequest(options, request, response);
+    let pushEventSession = refEventEmitter(server.http2SecureServer).on(
+      'stream',
+      (
+        outStream: HTTP2.ServerHttp2Stream,
+        outHeaders: HTTP2.IncomingHttpHeaders,
+      ) => {
+        if (outHeaders.id !== id) {
+          if (server.http2SecureServer.listenerCount('stream') === 1) {
+            console.error(
+              'received unexpected request:',
+              headers.type,
+              headers.id,
+            );
           }
 
           return;
         }
-      } catch (error) {
-        if (error) {
-          response.writeHead(500);
-          response.end();
-          server.dropConnection(connection);
-        } else {
-          // Return connection on "connection-error".
-          response.writeHead(502);
-          response.end();
-          server.returnConnection(connection);
+
+        pushEventSession.end();
+
+        if (outHeaders.type !== 'response-stream') {
+          console.error('unexpected request type:', headers.type);
+          response.writeHead(500).end();
+          outStream.end();
+          return;
         }
 
-        return;
-      } finally {
-        eventSession.end();
-      }
-    }
+        console.debug('received response:', url);
 
-    if (closed) {
-      server.returnConnection(connection);
-      return;
-    }
+        response.writeHead(
+          Number(outHeaders.status),
+          JSON.parse(outHeaders.headers as string),
+        );
 
-    connection.debug('requesting %s %s via proxy', method, url);
+        outStream.pipe(response);
 
-    connection.write({
-      type: 'request',
-      options,
-    });
-
-    request.on('error', error => {
-      connection.debug('request error %e', error);
-    });
-
-    request.on('end', () => {
-      connection.debug('request ended');
-    });
-
-    pipeBufferStreamToJet(request, connection);
-
-    let eventSession = refEventEmitter(connection);
-
-    let responsePacket: OutInRequestResponsePacket;
-
-    try {
-      responsePacket = await new Promise((resolve, reject) => {
-        eventSession
-          .on('data', packet => {
-            switch (packet.type) {
-              case 'request-response':
-                connection.pause();
-                resolve(packet);
-                break;
-              case 'pong':
-                break;
-              default:
-                reject(
-                  new Error(
-                    `Unexpected out-in packet, expecting "request-response", received ${JSON.stringify(
-                      packet.type,
-                    )}`,
-                  ),
-                );
-                break;
-            }
+        outStream
+          .on('end', () => {
+            console.debug('out stream "end".');
           })
-          .on('close', () =>
-            reject(new Error('Connection closed before response')),
-          )
-          .on('error', reject);
+          .on('error', () => {
+            // console.error log added below.
+            response.end();
+          });
+
+        response.on('error', (error: any) => {
+          console.error('response error:', error.code, error.message);
+          outStream.close();
+        });
+      },
+    );
+
+    let outStream: HTTP2.ServerHttp2Stream | undefined;
+
+    sessionStream.pushStream(
+      {type: 'request', id, method, url, headers: JSON.stringify(headers)},
+      (error, pushStream) => {
+        if (error) {
+          pushEventSession.end();
+          response.writeHead(500).end();
+          return;
+        }
+
+        outStream = pushStream;
+
+        outStream.respond();
+
+        request.pipe(outStream);
+
+        outStream.on('error', (error: any) => {
+          console.error('out stream error:', error.code, error.message);
+          request.destroy();
+        });
+      },
+    );
+
+    request
+      .on('end', () => {
+        console.debug('request "end".');
+      })
+      .on('error', (error: any) => {
+        console.error('request error:', error.code, error.message);
+        outStream?.end();
       });
-
-      connection.resume();
-    } catch (error) {
-      connection.debug('response error %e', error);
-
-      if (!closed) {
-        response.writeHead(500);
-        response.end();
-      }
-
-      server.dropConnection(connection);
-
-      return;
-    } finally {
-      eventSession.end();
-    }
-
-    if (closed) {
-      server.returnConnection(connection);
-      return;
-    }
-
-    response.writeHead(responsePacket.status, responsePacket.headers);
-
-    pipeJetToBufferStream(connection, response);
-
-    response.on('close', () => {
-      connection.debug('response close');
-      server.returnConnection(connection);
-    });
   }
 
   private directRequest(
-    {url, ...options}: InOutRequestOptions,
+    method: string,
+    url: string,
+    headers: HTTP.OutgoingHttpHeaders,
     request: HTTP.IncomingMessage,
     response: HTTP.ServerResponse,
   ): void {
-    let {method} = options;
+    console.info('direct request:', method, url);
 
-    debugRequest('direct request %s %s', method, url);
-
-    let proxyRequest = HTTP.request(url, options, proxyResponse => {
+    let proxyRequest = HTTP.request(url, {method, headers}, proxyResponse => {
       let status = proxyResponse.statusCode!;
 
-      debugRequest('direct request response %s %s %d', method, url, status);
+      console.info(`direct request response ${status}:`, method, url);
 
       let headers: {[key: string]: string | string[]} = {};
 
@@ -628,16 +512,31 @@ export class Proxy {
 
       proxyResponse.pipe(response);
 
-      proxyResponse.on('error', error => {
-        debugRequest('direct request response error %e', error);
+      proxyResponse
+        .on('end', () => {
+          console.debug('proxy response "end".');
+        })
+        .on('error', (error: any) => {
+          console.error('proxy response error:', error.code, error.message);
+          response.end();
+        });
+
+      response.on('error', (error: any) => {
+        console.error('response error:', error.code, error.message);
+        proxyResponse.destroy();
       });
     });
 
     request.pipe(proxyRequest);
 
-    request.on('close', () => {
-      debugRequest('direct request closed %s', url);
-    });
+    request
+      .on('end', () => {
+        console.debug('request "end".');
+      })
+      .on('error', (error: any) => {
+        console.error('request error:', error.code, error.message);
+        proxyRequest.end();
+      });
   }
 
   private getCachedRoute(host: string): InRoute | undefined {
@@ -656,5 +555,11 @@ export class Proxy {
 
   private setCachedRoute(host: string, route: InRoute): void {
     this.cachedRouteMap.set(host, [route, Date.now() + ROUTE_CACHE_EXPIRATION]);
+  }
+
+  static lastId = 0;
+
+  static getNextId(): string {
+    return (++this.lastId).toString();
   }
 }

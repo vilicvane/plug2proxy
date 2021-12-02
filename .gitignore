@@ -10,4 +10,6 @@ bld/
 # Temporary
 *.crt
 *.key
+*.pem
 *.p2p.js
+*.p2p-*.js

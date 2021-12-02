@@ -2,26 +2,37 @@ import {EventEmitter} from 'events';
 
 import {isTupleElementTypeOf} from './miscellaneous';
 
-export class EventSession<T extends EventEmitter = EventEmitter> {
-  private disposers: (() => void)[] = [];
+export class EventSession<
+  TEndValue = void,
+  TEventEmitter extends EventEmitter = EventEmitter,
+> {
+  private disposers: ((value: TEndValue | undefined) => void)[] = [];
 
   private _ended = false;
 
+  readonly endedPromise: Promise<TEndValue | undefined>;
+
+  private endedPromiseResolver!: (value: TEndValue | undefined) => void;
+
   constructor(
-    private _emitter?: T,
-    private _root?: EventSession,
+    private _emitter?: TEventEmitter,
+    private _root?: EventSession<TEndValue>,
     private endOnEventNames?: string[],
   ) {
     if (endOnEventNames) {
       this.endOn(endOnEventNames);
     }
+
+    this.endedPromise = new Promise(resolve => {
+      this.endedPromiseResolver = resolve;
+    });
   }
 
   get ended(): boolean {
     return this._ended;
   }
 
-  get emitter(): T {
+  get emitter(): TEventEmitter {
     let emitter = this._emitter;
 
     if (!emitter) {
@@ -31,16 +42,18 @@ export class EventSession<T extends EventEmitter = EventEmitter> {
     return emitter;
   }
 
-  get root(): EventSession {
+  get root(): EventSession<TEndValue> {
     return this._root ?? this;
   }
 
-  ref<T extends EventEmitter>(emitter: T): EventSession<T> {
+  ref<TEventEmitter extends EventEmitter>(
+    emitter: TEventEmitter,
+  ): EventSession<TEndValue, TEventEmitter> {
     this.assertNotEnded();
 
     let subSession = new EventSession(emitter, this.root, this.endOnEventNames);
 
-    this.disposers.push(() => subSession.end());
+    this.disposers.push(value => subSession.end(value));
 
     return subSession;
   }
@@ -113,7 +126,11 @@ export class EventSession<T extends EventEmitter = EventEmitter> {
     return this;
   }
 
-  end(): void {
+  end(value?: TEndValue): void {
+    if (this.ended) {
+      return;
+    }
+
     let root = this._root;
 
     if (root) {
@@ -124,10 +141,12 @@ export class EventSession<T extends EventEmitter = EventEmitter> {
     this._ended = true;
 
     for (let disposer of this.disposers) {
-      disposer();
+      disposer(value);
     }
 
     this.disposers.splice(0);
+
+    this.endedPromiseResolver(value);
   }
 
   endOn(eventNames: string | string[], listener?: () => boolean | void): this {
@@ -149,18 +168,26 @@ export class EventSession<T extends EventEmitter = EventEmitter> {
   }
 }
 
-export function refEventEmitter<T extends EventEmitter>(
-  emitter: T,
+export function refEventEmitter<TEndValue, TEventEmitter extends EventEmitter>(
+  emitter: TEventEmitter,
   endOnEventNames?: string | string[],
-): EventSession<T>;
-export function refEventEmitter<T extends EventEmitter, TReturn>(
-  emitter: T,
+): EventSession<TEndValue, TEventEmitter>;
+export function refEventEmitter<
+  TEndValue,
+  TEventEmitter extends EventEmitter,
+  TReturn,
+>(
+  emitter: TEventEmitter,
   endOnEventNames: string | string[],
-  callback: (session: EventSession<T>) => TReturn,
+  callback: (session: EventSession<TEndValue, TEventEmitter>) => TReturn,
 ): TReturn;
-export function refEventEmitter<T extends EventEmitter, TReturn>(
-  emitter: T,
-  callback: (session: EventSession<T>) => TReturn,
+export function refEventEmitter<
+  TEndValue,
+  TEventEmitter extends EventEmitter,
+  TReturn,
+>(
+  emitter: TEventEmitter,
+  callback: (session: EventSession<TEndValue, TEventEmitter>) => TReturn,
 ): TReturn;
 export function refEventEmitter(
   emitter: EventEmitter,

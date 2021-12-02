@@ -1,19 +1,7 @@
+import * as HTTP2 from 'http2';
 import * as Net from 'net';
-import * as TLS from 'tls';
 
-import Debug from 'debug';
 import _ from 'lodash';
-
-import {InOutPacket} from '../packets';
-
-import {Connection} from './connection';
-
-const debug = Debug('p2p:in:server');
-
-const CONNECTION_PING_PONG_TIMEOUT_DEFAULT = 1000;
-const CONNECTION_PING_PONG_INTERVAL_DEFAULT = 30_000;
-const CONNECTION_CLAIM_PING_DEFAULT = true;
-const CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT = 3;
 
 export interface ServerOptions {
   /**
@@ -31,7 +19,7 @@ export interface ServerOptions {
    */
   listen: Net.ListenOptions;
   /**
-   * TLS 选项，配置证书等。如：
+   * HTTP2 选项，配置证书等。如：
    *
    * ```json
    * {
@@ -39,168 +27,110 @@ export interface ServerOptions {
    *   "key": "-----BEGIN PRIVATE KEY-----\n[...]\n-----END PRIVATE KEY-----",
    * }
    * ```
+   *
+   * 如果使用 .js 配置文件，则可以直接使用 FS 模块证书。如：
+   *
+   * ```js
+   * {
+   *   cert: FS.readFileSync('localhost-cert.pem'),
+   *   key: FS.readFileSync('localhost-key.pem'),
+   * };
+   * ```
    */
-  tls: TLS.TlsOptions;
-  connection?: {
-    /**
-     * ping/pong 超时时间。
-     */
-    pingPongTimeout?: number;
-    /**
-     * ping/pong 间隔时间。
-     */
-    pingPongInterval?: number;
-    /**
-     * 是否在获取建立连接时进行一次 ping/pong。
-     */
-    claimPing?: boolean;
-    /**
-     * 建立连接时进行 ping/pong 的尝试次数，每次都会换一个连接。
-     */
-    claimPingAttempts?: number;
-  };
+  http2: HTTP2.ServerOptions;
 }
 
 export class Server {
-  private connections: Connection[] = [];
-  private connectionResolvers: ((connection: Connection) => void)[] = [];
+  private sessionStreams: HTTP2.ServerHttp2Stream[] = [];
+  private sessionStreamResolvers: ((
+    session: HTTP2.ServerHttp2Stream,
+  ) => void)[] = [];
 
   readonly password: string | undefined;
-  readonly connectionPingPongTimeout: number;
-  readonly connectionPingPongInterval: number;
-  readonly connectionClaimPing: boolean;
-  readonly connectionClaimPingAttempts: number;
 
-  readonly tlsServer: TLS.Server;
+  readonly http2SecureServer: HTTP2.Http2SecureServer;
 
   constructor({
     password,
     listen: listenOptions,
-    tls: tlsOptions,
-    connection: {
-      pingPongTimeout:
-        connectionPingPongTimeout = CONNECTION_PING_PONG_TIMEOUT_DEFAULT,
-      pingPongInterval:
-        connectionPingPongInterval = CONNECTION_PING_PONG_INTERVAL_DEFAULT,
-      claimPing: connectionClaimPing = CONNECTION_CLAIM_PING_DEFAULT,
-      claimPingAttempts:
-        connectionClaimPingAttempts = CONNECTION_CLAIM_PING_ATTEMPTS_DEFAULT,
-    } = {},
+    http2: http2Options,
   }: ServerOptions) {
     this.password = password;
-    this.connectionPingPongTimeout = connectionPingPongTimeout;
-    this.connectionPingPongInterval = connectionPingPongInterval;
-    this.connectionClaimPing = connectionClaimPing;
-    this.connectionClaimPingAttempts = connectionClaimPingAttempts;
 
-    let tlsServer = TLS.createServer(tlsOptions, socket => {
-      new Connection(socket, this);
-    });
+    let http2SecureServer = HTTP2.createSecureServer(http2Options);
 
-    tlsServer.listen(listenOptions);
-
-    this.tlsServer = tlsServer;
-  }
-
-  async claimConnection(packets: InOutPacket[] = []): Promise<Connection> {
-    if (this.connectionClaimPing) {
-      let attempts = this.connectionClaimPingAttempts;
-
-      for (let attempt = 0; attempt < attempts; attempt++) {
-        let connection = await this.retrieveConnection();
-
-        connection.setIdle(false);
-
-        let okay = await connection.ping(packets, undefined, true);
-
-        if (okay) {
-          connection.debug('connection claimed');
-          return connection;
-        } else {
-          connection.debug('claim ping failed (attempt %d)', attempt + 1);
+    http2SecureServer.on('stream', (stream, headers) => {
+      if (headers.type !== 'initialize') {
+        if (http2SecureServer.listenerCount('stream') === 1) {
+          console.error(
+            `received unexpected non-initialize request: ${headers.type}`,
+          );
         }
+
+        return;
       }
 
-      throw new Error(
-        `Failed to claim connection after ${attempts} attempt(s)`,
-      );
-    } else {
-      let connection = await this.retrieveConnection();
+      let remoteAddress = stream.session.socket.remoteAddress ?? '(unknown)';
 
-      connection.setIdle(false);
+      if (headers.password !== password) {
+        console.warn(
+          `authentication failed (remote ${remoteAddress}): wrong password`,
+        );
 
-      connection.pause();
-
-      for (let packet of packets) {
-        connection.write(packet);
+        stream.respond({
+          ':status': 403,
+          message: 'wrong password',
+        });
+        return;
       }
 
-      return connection;
-    }
-  }
+      console.info(`new session accepted (remote ${remoteAddress}).`);
 
-  returnConnection(connection: Connection): void {
-    if (!connection.writable) {
-      connection.debug('tried to return a finished connection');
-      return;
-    }
+      stream.respond({
+        ':status': 200,
+      });
 
-    if (connection.idle) {
-      connection.debug('tried to return an idle connection');
-      return;
-    }
+      stream.on('close', () => {
+        _.pull(this.sessionStreams, stream);
+        console.info(`session closed (remote ${remoteAddress}).`);
+      });
 
-    if (connection.isPaused()) {
-      connection.debug('trying to return a paused connection');
-      connection.resume();
-    }
+      let resolver = this.sessionStreamResolvers.shift();
 
-    connection.debug('return connection');
-
-    connection.write({
-      type: 'return',
+      if (resolver) {
+        resolver(stream);
+      } else {
+        this.sessionStreams.push(stream);
+      }
     });
 
-    connection.setIdle(true);
+    http2SecureServer.listen(listenOptions, () => {
+      let address = http2SecureServer.address();
 
-    // Mark connection idle but do not push it back.
-    // Wait for out-in `ready` to reach a mutual confirmation.
+      if (typeof address !== 'string') {
+        address = `${address?.address}:${address?.port}`;
+      }
+
+      console.info(`waiting for sessions on ${address}...`);
+    });
+
+    this.http2SecureServer = http2SecureServer;
   }
 
-  dropConnection(connection: Connection): void {
-    _.pull(this.connections, connection);
+  async getSessionStream(): Promise<HTTP2.ServerHttp2Stream> {
+    let streams = this.sessionStreams;
 
-    if (connection.writable) {
-      connection.end();
-    }
-  }
+    console.debug(`getting stream, ${streams.length} stream(s) available`);
 
-  pushConnection(connection: Connection): void {
-    let resolver = this.connectionResolvers.shift();
-
-    if (resolver) {
-      resolver(connection);
+    if (streams.length > 0) {
+      return _.sample(streams)!;
     } else {
-      this.connections.push(connection);
-    }
+      console.info(
+        'no session is currently available, waiting for new session...',
+      );
 
-    connection.debug('connection pushed');
-  }
-
-  private async retrieveConnection(): Promise<Connection> {
-    let connections = this.connections;
-
-    debug('retrieve connection, %d available', connections.length);
-
-    if (connections.length > 0) {
-      let connection = _.minBy(connections, connection => connection.latency)!;
-
-      _.pull(connections, connection);
-
-      return connection;
-    } else {
-      return new Promise<Connection>(resolve => {
-        this.connectionResolvers.push(resolve);
+      return new Promise(resolve => {
+        this.sessionStreamResolvers.push(resolve);
       });
     }
   }

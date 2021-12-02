@@ -38,7 +38,7 @@ module.exports = {
       // 这是给代理出口连的端口。
       port: 8001,
     },
-    tls: {
+    http2: {
       // 可使用 acme.sh 等工具生成。
       cert: FS.readFileSync('server.crt'),
       key: FS.readFileSync('server.key'),
@@ -87,8 +87,7 @@ module.exports = {
       password: '12345678',
       connect: {
         // 入口服务器连接参数。
-        host: 'example.com',
-        port: 8001,
+        authority: 'https://localhost:8001',
       },
     },
   ],
@@ -98,7 +97,6 @@ module.exports = {
 ## 路线图
 
 - P2P 连接。
-- 连接性能优化。
 
 ## 授权协议
 
