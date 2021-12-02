@@ -95,12 +95,10 @@ export class Server {
         console.info(`session closed (remote ${remoteAddress}).`);
       });
 
-      let resolver = this.sessionStreamResolvers.shift();
+      this.sessionStreams.push(stream);
 
-      if (resolver) {
+      for (let resolver of this.sessionStreamResolvers) {
         resolver(stream);
-      } else {
-        this.sessionStreams.push(stream);
       }
     });
 

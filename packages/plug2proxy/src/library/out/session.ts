@@ -26,15 +26,22 @@ export class Session {
       password: client.password,
     });
 
-    session.on('response', headers => {
-      let status = headers[':status'];
+    session
+      .on('response', headers => {
+        let status = headers[':status'];
 
-      if (status === 200) {
-        console.info('session ready.');
-      } else {
-        console.error(`session error (${status}):`, headers.message);
-      }
-    });
+        if (status === 200) {
+          console.info('session ready.');
+        } else {
+          console.error(
+            `session initialize error (${status}):`,
+            headers.message,
+          );
+        }
+      })
+      .on('error', (error: any) => {
+        console.error('session error:', error.code, error.message);
+      });
 
     http2Client
       .on('stream', (pushStream, headers) => {
