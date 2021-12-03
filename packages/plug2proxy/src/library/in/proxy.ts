@@ -138,9 +138,14 @@ export class Proxy {
           return;
         }
 
-        outConnectStream.respond();
-
         connectEventSession.end();
+
+        if (inSocket.destroyed) {
+          outConnectStream.close();
+          return;
+        }
+
+        outConnectStream.respond({});
 
         if (headers.type === 'connect-direct') {
           console.info(`routed ${host} to direct.`);
@@ -200,13 +205,16 @@ export class Proxy {
           return;
         }
 
-        if (inSocket.destroyed) {
-          console.debug('in socket destroyed while connecting.');
-          pushStream.close();
-          return;
-        }
+        pushStream.respond({});
 
-        pushStream.respond({}, {endStream: true});
+        if (inSocket.destroyed) {
+          console.error('in socket destroyed while creating push stream.');
+          pushStream.close();
+        } else {
+          inSocket.on('close', () => {
+            pushStream.close();
+          });
+        }
       },
     );
   }
@@ -421,12 +429,6 @@ export class Proxy {
           if (error) {
             console.warn('route error:', error.message);
             routeEventSession.end();
-            return;
-          }
-
-          if (inSocket.destroyed) {
-            console.debug('request/response socket destroyed while routing.');
-            pushStream.close();
             return;
           }
 

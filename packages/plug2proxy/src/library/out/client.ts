@@ -65,7 +65,7 @@ export class Client {
       console.debug(
         `  [${sessionId}:${stream.id ?? '-'}] ${stream.readable ? 'r' : '-'}${
           stream.writable ? 'w' : '-'
-        } ${type}: ${description}`,
+        } ${type === 'request' ? '>>>' : '<<<'} ${description}`,
       );
     }
   }, PRINT_ACTIVE_STREAMS_TIME_SPAN);

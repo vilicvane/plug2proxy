@@ -83,8 +83,6 @@ export class Session {
     pushStream: HTTP2.ClientHttp2Stream,
     {id, host, port}: HTTP2.IncomingHttpHeaders,
   ): Promise<void> {
-    pushStream.close();
-
     let client = this.client;
 
     console.info('connect:', `${host}:${port}`);
@@ -93,6 +91,11 @@ export class Session {
 
     try {
       route = await client.router.route(host!);
+
+      if (pushStream.closed) {
+        console.debug('connect push stream closed while routing:', host);
+        return;
+      }
     } catch (error: any) {
       console.error('route error:', error.message);
       route = 'direct';
@@ -113,40 +116,38 @@ export class Session {
 
     console.debug(`connecting ${host}:${port}...`);
 
-    let outSocket = Net.createConnection({host, port: Number(port)});
     let inStream: HTTP2.ClientHttp2Stream | undefined;
 
-    outSocket.on('connect', () => {
-      console.debug(`connected ${host}:${port}.`);
+    let outSocket = Net.createConnection({host, port: Number(port)})
+      .on('connect', () => {
+        console.debug(`connected ${host}:${port}.`);
 
-      inStream = this.requestServer(
-        `connect-ok ${host}:${port}`,
-        {
-          id,
-          type: 'connect-ok',
-        },
-        {
-          endStream: false,
-        },
-      );
+        inStream = this.requestServer(
+          `connect-ok ${host}:${port}`,
+          {
+            id,
+            type: 'connect-ok',
+          },
+          {
+            endStream: false,
+          },
+        );
 
-      outSocket.pipe(inStream);
-      inStream.pipe(outSocket);
+        inStream.pipe(outSocket);
+        outSocket.pipe(inStream);
 
-      inStream
-        .on('end', () => {
-          console.debug('in stream "end".');
-        })
-        .on('close', () => {
-          console.debug('in stream "close".');
-          outSocket.destroy();
-        })
-        .on('error', error => {
-          console.error('in stream error:', error.message);
-        });
-    });
-
-    outSocket
+        inStream
+          .on('end', () => {
+            console.debug('in stream "end".');
+          })
+          .on('close', () => {
+            console.debug('in stream "close".');
+            outSocket.destroy();
+          })
+          .on('error', error => {
+            console.error('in stream error:', error.message);
+          });
+      })
       .on('end', () => {
         console.debug('out socket "end".');
       })
@@ -160,6 +161,12 @@ export class Session {
       .on('error', error => {
         console.error('out socket error:', error.message);
       });
+
+    pushStream.on('close', () => {
+      console.debug('connect push stream "close":', host, inStream?.id);
+      inStream?.close();
+      outSocket.destroy();
+    });
   }
 
   private async request(
