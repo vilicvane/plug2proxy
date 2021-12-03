@@ -43,7 +43,17 @@ export class Client {
 
   readonly sessionCandidates: number;
 
-  private createSessionsDebouncePromise = Promise.resolve();
+  private createSessionScheduler = new BatchScheduler(() => {
+    let sessions = this.sessions;
+
+    sessions.push(new Session(this));
+
+    console.info(`new session created, ${sessions.length} in total.`);
+
+    if (sessions.length < this.sessionCandidates) {
+      this.createSession();
+    }
+  }, CREATE_SESSION_DEBOUNCE);
 
   private activeStreamEntrySet = new Set<ActiveStreamEntry>();
 
@@ -125,22 +135,7 @@ export class Client {
   }
 
   private createSession(): void {
-    this.createSessionsDebouncePromise =
-      this.createSessionsDebouncePromise.then(() => {
-        let sessions = this.sessions;
-
-        sessions.push(new Session(this));
-
-        console.info(`new session created, ${sessions.length} in total.`);
-
-        if (sessions.length < this.sessionCandidates) {
-          this.createSession();
-        }
-
-        return new Promise<void>(resolve =>
-          setTimeout(resolve, CREATE_SESSION_DEBOUNCE),
-        );
-      });
+    void this.createSessionScheduler.schedule();
   }
 }
 
