@@ -88,7 +88,7 @@ export class Proxy {
         console.debug('in socket "close":', url);
       })
       .on('error', (error: any) => {
-        console.error('in socket error:', url, error.code, error.message);
+        console.error('in socket error:', url, error.message);
       });
 
     let url = request.url!;
@@ -159,12 +159,12 @@ export class Proxy {
             console.debug('in socket "end".');
           })
           .on('error', (error: any) => {
-            console.error('in socket error:', error.code, error.message);
+            console.error('in socket error:', error.message);
             outStream.end();
           });
 
         outStream.on('error', (error: any) => {
-          console.error('out stream error:', error.code, error.message);
+          console.error('out stream error:', error.message);
           inSocket.end();
         });
       },
@@ -174,7 +174,7 @@ export class Proxy {
       {type: 'connect', id, host, port},
       (error: any, pushStream) => {
         if (error) {
-          console.error('connect error:', error.code, error.message);
+          console.error('connect error:', error.message);
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
           connectEventSession.end();
@@ -206,7 +206,7 @@ export class Proxy {
         console.debug('in socket "end".');
       })
       .on('error', (error: any) => {
-        console.error('in socket error:', error.code, error.message);
+        console.error('in socket error:', error.message);
         outSocket.end();
       });
 
@@ -216,7 +216,7 @@ export class Proxy {
         responded = true;
       })
       .on('error', (error: any) => {
-        console.error('direct out socket error:', error.code, error.message);
+        console.error('direct out socket error:', error.message);
 
         if (responded) {
           inSocket.end();
@@ -351,8 +351,7 @@ export class Proxy {
             return;
           }
 
-          outStream.respond();
-          outStream.end();
+          outStream.respond({}, {endStream: true});
 
           if (headers.type !== 'route-result') {
             console.error('unexpected request type:', headers.type);
@@ -373,7 +372,7 @@ export class Proxy {
         },
         (error: any, pushStream) => {
           if (error) {
-            console.warn('route error:', error.code, error.message);
+            console.warn('route error:', error.message);
             routeEventSession.end();
             return;
           }
@@ -402,6 +401,9 @@ export class Proxy {
 
     console.info('request via proxy:', method, url);
 
+    let outRequestStream: HTTP2.ServerHttp2Stream | undefined;
+    let outResponseStream: HTTP2.ServerHttp2Stream | undefined;
+
     let pushEventSession = refEventEmitter(server.http2SecureServer).on(
       'stream',
       (
@@ -420,12 +422,14 @@ export class Proxy {
           return;
         }
 
+        outResponseStream = outStream;
+
         pushEventSession.end();
 
         if (outHeaders.type !== 'response-stream') {
           console.error('unexpected request type:', headers.type);
           response.writeHead(500).end();
-          outStream.end();
+          outResponseStream.end();
           return;
         }
 
@@ -436,11 +440,11 @@ export class Proxy {
           JSON.parse(outHeaders.headers as string),
         );
 
-        outStream.pipe(response);
+        outResponseStream.pipe(response);
 
-        outStream
+        outResponseStream
           .on('end', () => {
-            console.debug('out stream "end".');
+            console.debug('out response stream "end".');
           })
           .on('error', () => {
             // console.error log added below.
@@ -448,13 +452,11 @@ export class Proxy {
           });
 
         response.on('error', (error: any) => {
-          console.error('response error:', error.code, error.message);
-          outStream.close();
+          console.error('response error:', error.message);
+          outResponseStream!.end();
         });
       },
     );
-
-    let outStream: HTTP2.ServerHttp2Stream | undefined;
 
     sessionStream.pushStream(
       {type: 'request', id, method, url, headers: JSON.stringify(headers)},
@@ -465,14 +467,14 @@ export class Proxy {
           return;
         }
 
-        outStream = pushStream;
+        outRequestStream = pushStream;
 
-        outStream.respond();
+        outRequestStream.respond();
 
-        request.pipe(outStream);
+        request.pipe(outRequestStream);
 
-        outStream.on('error', (error: any) => {
-          console.error('out stream error:', error.code, error.message);
+        outRequestStream.on('error', (error: any) => {
+          console.error('out stream error:', error.message);
           request.destroy();
         });
       },
@@ -483,8 +485,8 @@ export class Proxy {
         console.debug('request "end".');
       })
       .on('error', (error: any) => {
-        console.error('request error:', error.code, error.message);
-        outStream?.end();
+        console.error('request error:', error.message);
+        outRequestStream?.end();
       });
   }
 
@@ -529,12 +531,12 @@ export class Proxy {
           console.debug('proxy response "end".');
         })
         .on('error', (error: any) => {
-          console.error('proxy response error:', error.code, error.message);
+          console.error('proxy response error:', error.message);
           response.end();
         });
 
       response.on('error', (error: any) => {
-        console.error('response error:', error.code, error.message);
+        console.error('response error:', error.message);
         proxyResponse.destroy();
       });
     });
@@ -546,7 +548,7 @@ export class Proxy {
         console.debug('request "end".');
       })
       .on('error', (error: any) => {
-        console.error('request error:', error.code, error.message);
+        console.error('request error:', error.message);
         proxyRequest.end();
       });
   }

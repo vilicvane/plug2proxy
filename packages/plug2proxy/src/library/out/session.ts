@@ -21,12 +21,12 @@ export class Session {
       client.connectOptions,
     );
 
-    let session = http2Client.request({
+    let sessionStream = http2Client.request({
       type: 'initialize',
       password: client.password,
     });
 
-    session
+    sessionStream
       .on('response', headers => {
         let status = headers[':status'];
 
@@ -40,20 +40,21 @@ export class Session {
         }
       })
       .on('error', (error: any) => {
-        console.error('session error:', error.code, error.message);
+        console.error('session error:', error.message);
+        http2Client.destroy();
       });
 
     http2Client
       .on('stream', (pushStream, headers) => {
         switch (headers.type) {
           case 'connect':
-            void this.connect(headers);
+            void this.connect(pushStream, headers);
             break;
           case 'request':
-            void this.request(headers, pushStream);
+            void this.request(pushStream, headers);
             break;
           case 'route':
-            void this.route(headers);
+            void this.route(pushStream, headers);
             break;
           default:
             console.error('received unexpected push stream:', headers.type);
@@ -65,17 +66,19 @@ export class Session {
         client.removeSession(this);
       })
       .on('error', error => {
-        console.error('session error:', error.code, error.message);
+        console.error('session error:', error.message);
+        client.removeSession(this);
       });
 
     this.http2Client = http2Client;
   }
 
-  private async connect({
-    id,
-    host,
-    port,
-  }: HTTP2.IncomingHttpHeaders): Promise<void> {
+  private async connect(
+    pushStream: HTTP2.ClientHttp2Stream,
+    {id, host, port}: HTTP2.IncomingHttpHeaders,
+  ): Promise<void> {
+    pushStream.close();
+
     let client = this.client;
 
     console.info('connect:', `${host}:${port}`);
@@ -85,17 +88,25 @@ export class Session {
     try {
       route = await client.router.route(host!);
     } catch (error: any) {
-      console.error('route error:', error.code, error.message);
+      console.error('route error:', error.message);
       route = 'direct';
     }
 
     console.info(`connect routed ${host} to ${route}.`);
 
     if (route === 'direct') {
-      this.http2Client.request({
+      let stream = this.http2Client.request({
         id,
         type: 'connect-direct',
       });
+
+      stream
+        .on('end', () => {
+          console.debug('connect-direct stream "end".');
+        })
+        .on('error', error => {
+          console.error('connect-direct stream error:', error.message);
+        });
 
       return;
     }
@@ -126,8 +137,8 @@ export class Session {
           console.debug('in stream "close".');
         })
         .on('error', error => {
-          console.error('in stream error:', error.code, error.message);
-          outSocket.end();
+          console.error('in stream error:', error.message);
+          outSocket.destroy();
         });
     });
 
@@ -136,14 +147,14 @@ export class Session {
         console.debug('out socket "close".');
       })
       .on('error', (error: any) => {
-        console.error('out socket error:', error.code, error.message);
+        console.error('out socket error:', error.message);
         inStream?.close();
       });
   }
 
   private async request(
-    {id, method, url, headers: headersJSON}: HTTP2.IncomingHttpHeaders,
     requestStream: HTTP2.ClientHttp2Stream,
+    {id, method, url, headers: headersJSON}: HTTP2.IncomingHttpHeaders,
   ): Promise<void> {
     console.info('request:', method, url);
 
@@ -201,12 +212,12 @@ export class Session {
             console.debug('proxy response "end".');
           })
           .on('error', (error: any) => {
-            console.error('proxy response error:', error.code, error.message);
-            responseStream.end();
+            console.error('proxy response error:', error.message);
+            responseStream.close();
           });
 
         responseStream.on('error', error => {
-          console.error('response stream error:', error.code, error.message);
+          console.error('response stream error:', error.message);
           proxyResponse.destroy();
         });
       },
@@ -219,45 +230,69 @@ export class Session {
         console.debug('request stream "end".');
       })
       .on('error', (error: any) => {
-        console.error('request stream error:', error.code, error.message);
-        proxyRequest.end();
+        console.error('request stream error:', error.message);
+        proxyRequest.destroy();
       });
 
     proxyRequest.on('error', (error: any) => {
-      console.error('proxy request error:', error.code, error.message);
+      console.error('proxy request error:', error.message);
 
       if (responded) {
         return;
       }
 
+      let responseStream: HTTP2.ClientHttp2Stream;
+
       if (error.code === 'ENOTFOUND') {
-        this.http2Client.request({
+        responseStream = this.http2Client.request({
           id,
           type: 'response-stream',
           status: 404,
         });
       } else {
-        this.http2Client.request({
+        responseStream = this.http2Client.request({
           id,
           type: 'response-stream',
           status: 500,
         });
       }
+
+      responseStream
+        .on('end', () => {
+          console.debug('error response stream "end".');
+        })
+        .on('error', error => {
+          console.error('error response stream error:', error.message);
+        });
     });
   }
 
-  private async route({id, host}: HTTP2.IncomingHttpHeaders): Promise<void> {
+  private async route(
+    pushStream: HTTP2.ClientHttp2Stream,
+    {id, host}: HTTP2.IncomingHttpHeaders,
+  ): Promise<void> {
+    pushStream.close();
+
     console.info('route:', host);
 
     let sourceRoute = await this.client.router.route(host!);
+
     let route: InRoute = sourceRoute === 'direct' ? 'direct' : 'proxy';
 
     console.info(`route routed ${host} to ${route}.`);
 
-    this.http2Client.request({
+    let responseStream = this.http2Client.request({
       id,
       type: 'route-result',
       route,
     });
+
+    responseStream
+      .on('end', () => {
+        console.debug('route response stream "end".');
+      })
+      .on('error', error => {
+        console.error('route response stream error:', error.message);
+      });
   }
 }

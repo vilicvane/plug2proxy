@@ -64,7 +64,9 @@ export class Client {
   removeSession(session: Session): void {
     let sessions = this.sessions;
 
-    _.pull(sessions, session);
+    if (_.pull(sessions, session).length === 0) {
+      return;
+    }
 
     console.info(`removed a session, ${sessions.length} remains.`);
 

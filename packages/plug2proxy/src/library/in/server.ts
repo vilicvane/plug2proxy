@@ -77,10 +77,15 @@ export class Server {
           `authentication failed (remote ${remoteAddress}): wrong password`,
         );
 
-        stream.respond({
-          ':status': 403,
-          message: 'wrong password',
-        });
+        stream.respond(
+          {
+            ':status': 403,
+            message: 'wrong password',
+          },
+          {
+            endStream: true,
+          },
+        );
         return;
       }
 
