@@ -2,11 +2,14 @@ import * as HTTP2 from 'http2';
 
 import _ from 'lodash';
 
+import {BatchScheduler} from '../@utils';
 import {Router} from '../router';
 
 import {Session} from './session';
 
 const CREATE_SESSION_DEBOUNCE = 1_000;
+
+const PRINT_ACTIVE_STREAMS_TIME_SPAN = 5_000;
 
 const SESSION_CANDIDATES_DEFAULT = 1;
 
@@ -42,6 +45,21 @@ export class Client {
 
   private createSessionsDebouncePromise = Promise.resolve();
 
+  private activeStreamEntrySet = new Set<ActiveStreamEntry>();
+
+  private printActiveStreamsScheduler = new BatchScheduler(() => {
+    console.debug(`active streams of session:`);
+
+    for (let {type, description, session: sessionId, stream} of this
+      .activeStreamEntrySet) {
+      console.debug(
+        `  [${sessionId}:${stream.id ?? '-'}] ${stream.readable ? 'r' : '-'}${
+          stream.writable ? 'w' : '-'
+        } ${type}: ${description}`,
+      );
+    }
+  }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
+
   constructor(readonly router: Router, readonly options: ClientOptions) {
     let {
       password,
@@ -73,6 +91,39 @@ export class Client {
     this.createSession();
   }
 
+  addActiveStream(
+    type: 'request' | 'push',
+    description: string,
+    sessionId: number,
+    stream: HTTP2.ClientHttp2Stream,
+  ): void {
+    let activeStreamEntrySet = this.activeStreamEntrySet;
+
+    let entry: ActiveStreamEntry = {
+      type,
+      description,
+      session: sessionId,
+      stream,
+    };
+
+    activeStreamEntrySet.add(entry);
+
+    stream
+      .on('ready', () => {
+        void this.printActiveStreamsScheduler.schedule();
+      })
+      .on('close', () => {
+        activeStreamEntrySet.delete(entry);
+        void this.printActiveStreamsScheduler.schedule();
+      })
+      .on('error', () => {
+        activeStreamEntrySet.delete(entry);
+        void this.printActiveStreamsScheduler.schedule();
+      });
+
+    void this.printActiveStreamsScheduler.schedule();
+  }
+
   private createSession(): void {
     this.createSessionsDebouncePromise =
       this.createSessionsDebouncePromise.then(() => {
@@ -91,4 +142,11 @@ export class Client {
         );
       });
   }
+}
+
+interface ActiveStreamEntry {
+  type: 'request' | 'push';
+  description: string;
+  session: number;
+  stream: HTTP2.ClientHttp2Stream;
 }

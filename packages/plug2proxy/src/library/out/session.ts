@@ -3,31 +3,17 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 
 import {HOP_BY_HOP_HEADERS_REGEX} from '../@common';
-import {BatchScheduler, groupRawHeaders} from '../@utils';
+import {groupRawHeaders} from '../@utils';
 import {InRoute} from '../types';
 
 import {Client} from './client';
 
-const PRINT_ACTIVE_STREAMS_TIME_SPAN = 5_000;
-
 export class Session {
+  private id = ++Session.lastId;
+
   remoteAddress: string | undefined;
 
   private http2Client: HTTP2.ClientHttp2Session;
-
-  private activeStreamEntrySet = new Set<ActiveStreamEntry>();
-
-  private printActiveStreamsScheduler = new BatchScheduler(() => {
-    console.debug('active streams:');
-
-    for (let {type, description, stream} of this.activeStreamEntrySet) {
-      console.debug(
-        `  [${stream.id ?? '-'}] ${stream.readable ? 'r' : '-'}${
-          stream.writable ? 'w' : '-'
-        } ${type}: ${description}`,
-      );
-    }
-  }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
 
   constructor(readonly client: Client) {
     console.info('initializing session...');
@@ -163,6 +149,10 @@ export class Session {
           console.error('in stream error:', error.message);
           outSocket.destroy();
         });
+
+      if (outSocket.readableEnded) {
+        inStream.end();
+      }
     });
 
     outSocket
@@ -182,7 +172,12 @@ export class Session {
   ): Promise<void> {
     console.info('request:', method, url);
 
-    this.addActiveStream('push', `request ${method} ${url}`, requestStream);
+    this.client.addActiveStream(
+      'push',
+      `request ${method} ${url}`,
+      this.id,
+      requestStream,
+    );
 
     let headers = JSON.parse(headersJSON as string);
 
@@ -330,45 +325,10 @@ export class Session {
   ): HTTP2.ClientHttp2Stream {
     let stream = this.http2Client.request(headers, options);
 
-    this.addActiveStream('request', description, stream);
+    this.client.addActiveStream('request', description, this.id, stream);
 
     return stream;
   }
 
-  private addActiveStream(
-    type: 'request' | 'push',
-    description: string,
-    stream: HTTP2.ClientHttp2Stream,
-  ): void {
-    let activeStreamEntrySet = this.activeStreamEntrySet;
-
-    let entry: ActiveStreamEntry = {
-      type,
-      description,
-      stream,
-    };
-
-    activeStreamEntrySet.add(entry);
-
-    stream
-      .on('ready', () => {
-        void this.printActiveStreamsScheduler.schedule();
-      })
-      .on('close', () => {
-        activeStreamEntrySet.delete(entry);
-        void this.printActiveStreamsScheduler.schedule();
-      })
-      .on('error', () => {
-        activeStreamEntrySet.delete(entry);
-        void this.printActiveStreamsScheduler.schedule();
-      });
-
-    void this.printActiveStreamsScheduler.schedule();
-  }
-}
-
-interface ActiveStreamEntry {
-  type: 'request' | 'push';
-  description: string;
-  stream: HTTP2.ClientHttp2Stream;
+  private static lastId = 0;
 }
