@@ -92,9 +92,13 @@ export class Client {
   removeSession(session: Session): void {
     let sessions = this.sessions;
 
-    if (_.pull(sessions, session).length === 0) {
+    let index = sessions.indexOf(session);
+
+    if (index < 0) {
       return;
     }
+
+    sessions.splice(index, 1);
 
     console.info(`removed a session, ${sessions.length} remains.`);
 
