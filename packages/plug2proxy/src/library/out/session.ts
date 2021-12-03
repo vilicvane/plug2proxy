@@ -152,8 +152,8 @@ export class Session {
         },
       );
 
-      inStream.pipe(outSocket);
       outSocket.pipe(inStream);
+      inStream.pipe(outSocket);
 
       inStream
         .on('close', () => {
@@ -168,6 +168,7 @@ export class Session {
     outSocket
       .on('close', () => {
         console.debug('out socket "close".');
+        inStream?.close();
       })
       .on('error', (error: any) => {
         console.error('out socket error:', error.message);
