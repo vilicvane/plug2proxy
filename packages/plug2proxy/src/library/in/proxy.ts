@@ -445,6 +445,7 @@ export class Proxy {
         outResponseStream
           .on('end', () => {
             console.debug('out response stream "end".');
+            outResponseStream!.close();
           })
           .on('error', () => {
             // console.error log added below.

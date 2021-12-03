@@ -60,10 +60,10 @@ export class Server {
     let http2SecureServer = HTTP2.createSecureServer(http2Options);
 
     http2SecureServer.on('stream', (stream, headers) => {
-      if (headers.type !== 'initialize') {
+      if (headers.type !== 'session') {
         if (http2SecureServer.listenerCount('stream') === 1) {
           console.error(
-            `received unexpected non-initialize request: ${headers.type}`,
+            `received unexpected non-session request: ${headers.type}`,
           );
         }
 

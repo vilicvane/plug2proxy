@@ -3,15 +3,31 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 
 import {HOP_BY_HOP_HEADERS_REGEX} from '../@common';
-import {groupRawHeaders} from '../@utils';
+import {BatchScheduler, groupRawHeaders} from '../@utils';
 import {InRoute} from '../types';
 
 import {Client} from './client';
+
+const PRINT_ACTIVE_STREAMS_TIME_SPAN = 5_000;
 
 export class Session {
   remoteAddress: string | undefined;
 
   private http2Client: HTTP2.ClientHttp2Session;
+
+  private activeStreamEntrySet = new Set<ActiveStreamEntry>();
+
+  private printActiveStreamsScheduler = new BatchScheduler(() => {
+    console.debug('active streams:');
+
+    for (let {type, description, stream} of this.activeStreamEntrySet) {
+      console.debug(
+        `  [${stream.id ?? '-'}] ${stream.readable ? 'r' : '-'}${
+          stream.writable ? 'w' : '-'
+        } ${type}: ${description}`,
+      );
+    }
+  }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
 
   constructor(readonly client: Client) {
     console.info('initializing session...');
@@ -20,29 +36,6 @@ export class Session {
       client.connectAuthority,
       client.connectOptions,
     );
-
-    let sessionStream = http2Client.request({
-      type: 'initialize',
-      password: client.password,
-    });
-
-    sessionStream
-      .on('response', headers => {
-        let status = headers[':status'];
-
-        if (status === 200) {
-          console.info('session ready.');
-        } else {
-          console.error(
-            `session initialize error (${status}):`,
-            headers.message,
-          );
-        }
-      })
-      .on('error', (error: any) => {
-        console.error('session error:', error.message);
-        http2Client.destroy();
-      });
 
     http2Client
       .on('stream', (pushStream, headers) => {
@@ -71,6 +64,35 @@ export class Session {
       });
 
     this.http2Client = http2Client;
+
+    let sessionStream = this.requestServer(
+      'session',
+      {
+        type: 'session',
+        password: client.password,
+      },
+      {
+        endStream: false,
+      },
+    );
+
+    sessionStream
+      .on('response', headers => {
+        let status = headers[':status'];
+
+        if (status === 200) {
+          console.info('session ready.');
+        } else {
+          console.error(
+            `session initialize error (${status}):`,
+            headers.message,
+          );
+        }
+      })
+      .on('error', (error: any) => {
+        console.error('session error:', error.message);
+        http2Client.destroy();
+      });
   }
 
   private async connect(
@@ -95,7 +117,7 @@ export class Session {
     console.info(`connect routed ${host} to ${route}.`);
 
     if (route === 'direct') {
-      let stream = this.http2Client.request({
+      let stream = this.requestServer(`connect-direct ${host}`, {
         id,
         type: 'connect-direct',
       });
@@ -119,7 +141,8 @@ export class Session {
     outSocket.on('connect', () => {
       console.debug(`connected ${host}:${port}.`);
 
-      inStream = this.http2Client.request(
+      inStream = this.requestServer(
+        `connect-ok ${host}:${port}`,
         {
           id,
           type: 'connect-ok',
@@ -158,6 +181,8 @@ export class Session {
   ): Promise<void> {
     console.info('request:', method, url);
 
+    this.addActiveStream('push', `request ${method} ${url}`, requestStream);
+
     let headers = JSON.parse(headersJSON as string);
 
     let responded = false;
@@ -191,7 +216,8 @@ export class Session {
           }
         }
 
-        let responseStream = this.http2Client.request(
+        let responseStream = this.requestServer(
+          `response-stream ${url}`,
           {
             id,
             type: 'response-stream',
@@ -244,13 +270,13 @@ export class Session {
       let responseStream: HTTP2.ClientHttp2Stream;
 
       if (error.code === 'ENOTFOUND') {
-        responseStream = this.http2Client.request({
+        responseStream = this.requestServer(`response-stream (404) ${url}`, {
           id,
           type: 'response-stream',
           status: 404,
         });
       } else {
-        responseStream = this.http2Client.request({
+        responseStream = this.requestServer(`response-stream (500) ${url}`, {
           id,
           type: 'response-stream',
           status: 500,
@@ -281,7 +307,7 @@ export class Session {
 
     console.info(`route routed ${host} to ${route}.`);
 
-    let responseStream = this.http2Client.request({
+    let responseStream = this.requestServer(`route-result ${host}`, {
       id,
       type: 'route-result',
       route,
@@ -295,4 +321,53 @@ export class Session {
         console.error('route response stream error:', error.message);
       });
   }
+
+  private requestServer(
+    description: string,
+    headers: HTTP2.OutgoingHttpHeaders,
+    options?: HTTP2.ClientSessionRequestOptions,
+  ): HTTP2.ClientHttp2Stream {
+    let stream = this.http2Client.request(headers, options);
+
+    this.addActiveStream('request', description, stream);
+
+    return stream;
+  }
+
+  private addActiveStream(
+    type: 'request' | 'push',
+    description: string,
+    stream: HTTP2.ClientHttp2Stream,
+  ): void {
+    let activeStreamEntrySet = this.activeStreamEntrySet;
+
+    let entry: ActiveStreamEntry = {
+      type,
+      description,
+      stream,
+    };
+
+    activeStreamEntrySet.add(entry);
+
+    stream
+      .on('ready', () => {
+        void this.printActiveStreamsScheduler.schedule();
+      })
+      .on('close', () => {
+        activeStreamEntrySet.delete(entry);
+        void this.printActiveStreamsScheduler.schedule();
+      })
+      .on('error', () => {
+        activeStreamEntrySet.delete(entry);
+        void this.printActiveStreamsScheduler.schedule();
+      });
+
+    void this.printActiveStreamsScheduler.schedule();
+  }
+}
+
+interface ActiveStreamEntry {
+  type: 'request' | 'push';
+  description: string;
+  stream: HTTP2.ClientHttp2Stream;
 }
