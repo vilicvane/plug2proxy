@@ -149,13 +149,16 @@ export class Session {
           console.error('in stream error:', error.message);
           outSocket.destroy();
         });
-
-      if (outSocket.readableEnded) {
-        inStream.end();
-      }
     });
 
     outSocket
+      // OutSocket is a Duplex and in some case (e.g., some speed test
+      // connection) it keeps open after the source ends. So we need to close
+      // the source stream once writes finish.
+      .on('finish', () => {
+        console.debug('out socket "finish".');
+        inStream?.close();
+      })
       .on('close', () => {
         console.debug('out socket "close".');
         inStream?.close();

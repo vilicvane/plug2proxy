@@ -424,12 +424,14 @@ export class Proxy {
 
         outResponseStream = outStream;
 
+        // We don't need to write anything to it.
+        outResponseStream.end();
+
         pushEventSession.end();
 
         if (outHeaders.type !== 'response-stream') {
           console.error('unexpected request type:', headers.type);
           response.writeHead(500).end();
-          outResponseStream.end();
           return;
         }
 
@@ -454,7 +456,6 @@ export class Proxy {
 
         response.on('error', (error: any) => {
           console.error('response error:', error.message);
-          outResponseStream!.end();
         });
       },
     );
