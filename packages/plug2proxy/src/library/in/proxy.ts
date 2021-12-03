@@ -308,7 +308,7 @@ export class Proxy {
 
     let route = this.getCachedRoute(host);
 
-    console.info(`route cache ${host}:`, route ?? '(none)');
+    console.info(`route cached ${host}:`, route ?? '(none)');
 
     if (route === 'direct') {
       this.directRequest(method, url, headers, request, response);
@@ -357,6 +357,7 @@ export class Proxy {
           if (headers.type !== 'route-result') {
             console.error('unexpected request type:', headers.type);
             response.writeHead(500).end();
+            routeEventSession.end();
             return;
           }
 
@@ -373,6 +374,7 @@ export class Proxy {
         (error: any, pushStream) => {
           if (error) {
             console.warn('route error:', error.code, error.message);
+            routeEventSession.end();
             return;
           }
 
@@ -386,6 +388,16 @@ export class Proxy {
         console.debug('request closed after getting routed.');
         return;
       }
+    }
+
+    if (route) {
+      console.info(`route routed ${host}:`, route ?? '(none)');
+      this.setCachedRoute(host, route);
+    }
+
+    if (route !== 'proxy') {
+      this.directRequest(method, url, headers, request, response);
+      return;
     }
 
     console.info('request via proxy:', method, url);
