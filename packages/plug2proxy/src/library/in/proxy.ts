@@ -4,7 +4,11 @@ import * as Net from 'net';
 import * as OS from 'os';
 import {URL} from 'url';
 
-import {HOP_BY_HOP_HEADERS_REGEX, writeHTTPHead} from '../@common';
+import {
+  HOP_BY_HOP_HEADERS_REGEX,
+  destroyOnDrain,
+  writeHTTPHead,
+} from '../@common';
 import {groupRawHeaders, refEventEmitter} from '../@utils';
 import {InRoute} from '../types';
 
@@ -84,10 +88,13 @@ export class Proxy {
     const server = this.server;
 
     inSocket
+      .on('end', () => {
+        console.debug('in socket "end":', url);
+      })
       .on('close', () => {
         console.debug('in socket "close":', url);
       })
-      .on('error', (error: any) => {
+      .on('error', error => {
         console.error('in socket error:', url, error.message);
       });
 
@@ -106,12 +113,17 @@ export class Proxy {
 
     let sessionStream = await server.getSessionStream();
 
+    if (inSocket.destroyed) {
+      console.info('in socket closed before session stream acquired.');
+      return;
+    }
+
     let id = Proxy.getNextId();
 
     let connectEventSession = refEventEmitter(server.http2SecureServer).on(
       'stream',
       (
-        outStream: HTTP2.ServerHttp2Stream,
+        outConnectStream: HTTP2.ServerHttp2Stream,
         headers: HTTP2.IncomingHttpHeaders,
       ) => {
         if (headers.id !== id) {
@@ -126,7 +138,7 @@ export class Proxy {
           return;
         }
 
-        outStream.respond();
+        outConnectStream.respond();
 
         connectEventSession.end();
 
@@ -135,7 +147,8 @@ export class Proxy {
 
           this.setCachedRoute(host, 'direct');
           this.directConnect(host, port, inSocket);
-          outStream.end();
+
+          outConnectStream.end();
           return;
         }
 
@@ -143,7 +156,8 @@ export class Proxy {
           console.error('unexpected request type:', headers.type);
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
-          outStream.end();
+
+          outConnectStream.close();
           return;
         }
 
@@ -151,38 +165,48 @@ export class Proxy {
 
         writeHTTPHead(inSocket, 200, 'OK');
 
-        inSocket.pipe(outStream);
-        outStream.pipe(inSocket);
+        inSocket.pipe(outConnectStream);
+        outConnectStream.pipe(inSocket);
 
-        inSocket
-          .on('end', () => {
-            console.debug('in socket "end".');
-          })
-          .on('error', (error: any) => {
-            console.error('in socket error:', error.message);
-            outStream.end();
-          });
-
-        outStream.on('error', (error: any) => {
-          console.error('out stream error:', error.message);
-          inSocket.end();
+        // Debugging messages has already been added at the beginning of
+        // `connect()`.
+        inSocket.on('close', () => {
+          outConnectStream.close();
         });
+
+        outConnectStream
+          .on('end', () => {
+            console.debug('out stream "end".');
+          })
+          .on('close', () => {
+            console.debug('out stream "close".');
+            destroyOnDrain(inSocket);
+          })
+          .on('error', error => {
+            console.error('out stream error:', error.message);
+          });
       },
     );
 
     sessionStream.pushStream(
       {type: 'connect', id, host, port},
-      (error: any, pushStream) => {
+      (error, pushStream) => {
         if (error) {
           console.error('connect error:', error.message);
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
-          connectEventSession.end();
 
+          connectEventSession.end();
           return;
         }
 
-        pushStream.end();
+        if (inSocket.destroyed) {
+          console.debug('in socket destroyed while connecting.');
+          pushStream.close();
+          return;
+        }
+
+        pushStream.respond({}, {endStream: true});
       },
     );
   }
@@ -201,29 +225,36 @@ export class Proxy {
     inSocket.pipe(outSocket);
     outSocket.pipe(inSocket);
 
-    inSocket
-      .on('end', () => {
-        console.debug('in socket "end".');
-      })
-      .on('error', (error: any) => {
-        console.error('in socket error:', error.message);
-        outSocket.end();
-      });
+    // Debugging messages has already been added at the beginning of
+    // `connect()`.
+    inSocket.on('close', () => {
+      outSocket.destroy();
+    });
 
     outSocket
       .on('connect', () => {
         writeHTTPHead(inSocket, 200, 'OK');
         responded = true;
       })
-      .on('error', (error: any) => {
+      .on('end', () => {
+        console.debug('out socket "end".');
+      })
+      .on('close', () => {
+        console.debug('out socket "close".');
+        destroyOnDrain(inSocket);
+
+        // Close means it has been connected, thus must has been responded.
+      })
+      .on('error', error => {
         console.error('direct out socket error:', error.message);
 
         if (responded) {
-          inSocket.end();
           return;
         }
 
-        if (error.code === 'ENOTFOUND') {
+        responded = true;
+
+        if (error && (error as any).code === 'ENOTFOUND') {
           writeHTTPHead(inSocket, 404, 'Not Found', true);
         } else {
           writeHTTPHead(inSocket, 502, 'Bad Gateway', true);
@@ -241,6 +272,24 @@ export class Proxy {
     let url = request.url!;
 
     console.info('request:', method, url);
+
+    let inSocket = request.socket;
+
+    request.socket.on('close', () => {
+      console.debug('request/response socket "close".');
+    });
+
+    request
+      .on('end', () => {
+        console.debug('request "end".');
+      })
+      .on('error', error => {
+        console.error('request error:', error.message);
+      });
+
+    response.on('error', error => {
+      console.error('response error:', error.message);
+    });
 
     let remoteAddress = request.socket.remoteAddress!;
 
@@ -315,16 +364,14 @@ export class Proxy {
       return;
     }
 
-    let closed = false;
-
-    response.on('close', () => {
-      closed = true;
-    });
-
     let sessionStream = await server.getSessionStream();
 
-    if (closed) {
-      console.info('request closed after getting session stream:', method, url);
+    if (inSocket.destroyed) {
+      console.info(
+        'request/response socket destroyed while getting session stream:',
+        method,
+        url,
+      );
       return;
     }
 
@@ -370,21 +417,27 @@ export class Proxy {
           type: 'route',
           host,
         },
-        (error: any, pushStream) => {
+        (error, pushStream) => {
           if (error) {
             console.warn('route error:', error.message);
             routeEventSession.end();
             return;
           }
 
-          pushStream.end();
+          if (inSocket.destroyed) {
+            console.debug('request/response socket destroyed while routing.');
+            pushStream.close();
+            return;
+          }
+
+          pushStream.respond({}, {endStream: true});
         },
       );
 
       route = (await routeEventSession.endedPromise)!;
 
-      if (closed) {
-        console.debug('request closed after getting routed.');
+      if (inSocket.destroyed) {
+        console.debug('request/response socket destroyed while getting route.');
         return;
       }
     }
@@ -422,18 +475,19 @@ export class Proxy {
           return;
         }
 
-        outResponseStream = outStream;
-
-        // We don't need to write anything to it.
-        outResponseStream.end();
-
         pushEventSession.end();
 
         if (outHeaders.type !== 'response-stream') {
           console.error('unexpected request type:', headers.type);
           response.writeHead(500).end();
+          outStream.close();
           return;
         }
+
+        outResponseStream = outStream;
+
+        // We only use this stream as Readable.
+        outResponseStream.respond({}, {endStream: true});
 
         console.debug('received response:', url);
 
@@ -447,15 +501,18 @@ export class Proxy {
         outResponseStream
           .on('end', () => {
             console.debug('out response stream "end".');
-            outResponseStream!.close();
           })
-          .on('error', () => {
-            // console.error log added below.
-            response.end();
+          .on('close', () => {
+            console.debug('out response stream "close".');
+            destroyOnDrain(response);
+          })
+          .on('error', error => {
+            console.error('out response stream error:', error.message);
           });
 
-        response.on('error', (error: any) => {
-          console.error('response error:', error.message);
+        // Debugging messages added at the beginning of `request()`.
+        response.on('close', () => {
+          outResponseStream!.close();
         });
       },
     );
@@ -475,21 +532,21 @@ export class Proxy {
 
         request.pipe(outRequestStream);
 
-        outRequestStream.on('error', (error: any) => {
-          console.error('out stream error:', error.message);
-          request.destroy();
-        });
+        outRequestStream
+          .on('close', () => {
+            console.debug('out request stream "close".');
+            request!.destroy();
+          })
+          .on('error', error => {
+            console.error('out request stream error:', error.message);
+          });
       },
     );
 
-    request
-      .on('end', () => {
-        console.debug('request "end".');
-      })
-      .on('error', (error: any) => {
-        console.error('request error:', error.message);
-        outRequestStream?.end();
-      });
+    // Debugging messages added at the beginning of `request()`.
+    request.on('close', () => {
+      outRequestStream?.close();
+    });
   }
 
   private directRequest(
@@ -532,27 +589,26 @@ export class Proxy {
         .on('end', () => {
           console.debug('proxy response "end".');
         })
-        .on('error', (error: any) => {
+        .on('close', () => {
+          console.debug('proxy response "close".');
+          destroyOnDrain(response);
+        })
+        .on('error', error => {
           console.error('proxy response error:', error.message);
-          response.end();
         });
 
-      response.on('error', (error: any) => {
-        console.error('response error:', error.message);
+      // Debugging messages added at the beginning of `request()`.
+      response.on('close', () => {
         proxyResponse.destroy();
       });
     });
 
     request.pipe(proxyRequest);
 
-    request
-      .on('end', () => {
-        console.debug('request "end".');
-      })
-      .on('error', (error: any) => {
-        console.error('request error:', error.message);
-        proxyRequest.end();
-      });
+    // Debugging messages added at the beginning of `request()`.
+    request.on('error', () => {
+      proxyRequest.destroy();
+    });
   }
 
   private getCachedRoute(host: string): InRoute | undefined {

@@ -2,7 +2,7 @@ import * as HTTP from 'http';
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
 
-import {HOP_BY_HOP_HEADERS_REGEX} from '../@common';
+import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
 import {InRoute} from '../types';
 
@@ -21,9 +21,7 @@ export class Session {
     let http2Client = HTTP2.connect(
       client.connectAuthority,
       client.connectOptions,
-    );
-
-    http2Client
+    )
       .on('stream', (pushStream, headers) => {
         switch (headers.type) {
           case 'connect':
@@ -46,12 +44,11 @@ export class Session {
       })
       .on('error', error => {
         console.error('session error:', error.message);
-        client.removeSession(this);
       });
 
     this.http2Client = http2Client;
 
-    let sessionStream = this.requestServer(
+    this.requestServer(
       'session',
       {
         type: 'session',
@@ -60,9 +57,7 @@ export class Session {
       {
         endStream: false,
       },
-    );
-
-    sessionStream
+    )
       .on('response', headers => {
         let status = headers[':status'];
 
@@ -75,9 +70,12 @@ export class Session {
           );
         }
       })
-      .on('error', (error: any) => {
-        console.error('session error:', error.message);
-        http2Client.destroy();
+      .on('close', () => {
+        console.debug('session stream "close".');
+        http2Client.close();
+      })
+      .on('error', error => {
+        console.error('session stream error:', error.message);
       });
   }
 
@@ -103,18 +101,12 @@ export class Session {
     console.info(`connect routed ${host} to ${route}.`);
 
     if (route === 'direct') {
-      let stream = this.requestServer(`connect-direct ${host}`, {
+      this.requestServer(`connect-direct ${host}`, {
         id,
         type: 'connect-direct',
+      }).on('error', error => {
+        console.error('connect-direct stream error:', error.message);
       });
-
-      stream
-        .on('end', () => {
-          console.debug('connect-direct stream "end".');
-        })
-        .on('error', error => {
-          console.error('connect-direct stream error:', error.message);
-        });
 
       return;
     }
@@ -142,30 +134,31 @@ export class Session {
       inStream.pipe(outSocket);
 
       inStream
+        .on('end', () => {
+          console.debug('in stream "end".');
+        })
         .on('close', () => {
           console.debug('in stream "close".');
+          outSocket.destroy();
         })
         .on('error', error => {
           console.error('in stream error:', error.message);
-          outSocket.destroy();
         });
     });
 
     outSocket
-      // OutSocket is a Duplex and in some case (e.g., some speed test
-      // connection) it keeps open after the source ends. So we need to close
-      // the source stream once writes finish.
-      .on('finish', () => {
-        console.debug('out socket "finish".');
-        inStream?.close();
+      .on('end', () => {
+        console.debug('out socket "end".');
       })
       .on('close', () => {
         console.debug('out socket "close".');
-        inStream?.close();
+
+        if (inStream) {
+          closeOnDrain(inStream);
+        }
       })
-      .on('error', (error: any) => {
+      .on('error', error => {
         console.error('out socket error:', error.message);
-        inStream?.close();
       });
   }
 
@@ -236,15 +229,24 @@ export class Session {
           .on('end', () => {
             console.debug('proxy response "end".');
           })
-          .on('error', (error: any) => {
+          .on('close', () => {
+            console.debug('proxy response "close".');
+            closeOnDrain(responseStream);
+          })
+          .on('error', error => {
             console.error('proxy response error:', error.message);
-            responseStream.close();
           });
 
-        responseStream.on('error', error => {
-          console.error('response stream error:', error.message);
-          proxyResponse.destroy();
-        });
+        responseStream.on('data', () => {});
+
+        responseStream
+          .on('close', () => {
+            console.debug('response stream "close".');
+            proxyResponse.destroy();
+          })
+          .on('error', error => {
+            console.error('response stream error:', error.message);
+          });
       },
     );
 
@@ -254,12 +256,16 @@ export class Session {
       .on('end', () => {
         console.debug('request stream "end".');
       })
-      .on('error', (error: any) => {
-        console.error('request stream error:', error.message);
+      .on('close', () => {
+        console.debug('request stream "close".');
+      })
+      .on('error', error => {
         proxyRequest.destroy();
+        console.error('request stream error:', error.message);
       });
 
-    proxyRequest.on('error', (error: any) => {
+    // Seems that ClientRequest does not have "close" event.
+    proxyRequest.on('error', error => {
       console.error('proxy request error:', error.message);
 
       if (responded) {
@@ -268,7 +274,7 @@ export class Session {
 
       let responseStream: HTTP2.ClientHttp2Stream;
 
-      if (error.code === 'ENOTFOUND') {
+      if ((error as any).code === 'ENOTFOUND') {
         responseStream = this.requestServer(`response-stream (404) ${url}`, {
           id,
           type: 'response-stream',
@@ -282,13 +288,9 @@ export class Session {
         });
       }
 
-      responseStream
-        .on('end', () => {
-          console.debug('error response stream "end".');
-        })
-        .on('error', error => {
-          console.error('error response stream error:', error.message);
-        });
+      responseStream.on('error', error => {
+        console.error('error response stream error:', error.message);
+      });
     });
   }
 
@@ -306,13 +308,11 @@ export class Session {
 
     console.info(`route routed ${host} to ${route}.`);
 
-    let responseStream = this.requestServer(`route-result ${host}`, {
+    this.requestServer(`route-result ${host}`, {
       id,
       type: 'route-result',
       route,
-    });
-
-    responseStream
+    })
       .on('end', () => {
         console.debug('route response stream "end".');
       })
