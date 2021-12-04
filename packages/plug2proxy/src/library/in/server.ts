@@ -120,16 +120,18 @@ export class Server {
     this.http2SecureServer = http2SecureServer;
   }
 
-  async getSessionStream(): Promise<HTTP2.ServerHttp2Stream> {
+  async getSessionStream(logPrefix: string): Promise<HTTP2.ServerHttp2Stream> {
     let streams = this.sessionStreams;
 
-    console.debug(`getting stream, ${streams.length} stream(s) available`);
+    console.debug(
+      `${logPrefix} getting stream, ${streams.length} stream(s) available`,
+    );
 
     if (streams.length > 0) {
       return _.sample(streams)!;
     } else {
       console.info(
-        'no session is currently available, waiting for new session...',
+        `${logPrefix} no session is currently available, waiting for new session...`,
       );
 
       return new Promise(resolve => {

@@ -58,16 +58,32 @@ export class Client {
   private activeStreamEntrySet = new Set<ActiveStreamEntry>();
 
   private printActiveStreamsScheduler = new BatchScheduler(() => {
-    console.debug(`active streams of session:`);
+    let activeStreamEntrySet = this.activeStreamEntrySet;
 
-    for (let {type, description, session: sessionId, stream} of this
-      .activeStreamEntrySet) {
+    if (activeStreamEntrySet.size === 0) {
+      return;
+    }
+
+    console.debug();
+    console.debug(`  [session:stream(push)] read/write in/out name`);
+
+    for (let {
+      type,
+      description,
+      session: sessionId,
+      pushStream: pushStreamId,
+      stream,
+    } of activeStreamEntrySet) {
       console.debug(
-        `  [${sessionId}:${stream.id ?? '-'}] ${stream.readable ? 'r' : '-'}${
-          stream.writable ? 'w' : '-'
-        } ${type === 'request' ? '>>>' : '<<<'} ${description}`,
+        `  [${sessionId}:${stream.id ?? '-'}(${pushStreamId ?? '-'})] ${
+          stream.readable ? 'r' : '-'
+        }${stream.writable ? 'w' : '-'} ${
+          type === 'request' ? '>>>' : '<<<'
+        } ${description}`,
       );
     }
+
+    console.debug();
   }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
 
   constructor(readonly router: Router, readonly options: ClientOptions) {
@@ -108,7 +124,8 @@ export class Client {
   addActiveStream(
     type: 'request' | 'push',
     description: string,
-    sessionId: number,
+    sessionId: string,
+    pushStreamId: string | undefined,
     stream: HTTP2.ClientHttp2Stream,
   ): void {
     let activeStreamEntrySet = this.activeStreamEntrySet;
@@ -117,6 +134,7 @@ export class Client {
       type,
       description,
       session: sessionId,
+      pushStream: pushStreamId,
       stream,
     };
 
@@ -146,6 +164,7 @@ export class Client {
 interface ActiveStreamEntry {
   type: 'request' | 'push';
   description: string;
-  session: number;
+  session: string;
+  pushStream: string | undefined;
   stream: HTTP2.ClientHttp2Stream;
 }

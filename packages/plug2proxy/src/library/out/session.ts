@@ -9,15 +9,13 @@ import {InRoute} from '../types';
 import {Client} from './client';
 
 export class Session {
-  private id = ++Session.lastId;
+  private id = '-';
 
   remoteAddress: string | undefined;
 
   private http2Client: HTTP2.ClientHttp2Session;
 
   constructor(readonly client: Client) {
-    console.info('initializing session...');
-
     let http2Client = HTTP2.connect(
       client.connectAuthority,
       client.connectOptions,
@@ -34,21 +32,24 @@ export class Session {
             void this.route(pushStream, headers);
             break;
           default:
-            console.error('received unexpected push stream:', headers.type);
+            console.error(
+              `[${this.id}] received unexpected push stream "${headers.type}".`,
+            );
             break;
         }
       })
       .on('close', () => {
-        console.debug('session "close".');
+        console.debug(`[${this.id}] session "close"`);
         client.removeSession(this);
       })
       .on('error', error => {
-        console.error('session error:', error.message);
+        console.error(`[${this.id}] session error:`, error.message);
       });
 
     this.http2Client = http2Client;
 
-    this.requestServer(
+    let sessionStream = this.requestServer(
+      '-',
       'session',
       {
         type: 'session',
@@ -58,34 +59,53 @@ export class Session {
         endStream: false,
       },
     )
+      .prependListener('ready', () => {
+        this.id = sessionStream.id!.toString();
+      })
       .on('response', headers => {
         let status = headers[':status'];
 
         if (status === 200) {
-          console.info('session ready.');
+          console.info(`[${this.id}] session ready.`);
         } else {
           console.error(
-            `session initialize error (${status}):`,
+            `[${this.id}] session initialize error (${status}):`,
             headers.message,
           );
         }
       })
       .on('close', () => {
-        console.debug('session stream "close".');
+        console.debug(`[${this.id}] session stream "close".`);
         http2Client.close();
       })
       .on('error', error => {
-        console.error('session stream error:', error.message);
+        console.error(`[${this.id}] session stream error:`, error.message);
       });
   }
 
   private async connect(
     pushStream: HTTP2.ClientHttp2Stream,
-    {id, host, port}: HTTP2.IncomingHttpHeaders,
+    headers: HTTP2.IncomingHttpHeaders,
+  ): Promise<void>;
+  private async connect(
+    pushStream: HTTP2.ClientHttp2Stream,
+    {host, port}: {host: string; port: string},
   ): Promise<void> {
-    let client = this.client;
+    const client = this.client;
 
-    console.info('connect:', `${host}:${port}`);
+    let id = pushStream.id!.toString();
+
+    let logPrefix = `[${id}]`;
+
+    console.info(`${logPrefix} connect: ${host}:${port}`);
+
+    this.client.addActiveStream(
+      'push',
+      `connect ${host}:${port}`,
+      this.id,
+      pushStream.id!.toString(),
+      pushStream,
+    );
 
     let route: string;
 
@@ -93,36 +113,40 @@ export class Session {
       route = await client.router.route(host!);
 
       if (pushStream.closed) {
-        console.debug('connect push stream closed while routing:', host);
+        console.debug(`${logPrefix} connect push stream closed while routing.`);
         return;
       }
     } catch (error: any) {
-      console.error('route error:', error.message);
+      console.error(`${logPrefix} route error:`, error.message);
       route = 'direct';
     }
 
-    console.info(`connect routed ${host} to ${route}.`);
+    console.info(`${logPrefix} connect routed ${host} to ${route}.`);
 
     if (route === 'direct') {
-      this.requestServer(`connect-direct ${host}`, {
+      this.requestServer(id, `connect-direct ${host}`, {
         id,
         type: 'connect-direct',
       }).on('error', error => {
-        console.error('connect-direct stream error:', error.message);
+        console.error(
+          `${logPrefix} connect-direct stream error:`,
+          error.message,
+        );
       });
 
       return;
     }
 
-    console.debug(`connecting ${host}:${port}...`);
+    console.debug(`${logPrefix} connecting...`);
 
     let inStream: HTTP2.ClientHttp2Stream | undefined;
 
     let outSocket = Net.createConnection({host, port: Number(port)})
       .on('connect', () => {
-        console.debug(`connected ${host}:${port}.`);
+        console.debug(`${logPrefix} connected.`);
 
         inStream = this.requestServer(
+          id,
           `connect-ok ${host}:${port}`,
           {
             id,
@@ -138,32 +162,32 @@ export class Session {
 
         inStream
           .on('end', () => {
-            console.debug('in stream "end".');
+            console.debug(`${logPrefix} in stream "end".`);
           })
           .on('close', () => {
-            console.debug('in stream "close".');
+            console.debug(`${logPrefix} in stream "close".`);
             outSocket.destroy();
           })
           .on('error', error => {
-            console.error('in stream error:', error.message);
+            console.error(`${logPrefix} in stream error:`, error.message);
           });
       })
       .on('end', () => {
-        console.debug('out socket "end".');
+        console.debug(`${logPrefix} out socket "end".`);
       })
       .on('close', () => {
-        console.debug('out socket "close".');
+        console.debug(`${logPrefix} out socket "close".`);
 
         if (inStream) {
           closeOnDrain(inStream);
         }
       })
       .on('error', error => {
-        console.error('out socket error:', error.message);
+        console.error(`${logPrefix} out socket error:`, error.message);
       });
 
     pushStream.on('close', () => {
-      console.debug('connect push stream "close":', host, inStream?.id);
+      console.debug(`${logPrefix} connect push stream "close".`);
       inStream?.close();
       outSocket.destroy();
     });
@@ -171,14 +195,35 @@ export class Session {
 
   private async request(
     requestStream: HTTP2.ClientHttp2Stream,
-    {id, method, url, headers: headersJSON}: HTTP2.IncomingHttpHeaders,
+    headers: HTTP2.IncomingHttpHeaders,
+  ): Promise<void>;
+  private async request(
+    requestStream: HTTP2.ClientHttp2Stream,
+    {
+      id,
+      method,
+      url,
+      headers: headersJSON,
+    }: {
+      id: string | undefined;
+      method: string;
+      url: string;
+      headers: string;
+    },
   ): Promise<void> {
-    console.info('request:', method, url);
+    if (!id) {
+      id = requestStream.id!.toString();
+    }
+
+    let logPrefix = `[${id}]`;
+
+    console.info(`${logPrefix} request:`, method, url);
 
     this.client.addActiveStream(
       'push',
       `request ${method} ${url}`,
       this.id,
+      requestStream.id!.toString(),
       requestStream,
     );
 
@@ -195,7 +240,7 @@ export class Session {
       proxyResponse => {
         let status = proxyResponse.statusCode!;
 
-        console.debug('response received.');
+        console.debug(`${logPrefix} response received.`);
 
         let headers: {[key: string]: string | string[]} = {};
 
@@ -216,6 +261,7 @@ export class Session {
         }
 
         let responseStream = this.requestServer(
+          id,
           `response-stream ${url}`,
           {
             id,
@@ -234,25 +280,23 @@ export class Session {
 
         proxyResponse
           .on('end', () => {
-            console.debug('proxy response "end".');
+            console.debug(`${logPrefix} proxy response "end".`);
           })
           .on('close', () => {
-            console.debug('proxy response "close".');
+            console.debug(`${logPrefix} proxy response "close".`);
             closeOnDrain(responseStream);
           })
           .on('error', error => {
-            console.error('proxy response error:', error.message);
+            console.error(`${logPrefix} proxy response error:`, error.message);
           });
-
-        responseStream.on('data', () => {});
 
         responseStream
           .on('close', () => {
-            console.debug('response stream "close".');
+            console.debug(`${logPrefix} response stream "close".`);
             proxyResponse.destroy();
           })
           .on('error', error => {
-            console.error('response stream error:', error.message);
+            console.error(`${logPrefix} response stream error:`, error.message);
           });
       },
     );
@@ -261,19 +305,19 @@ export class Session {
 
     requestStream
       .on('end', () => {
-        console.debug('request stream "end".');
+        console.debug(`${logPrefix} request stream "end".`);
       })
       .on('close', () => {
-        console.debug('request stream "close".');
+        console.debug(`${logPrefix} request stream "close".`);
       })
       .on('error', error => {
         proxyRequest.destroy();
-        console.error('request stream error:', error.message);
+        console.error(`${logPrefix} request stream error:`, error.message);
       });
 
     // Seems that ClientRequest does not have "close" event.
     proxyRequest.on('error', error => {
-      console.error('proxy request error:', error.message);
+      console.error(`${logPrefix} proxy request error:`, error.message);
 
       if (responded) {
         return;
@@ -282,63 +326,92 @@ export class Session {
       let responseStream: HTTP2.ClientHttp2Stream;
 
       if ((error as any).code === 'ENOTFOUND') {
-        responseStream = this.requestServer(`response-stream (404) ${url}`, {
+        responseStream = this.requestServer(
           id,
-          type: 'response-stream',
-          status: 404,
-        });
+          `response-stream (404) ${url}`,
+          {
+            id,
+            type: 'response-stream',
+            status: 404,
+          },
+        );
       } else {
-        responseStream = this.requestServer(`response-stream (500) ${url}`, {
+        responseStream = this.requestServer(
           id,
-          type: 'response-stream',
-          status: 500,
-        });
+          `response-stream (500) ${url}`,
+          {
+            id,
+            type: 'response-stream',
+            status: 500,
+          },
+        );
       }
 
       responseStream.on('error', error => {
-        console.error('error response stream error:', error.message);
+        console.error(
+          `${logPrefix} error response stream error:`,
+          error.message,
+        );
       });
     });
   }
 
   private async route(
     pushStream: HTTP2.ClientHttp2Stream,
-    {id, host}: HTTP2.IncomingHttpHeaders,
+    headers: HTTP2.IncomingHttpHeaders,
+  ): Promise<void>;
+  private async route(
+    pushStream: HTTP2.ClientHttp2Stream,
+    {host}: {host: string},
   ): Promise<void> {
     pushStream.close();
 
-    console.info('route:', host);
+    let id = pushStream.id!.toString();
+
+    let logPrefix = `[${id}]`;
+
+    console.info(`${logPrefix} route:`, host);
 
     let sourceRoute = await this.client.router.route(host!);
 
     let route: InRoute = sourceRoute === 'direct' ? 'direct' : 'proxy';
 
-    console.info(`route routed ${host} to ${route}.`);
+    console.info(`${logPrefix} route routed ${host} to ${route}.`);
 
-    this.requestServer(`route-result ${host}`, {
+    this.requestServer(id, `route-result ${host}`, {
       id,
       type: 'route-result',
       route,
     })
       .on('end', () => {
-        console.debug('route response stream "end".');
+        console.debug(`${logPrefix} route response stream "end".`);
       })
       .on('error', error => {
-        console.error('route response stream error:', error.message);
+        console.error(
+          `${logPrefix} route response stream error:`,
+          error.message,
+        );
       });
   }
 
   private requestServer(
+    pushStreamId: string | undefined,
     description: string,
     headers: HTTP2.OutgoingHttpHeaders,
     options?: HTTP2.ClientSessionRequestOptions,
   ): HTTP2.ClientHttp2Stream {
     let stream = this.http2Client.request(headers, options);
 
-    this.client.addActiveStream('request', description, this.id, stream);
+    stream.on('ready', () => {
+      this.client.addActiveStream(
+        'request',
+        description,
+        this.id,
+        pushStreamId,
+        stream,
+      );
+    });
 
     return stream;
   }
-
-  private static lastId = 0;
 }

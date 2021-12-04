@@ -87,38 +87,42 @@ export class Proxy {
   ): Promise<void> {
     const server = this.server;
 
-    inSocket
-      .on('end', () => {
-        console.debug('in socket "end":', url);
-      })
-      .on('close', () => {
-        console.debug('in socket "close":', url);
-      })
-      .on('error', error => {
-        console.error('in socket error:', url, error.message);
-      });
-
     let url = request.url!;
 
     let [host, portString] = url.split(':');
 
+    let logPrefix = '[-]';
+
+    inSocket
+      .on('end', () => {
+        console.debug(`${logPrefix} in socket "end".`);
+      })
+      .on('close', () => {
+        console.debug(`${logPrefix} in socket "close".`);
+      })
+      .on('error', error => {
+        console.error(`${logPrefix} in socket error:`, error.message);
+      });
+
     let port = Number(portString) || 443;
 
-    console.info(`connect ${host}:${port}.`);
+    console.info(`${logPrefix} connect: ${host}:${port}`);
 
     if (this.getCachedRoute(host) === 'direct') {
-      this.directConnect(host, port, inSocket);
+      this.directConnect(host, port, inSocket, logPrefix);
       return;
     }
 
-    let sessionStream = await server.getSessionStream();
+    let sessionStream = await server.getSessionStream(logPrefix);
 
     if (inSocket.destroyed) {
-      console.info('in socket closed before session stream acquired.');
+      console.info(
+        `${logPrefix} in socket closed before session stream acquired.`,
+      );
       return;
     }
 
-    let id = Proxy.getNextId();
+    let id: string | undefined;
 
     let connectEventSession = refEventEmitter(server.http2SecureServer).on(
       'stream',
@@ -129,9 +133,7 @@ export class Proxy {
         if (headers.id !== id) {
           if (server.http2SecureServer.listenerCount('stream') === 1) {
             console.error(
-              'received unexpected request:',
-              headers.type,
-              headers.id,
+              `${logPrefix} received unexpected request ${headers.id} (${headers.type}).`,
             );
           }
 
@@ -148,17 +150,19 @@ export class Proxy {
         outConnectStream.respond({});
 
         if (headers.type === 'connect-direct') {
-          console.info(`routed ${host} to direct.`);
+          console.info(`${logPrefix} routed to direct.`);
 
           this.setCachedRoute(host, 'direct');
-          this.directConnect(host, port, inSocket);
+          this.directConnect(host, port, inSocket, logPrefix);
 
           outConnectStream.end();
           return;
         }
 
         if (headers.type !== 'connect-ok') {
-          console.error('unexpected request type:', headers.type);
+          console.error(
+            `${logPrefix} unexpected request type ${headers.type}.`,
+          );
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
 
@@ -166,7 +170,7 @@ export class Proxy {
           return;
         }
 
-        console.info(`connected ${host}:${port}.`);
+        console.info(`${logPrefix} connected.`);
 
         writeHTTPHead(inSocket, 200, 'OK');
 
@@ -181,23 +185,23 @@ export class Proxy {
 
         outConnectStream
           .on('end', () => {
-            console.debug('out stream "end".');
+            console.debug(`${logPrefix} out stream "end".`);
           })
           .on('close', () => {
-            console.debug('out stream "close".');
+            console.debug(`${logPrefix} out stream "close".`);
             destroyOnDrain(inSocket);
           })
           .on('error', error => {
-            console.error('out stream error:', error.message);
+            console.error(`${logPrefix} out stream error:`, error.message);
           });
       },
     );
 
     sessionStream.pushStream(
-      {type: 'connect', id, host, port},
+      {type: 'connect', host, port},
       (error, pushStream) => {
         if (error) {
-          console.error('connect error:', error.message);
+          console.error(`${logPrefix} connect error:`, error.message);
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
 
@@ -205,10 +209,15 @@ export class Proxy {
           return;
         }
 
-        pushStream.respond({});
+        id = pushStream.id!.toString();
+        logPrefix = `[${id}][${host}]`;
+
+        pushStream.respond();
 
         if (inSocket.destroyed) {
-          console.error('in socket destroyed while creating push stream.');
+          console.error(
+            `${logPrefix} in socket destroyed while creating push stream.`,
+          );
           pushStream.close();
         } else {
           inSocket.on('close', () => {
@@ -223,8 +232,9 @@ export class Proxy {
     host: string,
     port: number,
     inSocket: Net.Socket,
+    logPrefix: string,
   ): void {
-    console.info(`direct connect ${host}:${port}.`);
+    console.info(`${logPrefix} direct connect.`);
 
     let responded = false;
 
@@ -245,16 +255,16 @@ export class Proxy {
         responded = true;
       })
       .on('end', () => {
-        console.debug('out socket "end".');
+        console.debug(`${logPrefix} out socket "end".`);
       })
       .on('close', () => {
-        console.debug('out socket "close".');
+        console.debug(`${logPrefix} out socket "close".`);
         destroyOnDrain(inSocket);
 
         // Close means it has been connected, thus must has been responded.
       })
       .on('error', error => {
-        console.error('direct out socket error:', error.message);
+        console.error(`${logPrefix} direct out socket error:`, error.message);
 
         if (responded) {
           return;
@@ -279,24 +289,26 @@ export class Proxy {
     let method = request.method!;
     let url = request.url!;
 
-    console.info('request:', method, url);
+    let logPrefix = '[-]';
+
+    console.info(`${logPrefix} request:`, method, url);
 
     let inSocket = request.socket;
 
     request.socket.on('close', () => {
-      console.debug('request/response socket "close".');
+      console.debug(`${logPrefix} request/response socket "close".`);
     });
 
     request
       .on('end', () => {
-        console.debug('request "end".');
+        console.debug(`${logPrefix} request "end".`);
       })
       .on('error', error => {
-        console.error('request error:', error.message);
+        console.error(`${logPrefix} request error:`, error.message);
       });
 
     response.on('error', error => {
-      console.error('response error:', error.message);
+      console.error(`${logPrefix} response error:`, error.message);
     });
 
     let remoteAddress = request.socket.remoteAddress!;
@@ -304,7 +316,7 @@ export class Proxy {
     let parsedURL = new URL(url);
 
     if (parsedURL.protocol !== 'http:') {
-      console.error('unsupported protocol:', url);
+      console.error(`${logPrefix} unsupported protocol:`, url);
 
       // only "http://" is supported, "https://" should use CONNECT method
       response.writeHead(400).end();
@@ -365,25 +377,23 @@ export class Proxy {
 
     let route = this.getCachedRoute(host);
 
-    console.info(`route cached ${host}:`, route ?? '(none)');
+    console.info(`${logPrefix} route cached ${route ?? '(none)'}.`);
 
     if (route === 'direct') {
-      this.directRequest(method, url, headers, request, response);
+      this.directRequest(method, url, headers, request, response, logPrefix);
       return;
     }
 
-    let sessionStream = await server.getSessionStream();
+    let sessionStream = await server.getSessionStream(logPrefix);
 
     if (inSocket.destroyed) {
       console.info(
-        'request/response socket destroyed while getting session stream:',
-        method,
-        url,
+        `${logPrefix} request/response socket destroyed while getting session stream.`,
       );
       return;
     }
 
-    let id = Proxy.getNextId();
+    let id: string | undefined;
 
     if (!route) {
       let routeEventSession = refEventEmitter<InRoute, HTTP2.Http2SecureServer>(
@@ -391,25 +401,25 @@ export class Proxy {
       ).on(
         'stream',
         (
-          outStream: HTTP2.ServerHttp2Stream,
+          pushStream: HTTP2.ServerHttp2Stream,
           headers: HTTP2.IncomingHttpHeaders,
         ) => {
           if (headers.id !== id) {
             if (server.http2SecureServer.listenerCount('stream') === 1) {
               console.error(
-                'received unexpected request:',
-                headers.type,
-                headers.id,
+                `${logPrefix} received unexpected request ${headers.id} (${headers.type}).`,
               );
             }
 
             return;
           }
 
-          outStream.respond({}, {endStream: true});
+          pushStream.respond({}, {endStream: true});
 
           if (headers.type !== 'route-result') {
-            console.error('unexpected request type:', headers.type);
+            console.error(
+              `${logPrefix} unexpected request type ${headers.type}.`,
+            );
             response.writeHead(500).end();
             routeEventSession.end();
             return;
@@ -421,16 +431,18 @@ export class Proxy {
 
       sessionStream.pushStream(
         {
-          id,
           type: 'route',
           host,
         },
         (error, pushStream) => {
           if (error) {
-            console.warn('route error:', error.message);
+            console.error(`${logPrefix} route error:`, error.message);
             routeEventSession.end();
             return;
           }
+
+          id = pushStream.id!.toString();
+          logPrefix = `[${id}][${host}]`;
 
           pushStream.respond({}, {endStream: true});
         },
@@ -439,22 +451,22 @@ export class Proxy {
       route = (await routeEventSession.endedPromise)!;
 
       if (inSocket.destroyed) {
-        console.debug('request/response socket destroyed while getting route.');
+        console.debug(
+          `${logPrefix} request/response socket destroyed while getting route.`,
+        );
         return;
       }
     }
 
     if (route) {
-      console.info(`route routed ${host}:`, route ?? '(none)');
+      console.info(`${logPrefix} route routed ${route}.`);
       this.setCachedRoute(host, route);
     }
 
     if (route !== 'proxy') {
-      this.directRequest(method, url, headers, request, response);
+      this.directRequest(method, url, headers, request, response, logPrefix);
       return;
     }
-
-    console.info('request via proxy:', method, url);
 
     let outRequestStream: HTTP2.ServerHttp2Stream | undefined;
     let outResponseStream: HTTP2.ServerHttp2Stream | undefined;
@@ -468,9 +480,7 @@ export class Proxy {
         if (outHeaders.id !== id) {
           if (server.http2SecureServer.listenerCount('stream') === 1) {
             console.error(
-              'received unexpected request:',
-              headers.type,
-              headers.id,
+              `${logPrefix} received unexpected request ${headers.id} (${headers.type}).`,
             );
           }
 
@@ -480,7 +490,9 @@ export class Proxy {
         pushEventSession.end();
 
         if (outHeaders.type !== 'response-stream') {
-          console.error('unexpected request type:', headers.type);
+          console.error(
+            `${logPrefix} unexpected request type ${headers.type}.`,
+          );
           response.writeHead(500).end();
           outStream.close();
           return;
@@ -491,7 +503,7 @@ export class Proxy {
         // We only use this stream as Readable.
         outResponseStream.respond({}, {endStream: true});
 
-        console.debug('received response:', url);
+        console.debug(`${logPrefix} received response.`);
 
         response.writeHead(
           Number(outHeaders.status),
@@ -502,14 +514,17 @@ export class Proxy {
 
         outResponseStream
           .on('end', () => {
-            console.debug('out response stream "end".');
+            console.debug(`${logPrefix} out response stream "end".`);
           })
           .on('close', () => {
-            console.debug('out response stream "close".');
+            console.debug(`${logPrefix} out response stream "close".`);
             destroyOnDrain(response);
           })
           .on('error', error => {
-            console.error('out response stream error:', error.message);
+            console.error(
+              `${logPrefix} out response stream error:`,
+              error.message,
+            );
           });
 
         // Debugging messages added at the beginning of `request()`.
@@ -520,12 +535,18 @@ export class Proxy {
     );
 
     sessionStream.pushStream(
-      {type: 'request', id, method, url, headers: JSON.stringify(headers)},
+      // `id` might be undefined if skipped route.
+      {id, type: 'request', method, url, headers: JSON.stringify(headers)},
       (error, pushStream) => {
         if (error) {
           pushEventSession.end();
           response.writeHead(500).end();
           return;
+        }
+
+        if (!id) {
+          id = pushStream.id!.toString();
+          logPrefix = `[${id}][${host}]`;
         }
 
         outRequestStream = pushStream;
@@ -536,11 +557,14 @@ export class Proxy {
 
         outRequestStream
           .on('close', () => {
-            console.debug('out request stream "close".');
+            console.debug(`${logPrefix} out request stream "close".`);
             request!.destroy();
           })
           .on('error', error => {
-            console.error('out request stream error:', error.message);
+            console.error(
+              `${logPrefix} out request stream error:`,
+              error.message,
+            );
           });
       },
     );
@@ -557,13 +581,14 @@ export class Proxy {
     headers: HTTP.OutgoingHttpHeaders,
     request: HTTP.IncomingMessage,
     response: HTTP.ServerResponse,
+    logPrefix: string,
   ): void {
-    console.info('direct request:', method, url);
+    console.info(`${logPrefix} direct request.`);
 
     let proxyRequest = HTTP.request(url, {method, headers}, proxyResponse => {
       let status = proxyResponse.statusCode!;
 
-      console.info(`direct request response ${status}:`, method, url);
+      console.info(`${logPrefix} direct request response ${status}.`);
 
       let headers: {[key: string]: string | string[]} = {};
 
@@ -589,14 +614,14 @@ export class Proxy {
 
       proxyResponse
         .on('end', () => {
-          console.debug('proxy response "end".');
+          console.debug(`${logPrefix} proxy response "end".`);
         })
         .on('close', () => {
-          console.debug('proxy response "close".');
+          console.debug(`${logPrefix} proxy response "close".`);
           destroyOnDrain(response);
         })
         .on('error', error => {
-          console.error('proxy response error:', error.message);
+          console.error(`${logPrefix} proxy response error:`, error.message);
         });
 
       // Debugging messages added at the beginning of `request()`.

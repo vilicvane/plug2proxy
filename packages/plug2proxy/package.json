@@ -12,7 +12,6 @@
   "types": "bld/library/index.d.ts",
   "bin": "bld/cli/main.js",
   "dependencies": {
-    "@types/debug": "^4.1.7",
     "@types/lodash": "^4.14.177",
     "@types/micromatch": "^4.0.2",
     "@types/netmask": "^1.0.30",
