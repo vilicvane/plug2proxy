@@ -1,6 +1,7 @@
 import * as HTTP from 'http';
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
+import {URL} from 'url';
 
 import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
@@ -95,9 +96,9 @@ export class Session {
 
     let id = pushStream.id!.toString();
 
-    let logPrefix = `[${id}]`;
+    console.info(`[${id}] connect: ${host}:${port}`);
 
-    console.info(`${logPrefix} connect: ${host}:${port}`);
+    let logPrefix = `[${id}][${host}]`;
 
     this.client.addActiveStream(
       'push',
@@ -215,9 +216,9 @@ export class Session {
       id = requestStream.id!.toString();
     }
 
-    let logPrefix = `[${id}]`;
+    console.info(`[${id}] request:`, method, url);
 
-    console.info(`${logPrefix} request:`, method, url);
+    let logPrefix = `[${id}][${new URL(url).hostname}]`;
 
     this.client.addActiveStream(
       'push',
@@ -368,9 +369,9 @@ export class Session {
 
     let id = pushStream.id!.toString();
 
-    let logPrefix = `[${id}]`;
+    console.info(`[${id}] route:`, host);
 
-    console.info(`${logPrefix} route:`, host);
+    let logPrefix = `[${id}][${host}]`;
 
     let sourceRoute = await this.client.router.route(host!);
 

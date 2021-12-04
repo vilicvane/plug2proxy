@@ -373,7 +373,7 @@ export class Proxy {
       headers.Via = VIA;
     }
 
-    let host = new URL(url).hostname;
+    let host = parsedURL.hostname;
 
     let route = this.getCachedRoute(host);
 
