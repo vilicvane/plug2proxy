@@ -30,8 +30,9 @@ export class Session {
             break;
           default:
             console.error(
-              `[${this.id}] received unexpected push stream "${headers.type}".`,
+              `[${this.id}] received unexpected push stream ${headers.type}.`,
             );
+            pushStream.close();
             break;
         }
       })
@@ -396,15 +397,13 @@ export class Session {
   ): HTTP2.ClientHttp2Stream {
     let stream = this.http2Client.request(headers, options);
 
-    stream.on('ready', () => {
-      this.client.addActiveStream(
-        'request',
-        description,
-        this.id,
-        pushStreamId,
-        stream,
-      );
-    });
+    this.client.addActiveStream(
+      'request',
+      description,
+      this.id,
+      pushStreamId,
+      stream,
+    );
 
     return stream;
   }

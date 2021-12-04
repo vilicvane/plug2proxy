@@ -147,10 +147,6 @@ export class Client {
       .on('close', () => {
         activeStreamEntrySet.delete(entry);
         void this.printActiveStreamsScheduler.schedule();
-      })
-      .on('error', () => {
-        activeStreamEntrySet.delete(entry);
-        void this.printActiveStreamsScheduler.schedule();
       });
 
     void this.printActiveStreamsScheduler.schedule();
