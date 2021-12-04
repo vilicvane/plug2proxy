@@ -397,13 +397,21 @@ export class Session {
   ): HTTP2.ClientHttp2Stream {
     let stream = this.http2Client.request(headers, options);
 
-    this.client.addActiveStream(
-      'request',
-      description,
-      this.id,
-      pushStreamId,
-      stream,
-    );
+    let add = (): void => {
+      this.client.addActiveStream(
+        'request',
+        description,
+        this.id,
+        pushStreamId,
+        stream,
+      );
+    };
+
+    if (stream.id) {
+      add();
+    } else {
+      stream.on('ready', add);
+    }
 
     return stream;
   }
