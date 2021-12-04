@@ -1,22 +1,24 @@
 {
   "name": "plug2proxy",
-  "private": true,
+  "version": "0.0.0",
   "license": "MIT",
   "author": "vilicvane",
+  "main": "bld/library/index.js",
+  "types": "bld/library/index.d.ts",
   "scripts": {
-    "build": "rimraf packages/plug2proxy/bld && tsc --build",
+    "build": "rimraf ./bld && tsc --build",
     "lint": "eslint .",
     "lint-prettier": "prettier --check .",
     "test": "yarn lint-prettier && yarn build && yarn lint"
   },
-  "workspaces": [
-    "packages/plug2proxy"
-  ],
+  "dependencies": {
+    "tslib": "^2.3.1"
+  },
   "devDependencies": {
     "@mufan/code": "^0.2.10",
     "@mufan/eslint-plugin": "^0.1.48",
-    "eslint": "^8.3.0",
-    "prettier": "^2.5.0",
+    "eslint": "^8.4.0",
+    "prettier": "^2.5.1",
     "rimraf": "^3.0.2",
     "typescript": "^4.5.2"
   }
