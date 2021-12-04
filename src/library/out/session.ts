@@ -37,7 +37,6 @@ export class Session {
       })
       .on('close', () => {
         console.debug(`[${this.id}] session "close"`);
-        client.removeSession(this);
       })
       .on('error', error => {
         console.error(`[${this.id}] session error:`, error.message);
@@ -73,7 +72,7 @@ export class Session {
       })
       .on('close', () => {
         console.debug(`[${this.id}] session stream "close".`);
-        http2Client.close();
+        client.removeSession(this);
       })
       .on('error', error => {
         console.error(`[${this.id}] session stream error:`, error.message);
@@ -258,16 +257,16 @@ export class Session {
       return;
     }
 
-    console.debug(`${logPrefix} connecting...`);
+    console.debug(`${logPrefix} requesting...`);
 
-    let headers = JSON.parse(headersJSON as string);
+    let headers = JSON.parse(headersJSON);
 
     let responded = false;
 
     let proxyRequest = HTTP.request(
-      url as string,
+      url,
       {
-        method: method as string,
+        method,
         headers,
       },
       proxyResponse => {

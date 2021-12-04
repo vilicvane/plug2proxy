@@ -116,7 +116,7 @@ export class Client {
 
     sessions.splice(index, 1);
 
-    console.info(`removed a session, ${sessions.length} remains.`);
+    console.info(`removed 1 session, ${sessions.length} remains.`);
 
     this.createSession();
   }
