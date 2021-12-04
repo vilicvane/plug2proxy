@@ -1,12 +1,34 @@
-import {promises as DNS} from 'dns';
+import * as DNS from 'dns';
 import * as FS from 'fs';
-import {isIP} from 'net';
+import * as HTTPS from 'https';
+import * as Net from 'net';
+import * as Path from 'path';
+import * as ZLib from 'zlib';
 
-import {CountryResponse, Reader} from 'maxmind';
-import micromatch from 'micromatch';
-import {Netmask} from 'netmask';
+import * as IPMatching from 'ip-matching';
+import * as MaxMind from 'maxmind';
+import * as MicroMatch from 'micromatch';
+import * as TarStream from 'tar-stream';
 
+const PRIVATE_NETWORK_MATCHES = [
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+];
+const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];
+
+const GEOLITE2_UPDATE_INTERVAL = 24 * 3600_000;
+
+const FALLBACK_DEFAULT = 'direct';
 const CACHE_EXPIRATION_DEFAULT = 10 * 60_000;
+
+function MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL(licenseKey: string): string {
+  return `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${encodeURIComponent(
+    licenseKey,
+  )}&suffix=tar.gz`;
+}
+
+const GEOLITE2_PATH_DEFAULT = 'geolite2.mmdb';
 
 export type RouterRule = (
   | {
@@ -46,36 +68,64 @@ export interface RouterOptions {
   /**
    * 路由规则。
    */
-  rules: RouterRule[];
+  rules?: RouterRule[];
   /**
    * 默认路由名称，配合 Plug2Proxy `Client` 使用时仅支持 'proxy' 和 'direct'。
    */
-  fallback: string;
+  fallback?: string;
   /**
    * 路由匹配缓存时间（毫秒）。
    */
   cacheExpiration?: number;
   /**
-   * MaxMind GeoLite2 国家数据库文件地址（mmdb 格式）。
+   * MaxMind GeoLite2（Country）配置，用于 geoip 规则。
    */
-  geoIPDatabase?: string;
+  geolite2?: {
+    /**
+     * mmdb 文件地址。
+     */
+    path?: string;
+    /**
+     * MaxMind License Key，填写后每日更新。
+     * @see https://support.maxmind.com/account-faq/license-keys/how-do-i-generate-a-license-key/
+     */
+    licenseKey?: string;
+  };
 }
 
 export class Router {
   private routeCacheMap = new Map<string, [route: string, expiresAt: number]>();
   private routingMap = new Map<string, Promise<string>>();
 
-  private maxmindReader: Reader<CountryResponse> | undefined;
+  private fallback: string;
 
-  constructor(readonly options: RouterOptions) {
-    this.maxmindReader = options.geoIPDatabase
-      ? new Reader(FS.readFileSync(options.geoIPDatabase))
-      : undefined;
+  private cacheExpiration: number;
+
+  private geolite2Path: string;
+  private geolite2LicenseKey: string | undefined;
+
+  private maxmindReader: MaxMind.Reader<MaxMind.CountryResponse> | undefined;
+
+  readonly rulesPromise: Promise<Rule[]>;
+
+  constructor({
+    rules = [],
+    fallback = FALLBACK_DEFAULT,
+    cacheExpiration = CACHE_EXPIRATION_DEFAULT,
+    geolite2: {
+      path: geolite2Path = GEOLITE2_PATH_DEFAULT,
+      licenseKey: geolite2LicenseKey,
+    } = {},
+  }: RouterOptions) {
+    this.fallback = fallback;
+    this.geolite2Path = Path.resolve(geolite2Path);
+    this.geolite2LicenseKey = geolite2LicenseKey;
+    this.cacheExpiration = cacheExpiration;
+
+    this.rulesPromise = this.initialize(rules);
   }
 
   async route(host: string): Promise<string> {
-    let {cacheExpiration = CACHE_EXPIRATION_DEFAULT} = this.options;
-
     let routeCacheMap = this.routeCacheMap;
     let routingMap = this.routingMap;
 
@@ -96,7 +146,7 @@ export class Router {
     if (!routing) {
       routing = this._route(host)
         .then(route => {
-          routeCacheMap.set(host, [route, now + cacheExpiration]);
+          routeCacheMap.set(host, [route, now + this.cacheExpiration]);
           return route;
         })
         .finally(() => {
@@ -108,98 +158,29 @@ export class Router {
   }
 
   private async _route(host: string): Promise<string> {
-    let {rules, fallback} = this.options;
-
-    let maxmindReader = this.maxmindReader;
+    let rules = await this.rulesPromise;
 
     let domain: string | undefined;
     let ips: string[] | undefined;
 
-    if (isIP(host)) {
+    if (Net.isIP(host)) {
       ips = [host];
     } else {
       domain = host;
     }
 
-    for (let {negate = false, route, ...rest} of rules) {
-      let matched: boolean;
+    let resolve = (): Promise<string[]> | string[] =>
+      ips ??
+      DNS.promises.resolve(domain!).then(resolvedIPs => {
+        ips = resolvedIPs;
+        return ips;
+      });
 
-      switch (rest.type) {
-        case 'ip': {
-          let {match} = rest;
+    for (let {match, negate = false, route} of rules) {
+      let matched = match(domain, resolve);
 
-          if (typeof match === 'string') {
-            match = [match];
-          }
-
-          match = match.reduce((matches, match) => {
-            switch (match) {
-              case 'private':
-                return [
-                  ...matches,
-                  '10.0.0.0/8',
-                  '172.16.0.0/12',
-                  '192.168.0.0/16',
-                ];
-              case 'loopback':
-                return [...matches, '127.0.0.0/8'];
-
-              default:
-                return [...matches, match];
-            }
-          }, [] as string[]);
-
-          let netmasks = match.map(value => new Netmask(value));
-
-          if (!ips) {
-            try {
-              ips = await DNS.resolve(host);
-            } catch (error) {
-              continue;
-            }
-          }
-
-          matched = netmasks.some(netmask =>
-            ips!.some(ip => netmask.contains(ip)),
-          );
-
-          break;
-        }
-        case 'geoip': {
-          if (!maxmindReader) {
-            matched = false;
-            continue;
-          }
-
-          let {match} = rest;
-
-          if (typeof match === 'string') {
-            match = [match];
-          }
-
-          if (!ips) {
-            try {
-              ips = await DNS.resolve(host);
-            } catch (error) {
-              continue;
-            }
-          }
-
-          matched = ips.some(ip => {
-            let region = maxmindReader!.get(ip)?.country?.iso_code;
-            return !!region && (match as string[]).includes(region);
-          });
-
-          break;
-        }
-        case 'domain': {
-          if (!domain) {
-            continue;
-          }
-
-          matched = micromatch.contains(domain, rest.match);
-          break;
-        }
+      if (typeof matched !== 'boolean') {
+        matched = await matched;
       }
 
       if (negate) {
@@ -211,6 +192,174 @@ export class Router {
       }
     }
 
-    return fallback;
+    return this.fallback;
   }
+
+  private async initialize(rules: RouterRule[]): Promise<Rule[]> {
+    let geoLite2Path = this.geolite2Path;
+
+    if (geoLite2Path) {
+      try {
+        let stats = await FS.promises.stat(geoLite2Path);
+        let data = await FS.promises.readFile(geoLite2Path);
+
+        this.maxmindReader = new MaxMind.Reader(data);
+
+        this.scheduleGeoLite2Update(
+          Math.max(GEOLITE2_UPDATE_INTERVAL - (Date.now() - stats.mtimeMs), 0),
+        );
+      } catch {
+        await this.updateGeoLite2();
+
+        this.scheduleGeoLite2Update();
+      }
+    }
+
+    return rules.map(rule => {
+      switch (rule.type) {
+        case 'ip':
+          return {
+            ...rule,
+            match: createIPRuleMatch(rule.match),
+          };
+        case 'geoip':
+          if (!this.maxmindReader) {
+            throw new Error(
+              'Using geoip rule requires valid GeoLite2 options configured',
+            );
+          }
+
+          return {
+            ...rule,
+            match: createGeoIPRuleMatch(rule.match, () => this.maxmindReader!),
+          };
+        case 'domain':
+          return {
+            ...rule,
+            match: createDomainRuleMatch(rule.match),
+          };
+      }
+    });
+  }
+
+  private async updateGeoLite2(): Promise<void> {
+    let geoLite2LicenseKey = this.geolite2LicenseKey;
+
+    if (!geoLite2LicenseKey) {
+      return;
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      HTTPS.get(
+        MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL(geoLite2LicenseKey!),
+        response => {
+          response
+            .pipe(ZLib.createGunzip())
+            .on('error', reject)
+            .pipe(TarStream.extract())
+            .on('error', reject)
+            .on('entry', (headers, stream, next) => {
+              if (!headers.name.endsWith('.mmdb')) {
+                next();
+                return;
+              }
+
+              let data: Buffer[] = [];
+
+              stream
+                .on('data', buffer => {
+                  data.push(buffer);
+                })
+                .pipe(FS.createWriteStream(this.geolite2Path))
+                .on('error', error => {
+                  reject(error);
+                  next();
+                })
+                .on('finish', () => {
+                  this.maxmindReader = new MaxMind.Reader(Buffer.concat(data));
+                  resolve();
+                });
+            });
+        },
+      ).on('error', reject);
+    }).then(
+      () => console.info('geolite2 updated.'),
+      error => {
+        console.error('geolite2 update error:', error.message);
+        throw error;
+      },
+    );
+  }
+
+  private scheduleGeoLite2Update(delay = GEOLITE2_UPDATE_INTERVAL): void {
+    if (!this.geolite2LicenseKey) {
+      return;
+    }
+
+    setTimeout(() => {
+      this.updateGeoLite2().then(
+        () => this.scheduleGeoLite2Update(),
+        () => this.scheduleGeoLite2Update(),
+      );
+    }, delay);
+  }
+}
+
+type RuleMatch = (
+  domain: string | undefined,
+  resolve: () => Promise<string[]> | string[],
+) => Promise<boolean> | boolean;
+
+type Rule = Omit<RouterRule, 'match'> & {match: RuleMatch};
+
+function createIPRuleMatch(match: string | string[]): RuleMatch {
+  if (typeof match === 'string') {
+    match = [match];
+  }
+
+  let ipMatchings = match
+    .reduce((matches, match) => {
+      switch (match) {
+        case 'private':
+          return [...matches, ...PRIVATE_NETWORK_MATCHES];
+        case 'loopback':
+          return [...matches, ...LOOPBACK_MATCHES];
+        default:
+          return [...matches, match];
+      }
+    }, [] as string[])
+    .map(match => IPMatching.getMatch(match));
+
+  let route = (ips: string[]): boolean =>
+    ipMatchings.some(ipMatching => ips.some(ip => ipMatching.matches(ip)));
+
+  return (_domain, resolve) => {
+    let ips = resolve();
+    return Array.isArray(ips) ? route(ips) : ips.then(route);
+  };
+}
+
+function createGeoIPRuleMatch(
+  match: string | string[],
+  getReader: () => MaxMind.Reader<MaxMind.CountryResponse>,
+): RuleMatch {
+  if (typeof match === 'string') {
+    match = [match];
+  }
+
+  let route = (ips: string[]): boolean => {
+    return ips.some(ip => {
+      let region = getReader().get(ip)?.country?.iso_code;
+      return region ? match.includes(region) : false;
+    });
+  };
+
+  return (_domain, resolve) => {
+    let ips = resolve();
+    return Array.isArray(ips) ? route(ips) : ips.then(route);
+  };
+}
+
+function createDomainRuleMatch(match: string | string[]): RuleMatch {
+  return domain => !!domain && MicroMatch.isMatch(domain, match);
 }

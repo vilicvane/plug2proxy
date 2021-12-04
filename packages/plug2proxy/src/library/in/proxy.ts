@@ -147,7 +147,7 @@ export class Proxy {
           return;
         }
 
-        outConnectStream.respond({});
+        outConnectStream.respond();
 
         if (headers.type === 'connect-direct') {
           console.info(`${logPrefix} routed to direct.`);
@@ -395,79 +395,6 @@ export class Proxy {
 
     let id: string | undefined;
 
-    if (!route) {
-      let routeEventSession = refEventEmitter<InRoute, HTTP2.Http2SecureServer>(
-        server.http2SecureServer,
-      ).on(
-        'stream',
-        (
-          pushStream: HTTP2.ServerHttp2Stream,
-          headers: HTTP2.IncomingHttpHeaders,
-        ) => {
-          if (headers.id !== id) {
-            if (server.http2SecureServer.listenerCount('stream') === 1) {
-              console.error(
-                `${logPrefix} received unexpected request ${headers.id} (${headers.type}).`,
-              );
-            }
-
-            return;
-          }
-
-          pushStream.respond({}, {endStream: true});
-
-          if (headers.type !== 'route-result') {
-            console.error(
-              `${logPrefix} unexpected request type ${headers.type}.`,
-            );
-            response.writeHead(500).end();
-            routeEventSession.end();
-            return;
-          }
-
-          routeEventSession.end(headers.route as InRoute);
-        },
-      );
-
-      sessionStream.pushStream(
-        {
-          type: 'route',
-          host,
-        },
-        (error, pushStream) => {
-          if (error) {
-            console.error(`${logPrefix} route error:`, error.message);
-            routeEventSession.end();
-            return;
-          }
-
-          id = pushStream.id!.toString();
-          logPrefix = `[${id}][${host}]`;
-
-          pushStream.respond({}, {endStream: true});
-        },
-      );
-
-      route = (await routeEventSession.endedPromise)!;
-
-      if (inSocket.destroyed) {
-        console.debug(
-          `${logPrefix} request/response socket destroyed while getting route.`,
-        );
-        return;
-      }
-    }
-
-    if (route) {
-      console.info(`${logPrefix} route routed ${route}.`);
-      this.setCachedRoute(host, route);
-    }
-
-    if (route !== 'proxy') {
-      this.directRequest(method, url, headers, request, response, logPrefix);
-      return;
-    }
-
     let outRequestStream: HTTP2.ServerHttp2Stream | undefined;
     let outResponseStream: HTTP2.ServerHttp2Stream | undefined;
 
@@ -489,6 +416,31 @@ export class Proxy {
 
         pushEventSession.end();
 
+        if (request.destroyed) {
+          outStream.close();
+          return;
+        }
+
+        // Only use this stream to receive data.
+        outStream.respond();
+
+        if (outHeaders.type === 'request-direct') {
+          console.info(`${logPrefix} routed to direct.`);
+
+          this.setCachedRoute(host, 'direct');
+          this.directRequest(
+            method,
+            url,
+            headers,
+            request,
+            response,
+            logPrefix,
+          );
+
+          outStream.end();
+          return;
+        }
+
         if (outHeaders.type !== 'response-stream') {
           console.error(
             `${logPrefix} unexpected request type ${headers.type}.`,
@@ -501,15 +453,16 @@ export class Proxy {
         outResponseStream = outStream;
 
         // We only use this stream as Readable.
-        outResponseStream.respond({}, {endStream: true});
+        outResponseStream.end();
 
         console.debug(`${logPrefix} received response.`);
 
         response.writeHead(
           Number(outHeaders.status),
-          JSON.parse(outHeaders.headers as string),
+          outHeaders.headers && JSON.parse(outHeaders.headers as string),
         );
 
+        request.pipe(outRequestStream!);
         outResponseStream.pipe(response);
 
         outResponseStream
@@ -552,8 +505,6 @@ export class Proxy {
         outRequestStream = pushStream;
 
         outRequestStream.respond();
-
-        request.pipe(outRequestStream);
 
         outRequestStream
           .on('close', () => {

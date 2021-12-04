@@ -17,5 +17,5 @@
     "typescript",
     "typescriptreact"
   ],
-  "cSpell.words": ["geoip", "maxmind"]
+  "cSpell.words": ["geoip", "geolite", "maxmind", "mmdb", "netmasks"]
 }

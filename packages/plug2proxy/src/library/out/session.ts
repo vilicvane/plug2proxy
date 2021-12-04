@@ -5,7 +5,6 @@ import {URL} from 'url';
 
 import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
-import {InRoute} from '../types';
 
 import {Client} from './client';
 
@@ -28,9 +27,6 @@ export class Session {
             break;
           case 'request':
             void this.request(pushStream, headers);
-            break;
-          case 'route':
-            void this.route(pushStream, headers);
             break;
           default:
             console.error(
@@ -100,7 +96,7 @@ export class Session {
 
     let logPrefix = `[${id}][${host}]`;
 
-    this.client.addActiveStream(
+    client.addActiveStream(
       'push',
       `connect ${host}:${port}`,
       this.id,
@@ -111,7 +107,7 @@ export class Session {
     let route: string;
 
     try {
-      route = await client.router.route(host!);
+      route = await client.router.route(host);
 
       if (pushStream.closed) {
         console.debug(`${logPrefix} connect push stream closed while routing.`);
@@ -212,21 +208,57 @@ export class Session {
       headers: string;
     },
   ): Promise<void> {
+    const client = this.client;
+
     if (!id) {
       id = requestStream.id!.toString();
     }
 
     console.info(`[${id}] request:`, method, url);
 
-    let logPrefix = `[${id}][${new URL(url).hostname}]`;
+    let host = new URL(url).hostname;
 
-    this.client.addActiveStream(
+    let logPrefix = `[${id}][${host}]`;
+
+    client.addActiveStream(
       'push',
       `request ${method} ${url}`,
       this.id,
       requestStream.id!.toString(),
       requestStream,
     );
+
+    let route: string;
+
+    try {
+      route = await client.router.route(host);
+
+      if (requestStream.closed) {
+        console.debug(`${logPrefix} push stream closed while routing.`);
+        return;
+      }
+    } catch (error: any) {
+      console.error(`${logPrefix} route error:`, error.message);
+      route = 'direct';
+    }
+
+    console.info(`${logPrefix} request routed ${host} to ${route}.`);
+
+    if (route === 'direct') {
+      this.requestServer(id, `request-direct ${host}`, {
+        id,
+        type: 'request-direct',
+      }).on('error', error => {
+        console.error(
+          `${logPrefix} request-direct stream error:`,
+          error.message,
+        );
+      });
+
+      return;
+    }
+
+    console.debug(`${logPrefix} connecting...`);
 
     let headers = JSON.parse(headersJSON as string);
 
@@ -355,44 +387,6 @@ export class Session {
         );
       });
     });
-  }
-
-  private async route(
-    pushStream: HTTP2.ClientHttp2Stream,
-    headers: HTTP2.IncomingHttpHeaders,
-  ): Promise<void>;
-  private async route(
-    pushStream: HTTP2.ClientHttp2Stream,
-    {host}: {host: string},
-  ): Promise<void> {
-    pushStream.close();
-
-    let id = pushStream.id!.toString();
-
-    console.info(`[${id}] route:`, host);
-
-    let logPrefix = `[${id}][${host}]`;
-
-    let sourceRoute = await this.client.router.route(host!);
-
-    let route: InRoute = sourceRoute === 'direct' ? 'direct' : 'proxy';
-
-    console.info(`${logPrefix} route routed ${host} to ${route}.`);
-
-    this.requestServer(id, `route-result ${host}`, {
-      id,
-      type: 'route-result',
-      route,
-    })
-      .on('end', () => {
-        console.debug(`${logPrefix} route response stream "end".`);
-      })
-      .on('error', error => {
-        console.error(
-          `${logPrefix} route response stream error:`,
-          error.message,
-        );
-      });
   }
 
   private requestServer(
