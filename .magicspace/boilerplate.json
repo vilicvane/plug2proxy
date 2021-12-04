@@ -4,18 +4,13 @@
     "name": "plug2proxy",
     "license": "MIT",
     "author": "vilicvane",
-    "packages": [
+    "tsProjects": [
       {
-        "name": "plug2proxy",
-        "tsProjects": [
-          {
-            "name": "library"
-          },
-          {
-            "name": "cli",
-            "references": ["library"]
-          }
-        ]
+        "name": "library"
+      },
+      {
+        "name": "cli",
+        "references": ["library"]
       }
     ]
   }
