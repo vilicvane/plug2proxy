@@ -209,7 +209,7 @@ export class Proxy {
           return;
         }
 
-        id = pushStream.id!.toString();
+        id = `${sessionStream.id}:${pushStream.id}`;
         logPrefix = `[${id}][${host}]`;
 
         pushStream
@@ -497,8 +497,7 @@ export class Proxy {
     );
 
     sessionStream.pushStream(
-      // `id` might be undefined if skipped route.
-      {id, type: 'request', method, url, headers: JSON.stringify(headers)},
+      {type: 'request', method, url, headers: JSON.stringify(headers)},
       (error, pushStream) => {
         if (error) {
           pushEventSession.end();
@@ -506,10 +505,8 @@ export class Proxy {
           return;
         }
 
-        if (!id) {
-          id = pushStream.id!.toString();
-          logPrefix = `[${id}][${host}]`;
-        }
+        id = `${sessionStream.id}:${pushStream.id}`;
+        logPrefix = `[${id}][${host}]`;
 
         outRequestStream = pushStream;
 
@@ -614,11 +611,5 @@ export class Proxy {
 
   private setCachedRoute(host: string, route: InRoute): void {
     this.cachedRouteMap.set(host, [route, Date.now() + ROUTE_CACHE_EXPIRATION]);
-  }
-
-  static lastId = 0;
-
-  static getNextId(): string {
-    return (++this.lastId).toString();
   }
 }

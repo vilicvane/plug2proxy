@@ -91,17 +91,11 @@ export class Session {
   ): Promise<void> {
     const client = this.client;
 
-    let id = pushStream.id!.toString();
+    let id = `${this.id}:${pushStream.id}`;
 
     console.info(`[${id}] connect: ${host}:${port}`);
 
-    client.addActiveStream(
-      'push',
-      `connect ${host}:${port}`,
-      this.id,
-      pushStream.id!.toString(),
-      pushStream,
-    );
+    client.addActiveStream('push', `connect ${host}:${port}`, id, pushStream);
 
     let logPrefix = `[${id}][${host}]`;
 
@@ -209,12 +203,10 @@ export class Session {
   private async request(
     requestStream: HTTP2.ClientHttp2Stream,
     {
-      id,
       method,
       url,
       headers: headersJSON,
     }: {
-      id: string | undefined;
       method: string;
       url: string;
       headers: string;
@@ -222,9 +214,7 @@ export class Session {
   ): Promise<void> {
     const client = this.client;
 
-    if (!id) {
-      id = requestStream.id!.toString();
-    }
+    let id = `${this.id}:${requestStream.id}`;
 
     console.info(`[${id}] request:`, method, url);
 
@@ -233,8 +223,7 @@ export class Session {
     client.addActiveStream(
       'push',
       `request ${method} ${url}`,
-      this.id,
-      requestStream.id!.toString(),
+      id,
       requestStream,
     );
 
@@ -406,7 +395,7 @@ export class Session {
   }
 
   private requestServer(
-    pushStreamId: string | undefined,
+    id: string,
     description: string,
     headers: HTTP2.OutgoingHttpHeaders,
     options?: HTTP2.ClientSessionRequestOptions,
@@ -414,13 +403,7 @@ export class Session {
     let stream = this.http2Client.request(headers, options);
 
     let add = (): void => {
-      this.client.addActiveStream(
-        'request',
-        description,
-        this.id,
-        pushStreamId,
-        stream,
-      );
+      this.client.addActiveStream('request', description, id, stream);
     };
 
     if (stream.id) {

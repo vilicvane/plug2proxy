@@ -65,21 +65,13 @@ export class Client {
     }
 
     console.debug();
-    console.debug(`  [session:stream(push)] read/write in/out name`);
+    console.debug(`  [session:push(stream)] read/write in/out name`);
 
-    for (let {
-      type,
-      description,
-      session: sessionId,
-      pushStream: pushStreamId,
-      stream,
-    } of activeStreamEntrySet) {
+    for (let {type, description, id, stream} of activeStreamEntrySet) {
       console.debug(
-        `  [${sessionId}:${stream.id ?? '-'}(${pushStreamId ?? '-'})] ${
-          stream.readable ? 'r' : '-'
-        }${stream.writable ? 'w' : '-'} ${
-          type === 'request' ? '>>>' : '<<<'
-        } ${description}`,
+        `  [${id}(${stream.id})] ${stream.readable ? 'r' : '-'}${
+          stream.writable ? 'w' : '-'
+        } ${type === 'request' ? '>>>' : '<<<'} ${description}`,
       );
     }
 
@@ -124,8 +116,7 @@ export class Client {
   addActiveStream(
     type: 'request' | 'push',
     description: string,
-    sessionId: string,
-    pushStreamId: string | undefined,
+    id: string,
     stream: HTTP2.ClientHttp2Stream,
   ): void {
     let activeStreamEntrySet = this.activeStreamEntrySet;
@@ -133,8 +124,7 @@ export class Client {
     let entry: ActiveStreamEntry = {
       type,
       description,
-      session: sessionId,
-      pushStream: pushStreamId,
+      id,
       stream,
     };
 
@@ -160,7 +150,6 @@ export class Client {
 interface ActiveStreamEntry {
   type: 'request' | 'push';
   description: string;
-  session: string;
-  pushStream: string | undefined;
+  id: string;
   stream: HTTP2.ClientHttp2Stream;
 }

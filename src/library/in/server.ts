@@ -126,7 +126,7 @@ export class Server {
     let streams = this.sessionStreams;
 
     console.debug(
-      `${logPrefix} getting stream, ${streams.length} stream(s) available`,
+      `${logPrefix} getting session stream, ${streams.length} stream(s) available`,
     );
 
     if (streams.length > 0) {
