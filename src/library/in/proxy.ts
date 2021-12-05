@@ -91,7 +91,7 @@ export class Proxy {
 
     let [host, portString] = url.split(':');
 
-    let logPrefix = '[-]';
+    let logPrefix = `[-][${host}]`;
 
     inSocket
       .on('end', () => {
@@ -212,6 +212,17 @@ export class Proxy {
         id = pushStream.id!.toString();
         logPrefix = `[${id}][${host}]`;
 
+        pushStream
+          .on('close', () => {
+            console.debug(`${logPrefix} connect push stream "close".`);
+          })
+          .on('error', error => {
+            console.debug(
+              `${logPrefix} connect push stream error:`,
+              error.message,
+            );
+          });
+
         pushStream.respond();
 
         if (inSocket.destroyed) {
@@ -288,8 +299,10 @@ export class Proxy {
 
     let method = request.method!;
     let url = request.url!;
+    let parsedURL = new URL(url);
+    let host = parsedURL.hostname;
 
-    let logPrefix = '[-]';
+    let logPrefix = `[-][${host}]`;
 
     console.info(`${logPrefix} request:`, method, url);
 
@@ -312,8 +325,6 @@ export class Proxy {
     });
 
     let remoteAddress = request.socket.remoteAddress!;
-
-    let parsedURL = new URL(url);
 
     if (parsedURL.protocol !== 'http:') {
       console.error(`${logPrefix} unsupported protocol:`, url);
@@ -372,8 +383,6 @@ export class Proxy {
     if (!viaExists) {
       headers.Via = VIA;
     }
-
-    let host = parsedURL.hostname;
 
     let route = this.getCachedRoute(host);
 
@@ -504,8 +513,6 @@ export class Proxy {
 
         outRequestStream = pushStream;
 
-        outRequestStream.respond();
-
         outRequestStream
           .on('close', () => {
             console.debug(`${logPrefix} out request stream "close".`);
@@ -517,6 +524,8 @@ export class Proxy {
               error.message,
             );
           });
+
+        outRequestStream.respond();
       },
     );
 

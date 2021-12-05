@@ -105,6 +105,8 @@ export class Server {
       for (let resolver of this.sessionStreamResolvers) {
         resolver(stream);
       }
+
+      this.sessionStreamResolvers.splice(0);
     });
 
     http2SecureServer.listen(listenOptions, () => {

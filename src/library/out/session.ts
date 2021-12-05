@@ -56,6 +56,7 @@ export class Session {
         endStream: false,
       },
     )
+      // Prepend to ensure `this.id` is available in later "ready" events.
       .prependListener('ready', () => {
         this.id = sessionStream.id!.toString();
       })
@@ -94,8 +95,6 @@ export class Session {
 
     console.info(`[${id}] connect: ${host}:${port}`);
 
-    let logPrefix = `[${id}][${host}]`;
-
     client.addActiveStream(
       'push',
       `connect ${host}:${port}`,
@@ -103,6 +102,19 @@ export class Session {
       pushStream.id!.toString(),
       pushStream,
     );
+
+    let logPrefix = `[${id}][${host}]`;
+
+    pushStream
+      .on('end', () => {
+        console.debug(`${logPrefix} connect push stream "end".`);
+      })
+      .on('close', () => {
+        console.debug(`${logPrefix} connect push stream "close".`);
+      })
+      .on('error', error => {
+        console.debug(`${logPrefix} connect push stream error:`, error.message);
+      });
 
     let route: string;
 
@@ -183,8 +195,8 @@ export class Session {
         console.error(`${logPrefix} out socket error:`, error.message);
       });
 
+    // Debugging logs added at the beginning of `connect()`.
     pushStream.on('close', () => {
-      console.debug(`${logPrefix} connect push stream "close".`);
       inStream?.close();
       outSocket.destroy();
     });
@@ -218,8 +230,6 @@ export class Session {
 
     let host = new URL(url).hostname;
 
-    let logPrefix = `[${id}][${host}]`;
-
     client.addActiveStream(
       'push',
       `request ${method} ${url}`,
@@ -227,6 +237,19 @@ export class Session {
       requestStream.id!.toString(),
       requestStream,
     );
+
+    let logPrefix = `[${id}][${host}]`;
+
+    requestStream
+      .on('end', () => {
+        console.debug(`${logPrefix} request stream "end".`);
+      })
+      .on('close', () => {
+        console.debug(`${logPrefix} request stream "close".`);
+      })
+      .on('error', error => {
+        console.debug(`${logPrefix} request stream error:`, error.message);
+      });
 
     let route: string;
 
@@ -336,17 +359,10 @@ export class Session {
 
     requestStream.pipe(proxyRequest);
 
-    requestStream
-      .on('end', () => {
-        console.debug(`${logPrefix} request stream "end".`);
-      })
-      .on('close', () => {
-        console.debug(`${logPrefix} request stream "close".`);
-      })
-      .on('error', error => {
-        proxyRequest.destroy();
-        console.error(`${logPrefix} request stream error:`, error.message);
-      });
+    // Debugging logs added at the beginning of `request()`.
+    requestStream.on('close', () => {
+      proxyRequest.destroy();
+    });
 
     // Seems that ClientRequest does not have "close" event.
     proxyRequest.on('error', error => {
