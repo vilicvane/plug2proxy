@@ -591,6 +591,8 @@ export class Proxy {
       response.on('close', () => {
         proxyResponse.destroy();
       });
+    }).on('error', error => {
+      console.debug(`${logPrefix} proxy request error:`, error.message);
     });
 
     request.pipe(proxyRequest);
