@@ -1,6 +1,6 @@
 {
   "name": "plug2proxy",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "license": "MIT",
   "author": "vilicvane",
   "main": "bld/library/index.js",
