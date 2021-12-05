@@ -135,6 +135,8 @@ export class Session {
         );
       });
 
+      pushStream.close();
+
       return;
     }
 
@@ -178,6 +180,8 @@ export class Session {
       })
       .on('close', () => {
         console.debug(`${logPrefix} out socket "close".`);
+
+        pushStream.close();
 
         if (inStream) {
           closeOnDrain(inStream);
@@ -243,7 +247,7 @@ export class Session {
     try {
       route = await client.router.route(host);
 
-      if (requestStream.closed) {
+      if (requestStream.closed && !requestStream.readableEnded) {
         console.debug(`${logPrefix} push stream closed while routing.`);
         return;
       }
@@ -264,6 +268,8 @@ export class Session {
           error.message,
         );
       });
+
+      requestStream.close();
 
       return;
     }
@@ -348,6 +354,10 @@ export class Session {
 
     // Debugging logs added at the beginning of `request()`.
     requestStream.on('close', () => {
+      if (requestStream.readableEnded) {
+        return;
+      }
+
       proxyRequest.destroy();
     });
 

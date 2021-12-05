@@ -223,14 +223,14 @@ export class Proxy {
             );
           });
 
-        pushStream.respond();
-
         if (inSocket.destroyed) {
           console.error(
             `${logPrefix} in socket destroyed while creating push stream.`,
           );
           pushStream.close();
         } else {
+          pushStream.respond();
+
           inSocket.on('close', () => {
             pushStream.close();
           });
@@ -425,7 +425,7 @@ export class Proxy {
 
         pushEventSession.end();
 
-        if (request.destroyed) {
+        if (request.socket.destroyed) {
           outStream.close();
           return;
         }
@@ -464,14 +464,13 @@ export class Proxy {
         // We only use this stream as Readable.
         outResponseStream.end();
 
-        console.debug(`${logPrefix} received response.`);
+        console.debug(`${logPrefix} response received.`);
 
         response.writeHead(
           Number(outHeaders.status),
           outHeaders.headers && JSON.parse(outHeaders.headers as string),
         );
 
-        request.pipe(outRequestStream!);
         outResponseStream.pipe(response);
 
         outResponseStream
@@ -481,6 +480,7 @@ export class Proxy {
           .on('close', () => {
             console.debug(`${logPrefix} out response stream "close".`);
             destroyOnDrain(response);
+            outRequestStream!.close();
           })
           .on('error', error => {
             console.error(
@@ -522,14 +522,20 @@ export class Proxy {
             );
           });
 
-        outRequestStream.respond();
+        if (request.destroyed) {
+          outRequestStream.close();
+        } else {
+          outRequestStream.respond();
+
+          request.pipe(outRequestStream);
+
+          // Debugging messages added at the beginning of `request()`.
+          request.on('close', () => {
+            outResponseStream?.close();
+          });
+        }
       },
     );
-
-    // Debugging messages added at the beginning of `request()`.
-    request.on('close', () => {
-      outRequestStream?.close();
-    });
   }
 
   private directRequest(
