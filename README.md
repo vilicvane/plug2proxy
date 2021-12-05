@@ -22,7 +22,7 @@ npm install --global plug2proxy
 ### 入口
 
 ```sh
-plug2proxy out.p2p.js
+plug2proxy in.p2p.js
 ```
 
 配置文件 `in.p2p.js`，详见 [in/server.ts](./packages/plug2proxy/src/library/in/server.ts)、[in/proxy.ts](./packages/plug2proxy/src/library/in/proxy.ts)。
@@ -79,9 +79,7 @@ module.exports = {
       },
     ],
     fallback: 'proxy',
-    /**
-     * MaxMind GeoLite2（Country）配置，用于 geoip 规则。
-     */
+    // MaxMind GeoLite2（Country）配置，用于 geoip 规则。
     geolite2: {
       // https://support.maxmind.com/account-faq/license-keys/how-do-i-generate-a-license-key/
       licenseKey: '...',
