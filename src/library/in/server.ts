@@ -41,10 +41,9 @@ export interface ServerOptions {
 }
 
 export class Server {
-  private sessionStreams: HTTP2.ServerHttp2Stream[] = [];
-  private sessionStreamResolvers: ((
-    session: HTTP2.ServerHttp2Stream,
-  ) => void)[] = [];
+  private sessionCandidates: SessionCandidate[] = [];
+  private sessionCandidateResolvers: ((candidate: SessionCandidate) => void)[] =
+    [];
 
   readonly password: string | undefined;
 
@@ -56,6 +55,8 @@ export class Server {
     http2: http2Options,
   }: ServerOptions) {
     this.password = password;
+
+    let lastSessionId = 0;
 
     let http2SecureServer = HTTP2.createSecureServer(http2Options);
 
@@ -91,22 +92,30 @@ export class Server {
 
       console.info(`new session accepted (remote ${remoteAddress}).`);
 
+      let id = (++lastSessionId).toString();
+
+      let candidate: SessionCandidate = {
+        id,
+        stream,
+      };
+
       stream.respond({
         ':status': 200,
+        id,
       });
 
       stream.on('close', () => {
-        _.pull(this.sessionStreams, stream);
+        _.pull(this.sessionCandidates, candidate);
         console.info(`session closed (remote ${remoteAddress}).`);
       });
 
-      this.sessionStreams.push(stream);
+      this.sessionCandidates.push(candidate);
 
-      for (let resolver of this.sessionStreamResolvers) {
-        resolver(stream);
+      for (let resolver of this.sessionCandidateResolvers) {
+        resolver(candidate);
       }
 
-      this.sessionStreamResolvers.splice(0);
+      this.sessionCandidateResolvers.splice(0);
     });
 
     http2SecureServer.listen(listenOptions, () => {
@@ -122,23 +131,28 @@ export class Server {
     this.http2SecureServer = http2SecureServer;
   }
 
-  async getSessionStream(logPrefix: string): Promise<HTTP2.ServerHttp2Stream> {
-    let streams = this.sessionStreams;
+  async getSessionCandidate(logPrefix: string): Promise<SessionCandidate> {
+    let candidates = this.sessionCandidates;
 
     console.debug(
-      `${logPrefix} getting session stream, ${streams.length} stream(s) available`,
+      `${logPrefix} getting session candidates, ${candidates.length} available.`,
     );
 
-    if (streams.length > 0) {
-      return _.sample(streams)!;
+    if (candidates.length > 0) {
+      return _.sample(candidates)!;
     } else {
       console.info(
-        `${logPrefix} no session is currently available, waiting for new session...`,
+        `${logPrefix} no session candidate is currently available, waiting for new session...`,
       );
 
       return new Promise(resolve => {
-        this.sessionStreamResolvers.push(resolve);
+        this.sessionCandidateResolvers.push(resolve);
       });
     }
   }
+}
+
+export interface SessionCandidate {
+  id: string;
+  stream: HTTP2.ServerHttp2Stream;
 }

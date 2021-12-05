@@ -45,31 +45,29 @@ export class Session {
 
     this.http2Client = http2Client;
 
-    let sessionStream = this.requestServer(
-      '-',
-      'session',
-      {
-        type: 'session',
-        password: client.password,
-      },
-      {
-        endStream: false,
-      },
-    )
-      // Prepend to ensure `this.id` is available in later "ready" events.
-      .prependListener('ready', () => {
-        this.id = sessionStream.id!.toString();
-      })
+    let sessionStream = http2Client
+      .request(
+        {
+          type: 'session',
+          password: client.password,
+        },
+        {
+          endStream: false,
+        },
+      )
       .on('response', headers => {
         let status = headers[':status'];
 
         if (status === 200) {
+          this.id = headers.id as string;
           console.info(`[${this.id}] session ready.`);
+          client.addActiveStream('request', 'session', this.id, sessionStream);
         } else {
           console.error(
             `[${this.id}] session initialize error (${status}):`,
             headers.message,
           );
+          sessionStream.close();
         }
       })
       .on('close', () => {
@@ -402,15 +400,7 @@ export class Session {
   ): HTTP2.ClientHttp2Stream {
     let stream = this.http2Client.request(headers, options);
 
-    let add = (): void => {
-      this.client.addActiveStream('request', description, id, stream);
-    };
-
-    if (stream.id) {
-      add();
-    } else {
-      stream.on('ready', add);
-    }
+    this.client.addActiveStream('request', description, id, stream);
 
     return stream;
   }

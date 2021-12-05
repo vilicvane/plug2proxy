@@ -113,7 +113,7 @@ export class Proxy {
       return;
     }
 
-    let sessionStream = await server.getSessionStream(logPrefix);
+    let sessionCandidate = await server.getSessionCandidate(logPrefix);
 
     if (inSocket.destroyed) {
       console.info(
@@ -197,7 +197,7 @@ export class Proxy {
       },
     );
 
-    sessionStream.pushStream(
+    sessionCandidate.stream.pushStream(
       {type: 'connect', host, port},
       (error, pushStream) => {
         if (error) {
@@ -209,7 +209,7 @@ export class Proxy {
           return;
         }
 
-        id = `${sessionStream.id}:${pushStream.id}`;
+        id = `${sessionCandidate.id}:${pushStream.id}`;
         logPrefix = `[${id}][${host}]`;
 
         pushStream
@@ -393,7 +393,7 @@ export class Proxy {
       return;
     }
 
-    let sessionStream = await server.getSessionStream(logPrefix);
+    let sessionCandidate = await server.getSessionCandidate(logPrefix);
 
     if (inSocket.destroyed) {
       console.info(
@@ -496,7 +496,7 @@ export class Proxy {
       },
     );
 
-    sessionStream.pushStream(
+    sessionCandidate.stream.pushStream(
       {type: 'request', method, url, headers: JSON.stringify(headers)},
       (error, pushStream) => {
         if (error) {
@@ -505,7 +505,7 @@ export class Proxy {
           return;
         }
 
-        id = `${sessionStream.id}:${pushStream.id}`;
+        id = `${sessionCandidate.id}:${pushStream.id}`;
         logPrefix = `[${id}][${host}]`;
 
         outRequestStream = pushStream;
