@@ -593,6 +593,7 @@ export class Proxy {
       });
     }).on('error', error => {
       console.debug(`${logPrefix} proxy request error:`, error.message);
+      destroyOnDrain(response);
     });
 
     request.pipe(proxyRequest);
