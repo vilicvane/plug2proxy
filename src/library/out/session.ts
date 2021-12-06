@@ -8,6 +8,8 @@ import {groupRawHeaders} from '../@utils';
 
 import {Client} from './client';
 
+const SESSION_PING_INTERVAL = 10_000;
+
 export class Session {
   private id = '-';
 
@@ -16,10 +18,24 @@ export class Session {
   private http2Client: HTTP2.ClientHttp2Session;
 
   constructor(readonly client: Client) {
+    let pingTimer: NodeJS.Timer | undefined;
+
     let http2Client = HTTP2.connect(
       client.connectAuthority,
       client.connectOptions,
     )
+      .on('connect', () => {
+        pingTimer = setInterval(() => {
+          http2Client.ping(error => {
+            if (!error) {
+              return;
+            }
+
+            console.error(`[${this.id}] ping error:`, error.message);
+            http2Client.close();
+          });
+        }, SESSION_PING_INTERVAL);
+      })
       .on('stream', (pushStream, headers) => {
         switch (headers.type) {
           case 'connect':
@@ -38,6 +54,10 @@ export class Session {
       })
       .on('close', () => {
         console.debug(`[${this.id}] session "close"`);
+
+        if (pingTimer) {
+          clearInterval(pingTimer);
+        }
       })
       .on('error', error => {
         console.error(`[${this.id}] session error:`, error.message);
