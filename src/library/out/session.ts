@@ -32,6 +32,7 @@ export class Session {
             }
 
             console.error(`[${this.id}] ping error:`, error.message);
+            sessionStream.destroy();
             http2Client.destroy();
           });
         }, SESSION_PING_INTERVAL);
