@@ -531,7 +531,7 @@ export class Proxy {
 
           // Debugging messages added at the beginning of `request()`.
           request.on('close', () => {
-            outResponseStream?.close();
+            outResponseStream!.close();
           });
         }
       },

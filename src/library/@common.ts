@@ -138,7 +138,7 @@ export function destroyOnDrain(socket: Writable): void {
     return;
   }
 
-  if (socket.writableLength === 0) {
+  if (!socket.writable || socket.writableLength === 0) {
     socket.destroy();
     return;
   }
@@ -153,7 +153,7 @@ export function closeOnDrain(stream: HTTP2.Http2Stream): void {
     return;
   }
 
-  if (stream.writableLength === 0) {
+  if (!stream.writable || stream.writableLength === 0) {
     stream.close();
     return;
   }
