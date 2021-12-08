@@ -90,9 +90,11 @@ export class Server {
         return;
       }
 
-      console.info(`new session accepted (remote ${remoteAddress}).`);
-
       let id = (++lastSessionId).toString();
+
+      let logPrefix = `[${id}(${remoteAddress})]`;
+
+      console.info(`${logPrefix} new session accepted.`);
 
       let candidate: SessionCandidate = {
         id,
@@ -104,10 +106,14 @@ export class Server {
         id,
       });
 
-      stream.on('close', () => {
-        _.pull(this.sessionCandidates, candidate);
-        console.info(`session closed (remote ${remoteAddress}).`);
-      });
+      stream
+        .on('close', () => {
+          _.pull(this.sessionCandidates, candidate);
+          console.info(`${logPrefix} session "close".`);
+        })
+        .on('error', error => {
+          console.error(`${logPrefix} session error:`, error.message);
+        });
 
       this.sessionCandidates.push(candidate);
 
