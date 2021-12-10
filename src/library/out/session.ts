@@ -364,6 +364,7 @@ export class Session {
           .on('close', () => {
             console.debug(`${logPrefix} response stream "close".`);
             proxyResponse.destroy();
+            requestStream.close();
           })
           .on('error', error => {
             console.error(`${logPrefix} response stream error:`, error.message);
@@ -385,6 +386,7 @@ export class Session {
     // Seems that ClientRequest does not have "close" event.
     proxyRequest.on('error', error => {
       console.error(`${logPrefix} proxy request error:`, error.message);
+      requestStream.close();
 
       if (responded) {
         return;
