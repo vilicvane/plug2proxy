@@ -3,7 +3,7 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 import {URL} from 'url';
 
-import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
+import {HOP_BY_HOP_HEADERS_REGEX, destroyOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
 
 import {Client} from './client';
@@ -49,7 +49,7 @@ export class Session {
             console.error(
               `[${this.id}] received unexpected push stream ${headers.type}.`,
             );
-            pushStream.close();
+            pushStream.destroy();
             break;
         }
       })
@@ -88,7 +88,7 @@ export class Session {
             `[${this.id}] session initialize error (${status}):`,
             headers.message,
           );
-          sessionStream.close();
+          sessionStream.destroy();
         }
       })
       .on('close', () => {
@@ -134,7 +134,7 @@ export class Session {
     try {
       route = await client.router.route(host);
 
-      if (pushStream.closed) {
+      if (pushStream.destroyed) {
         console.debug(`${logPrefix} connect push stream closed while routing.`);
         return;
       }
@@ -156,7 +156,7 @@ export class Session {
         );
       });
 
-      pushStream.close();
+      pushStream.destroy();
 
       return;
     }
@@ -202,10 +202,10 @@ export class Session {
       .on('close', () => {
         console.debug(`${logPrefix} out socket "close".`);
 
-        pushStream.close();
+        pushStream.destroy();
 
         if (inStream) {
-          closeOnDrain(inStream);
+          destroyOnDrain(inStream);
         }
       })
       .on('error', error => {
@@ -214,7 +214,7 @@ export class Session {
 
     // Debugging logs added at the beginning of `connect()`.
     pushStream.on('close', () => {
-      inStream?.close();
+      inStream?.destroy();
       outSocket.destroy();
     });
   }
@@ -268,7 +268,7 @@ export class Session {
     try {
       route = await client.router.route(host);
 
-      if (requestStream.closed && !requestStream.readableEnded) {
+      if (requestStream.destroyed) {
         console.debug(`${logPrefix} push stream closed while routing.`);
         return;
       }
@@ -290,7 +290,7 @@ export class Session {
         );
       });
 
-      requestStream.close();
+      requestStream.destroy();
 
       return;
     }
@@ -354,7 +354,7 @@ export class Session {
           })
           .on('close', () => {
             console.debug(`${logPrefix} proxy response "close".`);
-            closeOnDrain(responseStream);
+            destroyOnDrain(responseStream);
           })
           .on('error', error => {
             console.error(`${logPrefix} proxy response error:`, error.message);
@@ -364,7 +364,7 @@ export class Session {
           .on('close', () => {
             console.debug(`${logPrefix} response stream "close".`);
             proxyResponse.destroy();
-            requestStream.close();
+            requestStream.destroy();
           })
           .on('error', error => {
             console.error(`${logPrefix} response stream error:`, error.message);
@@ -376,17 +376,13 @@ export class Session {
 
     // Debugging logs added at the beginning of `request()`.
     requestStream.on('close', () => {
-      if (requestStream.readableEnded) {
-        return;
-      }
-
       proxyRequest.destroy();
     });
 
     // Seems that ClientRequest does not have "close" event.
     proxyRequest.on('error', error => {
       console.error(`${logPrefix} proxy request error:`, error.message);
-      requestStream.close();
+      requestStream.destroy();
 
       if (responded) {
         return;

@@ -143,7 +143,7 @@ export class Proxy {
         connectEventSession.end();
 
         if (inSocket.destroyed) {
-          outConnectStream.close();
+          outConnectStream.destroy();
           return;
         }
 
@@ -166,7 +166,7 @@ export class Proxy {
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
 
-          outConnectStream.close();
+          outConnectStream.destroy();
           return;
         }
 
@@ -180,7 +180,7 @@ export class Proxy {
         // Debugging messages has already been added at the beginning of
         // `connect()`.
         inSocket.on('close', () => {
-          outConnectStream.close();
+          outConnectStream.destroy();
         });
 
         outConnectStream
@@ -227,12 +227,12 @@ export class Proxy {
           console.error(
             `${logPrefix} in socket destroyed while creating push stream.`,
           );
-          pushStream.close();
+          pushStream.destroy();
         } else {
           pushStream.respond();
 
           inSocket.on('close', () => {
-            pushStream.close();
+            pushStream.destroy();
           });
         }
       },
@@ -426,7 +426,7 @@ export class Proxy {
         pushEventSession.end();
 
         if (request.socket.destroyed) {
-          outStream.close();
+          outStream.destroy();
           return;
         }
 
@@ -455,7 +455,7 @@ export class Proxy {
             `${logPrefix} unexpected request type ${headers.type}.`,
           );
           response.writeHead(500).end();
-          outStream.close();
+          outStream.destroy();
           return;
         }
 
@@ -480,7 +480,7 @@ export class Proxy {
           .on('close', () => {
             console.debug(`${logPrefix} out response stream "close".`);
             destroyOnDrain(response);
-            outRequestStream!.close();
+            outRequestStream!.destroy();
           })
           .on('error', error => {
             console.error(
@@ -491,7 +491,7 @@ export class Proxy {
 
         // Debugging messages added at the beginning of `request()`.
         response.on('close', () => {
-          outResponseStream!.close();
+          outResponseStream!.destroy();
         });
       },
     );
@@ -523,7 +523,7 @@ export class Proxy {
           });
 
         if (request.destroyed) {
-          outRequestStream.close();
+          outRequestStream.destroy();
         } else {
           outRequestStream.respond();
 
@@ -531,7 +531,7 @@ export class Proxy {
 
           // Debugging messages added at the beginning of `request()`.
           request.on('close', () => {
-            outResponseStream?.close();
+            outResponseStream?.destroy();
           });
         }
       },

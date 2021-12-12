@@ -1,4 +1,3 @@
-import * as HTTP2 from 'http2';
 import {Duplex, Readable, Transform, Writable} from 'stream';
 
 import {StreamJet} from 'socket-jet';
@@ -145,20 +144,5 @@ export function destroyOnDrain(socket: Writable): void {
 
   socket.on('drain', () => {
     socket.destroy();
-  });
-}
-
-export function closeOnDrain(stream: HTTP2.Http2Stream): void {
-  if (stream.closed) {
-    return;
-  }
-
-  if (!stream.writable || stream.writableLength === 0) {
-    stream.close();
-    return;
-  }
-
-  stream.on('drain', () => {
-    stream.close();
   });
 }
