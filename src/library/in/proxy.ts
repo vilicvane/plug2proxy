@@ -25,6 +25,7 @@ const {
 const VIA = `1.1 ${HOSTNAME} (${PACKAGE_NAME}/${PACKAGE_VERSION})`;
 
 const ROUTE_CACHE_EXPIRATION = 10 * 60_000;
+const SOCKET_TIMEOUT_AFTER_END = 60_000;
 
 export interface ProxyOptions {
   /**
@@ -96,9 +97,14 @@ export class Proxy {
     inSocket
       .on('end', () => {
         console.debug(`${logPrefix} in socket "end".`);
+        inSocket.setTimeout(SOCKET_TIMEOUT_AFTER_END);
       })
       .on('close', () => {
         console.debug(`${logPrefix} in socket "close".`);
+      })
+      .on('timeout', () => {
+        console.debug(`${logPrefix} in socket "timeout".`);
+        inSocket.destroy();
       })
       .on('error', error => {
         console.error(`${logPrefix} in socket error:`, error.message);
