@@ -214,7 +214,10 @@ export class Session {
 
     // Debugging logs added at the beginning of `connect()`.
     pushStream.on('close', () => {
-      inStream?.destroy();
+      if (inStream) {
+        destroyOnDrain(inStream);
+      }
+
       outSocket.destroy();
     });
   }
