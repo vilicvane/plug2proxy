@@ -533,7 +533,7 @@ export class Proxy {
         } else {
           outRequestStream.respond();
 
-          request.pipe(outRequestStream);
+          request.socket.pipe(outRequestStream);
 
           // Debugging messages added at the beginning of `request()`.
           request.socket.on('close', () => {
