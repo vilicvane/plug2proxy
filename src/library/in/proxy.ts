@@ -528,7 +528,7 @@ export class Proxy {
             );
           });
 
-        if (request.destroyed) {
+        if (request.socket.destroyed) {
           outRequestStream.destroy();
         } else {
           outRequestStream.respond();
@@ -536,7 +536,7 @@ export class Proxy {
           request.pipe(outRequestStream);
 
           // Debugging messages added at the beginning of `request()`.
-          request.on('close', () => {
+          request.socket.on('close', () => {
             outResponseStream?.destroy();
           });
         }
