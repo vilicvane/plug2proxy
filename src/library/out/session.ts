@@ -3,7 +3,7 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 import {URL} from 'url';
 
-import {HOP_BY_HOP_HEADERS_REGEX, destroyOnDrain} from '../@common';
+import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
 
 import {Client} from './client';
@@ -205,7 +205,7 @@ export class Session {
         pushStream.destroy();
 
         if (inStream) {
-          destroyOnDrain(inStream);
+          closeOnDrain(inStream);
         }
       })
       .on('error', error => {
@@ -215,7 +215,7 @@ export class Session {
     // Debugging logs added at the beginning of `connect()`.
     pushStream.on('close', () => {
       if (inStream) {
-        destroyOnDrain(inStream);
+        closeOnDrain(inStream);
       }
 
       outSocket.destroy();
@@ -357,7 +357,7 @@ export class Session {
           })
           .on('close', () => {
             console.debug(`${logPrefix} proxy response "close".`);
-            destroyOnDrain(responseStream);
+            closeOnDrain(responseStream);
           })
           .on('error', error => {
             console.error(`${logPrefix} proxy response error:`, error.message);
