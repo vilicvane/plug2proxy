@@ -271,7 +271,7 @@ export class Session {
     try {
       route = await client.router.route(host);
 
-      if (requestStream.destroyed) {
+      if (!requestStream.readableEnded && requestStream.destroyed) {
         console.debug(`${logPrefix} push stream closed while routing.`);
         return;
       }
@@ -376,11 +376,6 @@ export class Session {
     );
 
     requestStream.pipe(proxyRequest);
-
-    // Debugging logs added at the beginning of `request()`.
-    requestStream.on('close', () => {
-      proxyRequest.destroy();
-    });
 
     // Seems that ClientRequest does not have "close" event.
     proxyRequest.on('error', error => {
