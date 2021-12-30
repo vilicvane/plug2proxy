@@ -65,9 +65,7 @@ export class Client {
     }
 
     console.debug();
-    console.debug(
-      `  (${this.id})[session:push(stream)] read/write in/out name`,
-    );
+    console.debug(`(${this.id})[session:push(stream)] read/write in/out name`);
 
     for (let {type, description, id, stream} of activeStreamEntrySet) {
       console.debug(

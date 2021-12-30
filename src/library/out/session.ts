@@ -230,7 +230,7 @@ export class Session {
     headers: HTTP2.IncomingHttpHeaders,
   ): Promise<void>;
   private async request(
-    requestStream: HTTP2.ClientHttp2Stream,
+    pushStream: HTTP2.ClientHttp2Stream,
     {
       method,
       url,
@@ -243,30 +243,25 @@ export class Session {
   ): Promise<void> {
     const client = this.client;
 
-    let id = `${this.id}:${requestStream.id}`;
+    let id = `${this.id}:${pushStream.id}`;
 
     console.info(`(${client.id})[${id}] request:`, method, url);
 
     let host = new URL(url).hostname;
 
-    client.addActiveStream(
-      'push',
-      `request ${method} ${url}`,
-      id,
-      requestStream,
-    );
+    client.addActiveStream('push', `request ${method} ${url}`, id, pushStream);
 
     let logPrefix = `(${client.id})[${id}][${host}]`;
 
-    requestStream
+    pushStream
       .on('end', () => {
-        console.debug(`${logPrefix} request stream "end".`);
+        console.debug(`${logPrefix} request push stream "end".`);
       })
       .on('close', () => {
-        console.debug(`${logPrefix} request stream "close".`);
+        console.debug(`${logPrefix} request push stream "close".`);
       })
       .on('error', error => {
-        console.debug(`${logPrefix} request stream error:`, error.message);
+        console.debug(`${logPrefix} request push stream error:`, error.message);
       });
 
     let route: string;
@@ -274,10 +269,8 @@ export class Session {
     try {
       route = await client.router.route(host);
 
-      if (!requestStream.readableEnded && requestStream.destroyed) {
-        console.debug(
-          `${logPrefix} push stream closed without readable ended while routing.`,
-        );
+      if (pushStream.destroyed) {
+        console.debug(`${logPrefix} request push stream closed while routing.`);
         return;
       }
     } catch (error: any) {
@@ -298,7 +291,7 @@ export class Session {
         );
       });
 
-      requestStream.destroy();
+      pushStream.destroy();
 
       return;
     }
@@ -308,6 +301,18 @@ export class Session {
     let headers = JSON.parse(headersJSON);
 
     let responded = false;
+
+    let requestResponseStream = this.requestServer(
+      id,
+      `request-response ${url}`,
+      {
+        id,
+        type: 'request-response',
+      },
+      {
+        endStream: false,
+      },
+    );
 
     let proxyRequest = HTTP.request(
       url,
@@ -338,23 +343,16 @@ export class Session {
           }
         }
 
-        let responseStream = this.requestServer(
+        this.requestServer(id, `response-headers ${url}`, {
           id,
-          `response-stream ${url}`,
-          {
-            id,
-            type: 'response-stream',
-            status,
-            headers: JSON.stringify(headers),
-          },
-          {
-            endStream: false,
-          },
-        );
+          type: 'response-headers',
+          status,
+          headers: JSON.stringify(headers),
+        });
 
         responded = true;
 
-        proxyResponse.pipe(responseStream);
+        proxyResponse.pipe(requestResponseStream);
 
         proxyResponse
           .on('end', () => {
@@ -362,30 +360,35 @@ export class Session {
           })
           .on('close', () => {
             console.debug(`${logPrefix} proxy response "close".`);
-            closeOnDrain(responseStream);
+            closeOnDrain(requestResponseStream);
           })
           .on('error', error => {
             console.error(`${logPrefix} proxy response error:`, error.message);
           });
-
-        responseStream
-          .on('close', () => {
-            console.debug(`${logPrefix} response stream "close".`);
-            proxyResponse.destroy();
-            requestStream.destroy();
-          })
-          .on('error', error => {
-            console.error(`${logPrefix} response stream error:`, error.message);
-          });
       },
     );
 
-    requestStream.pipe(proxyRequest);
+    requestResponseStream.pipe(proxyRequest);
+
+    requestResponseStream
+      .on('end', () => {
+        console.debug(`${logPrefix} request-response stream "end".`);
+      })
+      .on('close', () => {
+        console.debug(`${logPrefix} request-response stream "close".`);
+        proxyRequest.destroy();
+      })
+      .on('error', error => {
+        console.error(
+          `${logPrefix} request-response stream error:`,
+          error.message,
+        );
+      });
 
     // Seems that ClientRequest does not have "close" event.
     proxyRequest.on('error', error => {
       console.error(`${logPrefix} proxy request error:`, error.message);
-      requestStream.destroy();
+      pushStream.destroy();
 
       if (responded) {
         return;
@@ -396,20 +399,20 @@ export class Session {
       if ((error as any).code === 'ENOTFOUND') {
         responseStream = this.requestServer(
           id,
-          `response-stream (404) ${url}`,
+          `request-response (404) ${url}`,
           {
             id,
-            type: 'response-stream',
+            type: 'request-headers-end',
             status: 404,
           },
         );
       } else {
         responseStream = this.requestServer(
           id,
-          `response-stream (500) ${url}`,
+          `request-response (500) ${url}`,
           {
             id,
-            type: 'response-stream',
+            type: 'request-headers-end',
             status: 500,
           },
         );
@@ -421,6 +424,15 @@ export class Session {
           error.message,
         );
       });
+    });
+
+    // Debugging logs added at the beginning of `request()`.
+    pushStream.on('close', () => {
+      if (requestResponseStream) {
+        closeOnDrain(requestResponseStream);
+      }
+
+      proxyRequest.destroy();
     });
   }
 
