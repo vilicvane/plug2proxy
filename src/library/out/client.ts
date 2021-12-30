@@ -65,7 +65,9 @@ export class Client {
     }
 
     console.debug();
-    console.debug(`  [session:push(stream)] read/write in/out name`);
+    console.debug(
+      `  (${this.id})[session:push(stream)] read/write in/out name`,
+    );
 
     for (let {type, description, id, stream} of activeStreamEntrySet) {
       console.debug(
@@ -78,7 +80,11 @@ export class Client {
     console.debug();
   }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
 
-  constructor(readonly router: Router, readonly options: ClientOptions) {
+  constructor(
+    readonly router: Router,
+    readonly options: ClientOptions,
+    readonly id = '-',
+  ) {
     let {
       password,
       connect: {authority: connectAuthority, options: connectOptions},
@@ -93,6 +99,8 @@ export class Client {
     this.connectOptions = connectOptions;
 
     this.sessionCandidates = sessionCandidates;
+
+    console.info(`(${id}) new client (authority ${this.connectAuthority}).`);
 
     this.createSession();
   }

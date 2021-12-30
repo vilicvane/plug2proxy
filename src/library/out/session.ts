@@ -81,22 +81,25 @@ export class Session {
 
         if (status === 200) {
           this.id = headers.id as string;
-          console.info(`[${this.id}] session ready.`);
+          console.info(`(${client.id})[${this.id}] session ready.`);
           client.addActiveStream('request', 'session', this.id, sessionStream);
         } else {
           console.error(
-            `[${this.id}] session initialize error (${status}):`,
+            `(${client.id})[${this.id}] session initialize error (${status}):`,
             headers.message,
           );
           sessionStream.destroy();
         }
       })
       .on('close', () => {
-        console.debug(`[${this.id}] session stream "close".`);
+        console.debug(`(${client.id})[${this.id}] session stream "close".`);
         client.removeSession(this);
       })
       .on('error', error => {
-        console.error(`[${this.id}] session stream error:`, error.message);
+        console.error(
+          `(${client.id})[${this.id}] session stream error:`,
+          error.message,
+        );
       });
   }
 
@@ -112,11 +115,11 @@ export class Session {
 
     let id = `${this.id}:${pushStream.id}`;
 
-    console.info(`[${id}] connect: ${host}:${port}`);
+    console.info(`(${client.id})[${id}] connect: ${host}:${port}`);
 
     client.addActiveStream('push', `connect ${host}:${port}`, id, pushStream);
 
-    let logPrefix = `[${id}][${host}]`;
+    let logPrefix = `(${client.id})[${id}][${host}]`;
 
     pushStream
       .on('end', () => {
@@ -242,7 +245,7 @@ export class Session {
 
     let id = `${this.id}:${requestStream.id}`;
 
-    console.info(`[${id}] request:`, method, url);
+    console.info(`(${client.id})[${id}] request:`, method, url);
 
     let host = new URL(url).hostname;
 
@@ -253,7 +256,7 @@ export class Session {
       requestStream,
     );
 
-    let logPrefix = `[${id}][${host}]`;
+    let logPrefix = `(${client.id})[${id}][${host}]`;
 
     requestStream
       .on('end', () => {

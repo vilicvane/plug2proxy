@@ -28,8 +28,12 @@ main(async ([configModulePath]) => {
   } else {
     const router = new Router(config.router);
 
-    for (let clientOptions of config.clients) {
-      const _outClient = new Out.Client(router, clientOptions);
+    for (let [index, clientOptions] of config.clients.entries()) {
+      const _outClient = new Out.Client(
+        router,
+        clientOptions,
+        index.toString(),
+      );
     }
   }
 

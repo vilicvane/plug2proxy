@@ -92,7 +92,7 @@ export class Server {
 
       let id = (++lastSessionId).toString();
 
-      let logPrefix = `[${id}(${remoteAddress})]`;
+      let logPrefix = `[${id}](${remoteAddress})`;
 
       console.info(`${logPrefix} new session accepted.`);
 
