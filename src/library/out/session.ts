@@ -272,7 +272,9 @@ export class Session {
       route = await client.router.route(host);
 
       if (!requestStream.readableEnded && requestStream.destroyed) {
-        console.debug(`${logPrefix} push stream closed while routing.`);
+        console.debug(
+          `${logPrefix} push stream closed without readable ended while routing.`,
+        );
         return;
       }
     } catch (error: any) {

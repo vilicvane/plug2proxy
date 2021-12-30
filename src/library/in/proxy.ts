@@ -519,7 +519,6 @@ export class Proxy {
         outRequestStream
           .on('close', () => {
             console.debug(`${logPrefix} out request stream "close".`);
-            request!.destroy();
           })
           .on('error', error => {
             console.error(
