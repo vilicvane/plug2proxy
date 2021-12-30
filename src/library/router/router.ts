@@ -10,12 +10,14 @@ import * as MaxMind from 'maxmind';
 import * as MicroMatch from 'micromatch';
 import * as TarStream from 'tar-stream';
 
+const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];
+
 const PRIVATE_NETWORK_MATCHES = [
+  ...LOOPBACK_MATCHES,
   '10.0.0.0/8',
   '172.16.0.0/12',
   '192.168.0.0/16',
 ];
-const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];
 
 const GEOLITE2_UPDATE_INTERVAL = 24 * 3600_000;
 
