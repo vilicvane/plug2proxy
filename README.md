@@ -25,7 +25,7 @@ npm install --global plug2proxy
 plug2proxy in.p2p.js
 ```
 
-配置文件 `in.p2p.js`，详见 [in/server.ts](./packages/plug2proxy/src/library/in/server.ts)、[in/proxy.ts](./packages/plug2proxy/src/library/in/proxy.ts)。
+配置文件 `in.p2p.js`，详见 [in/server.ts](./src/library/in/server.ts)、[in/proxy.ts](./src/library/in/proxy.ts)。
 
 ```js
 const FS = require('fs');
@@ -60,7 +60,7 @@ module.exports = {
 plug2proxy out.p2p.js
 ```
 
-配置文件 `out.p2p.js`，详见 [router.ts](./packages/plug2proxy/src/library/router/router.ts)、[out/client.ts](./packages/plug2proxy/src/library/out/client.ts)。
+配置文件 `out.p2p.js`，详见 [router.ts](./src/library/router/router.ts)、[out/client.ts](./src/library/out/client.ts)。
 
 ```js
 module.exports = {
