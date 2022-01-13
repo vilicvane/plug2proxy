@@ -81,7 +81,7 @@ module.exports = {
     fallback: 'proxy',
     // MaxMind GeoLite2（Country）配置，用于 geoip 规则。
     geolite2: {
-      // https://support.maxmind.com/account-faq/license-keys/how-do-i-generate-a-license-key/
+      // https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key
       licenseKey: '...',
     },
   },

@@ -89,7 +89,7 @@ export interface RouterOptions {
     path?: string;
     /**
      * MaxMind License Key，填写后每日更新。
-     * @see https://support.maxmind.com/account-faq/license-keys/how-do-i-generate-a-license-key/
+     * @see https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key
      */
     licenseKey?: string;
   };
