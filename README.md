@@ -40,6 +40,7 @@ module.exports = {
     },
     http2: {
       // 可使用 acme.sh 等工具生成。
+      // 不存在 http2 配置时会使用默认的过期证书（需搭配出口 `rejectUnauthorized: false`）使用。
       cert: FS.readFileSync('server.crt'),
       key: FS.readFileSync('server.key'),
     },
@@ -91,6 +92,10 @@ module.exports = {
       connect: {
         // 入口服务器连接参数。
         authority: 'https://localhost:8001',
+        options: {
+          // 不检查连接安全性，搭配自签名证书使用。
+          // rejectUnauthorized: false,
+        },
       },
     },
   ],
