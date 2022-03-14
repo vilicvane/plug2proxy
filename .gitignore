@@ -12,6 +12,7 @@ test/
 *.crt
 *.key
 *.pem
+!certs/*
 *.p2p.js
 *.p2p-*.js
 geolite2.mmdb

@@ -4,5 +4,6 @@
 !/src/cli/**/*.ts
 !/bld/library/**
 !/bld/cli/**
+!/certs/**
 
 *.tsbuildinfo

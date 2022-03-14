@@ -1,7 +1,14 @@
+import * as FS from 'fs';
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
+import * as Path from 'path';
 
 import _ from 'lodash';
+
+const HTTP2_OPTIONS_DEFAULT: HTTP2.SecureServerOptions = {
+  key: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.key')),
+  cert: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.crt')),
+};
 
 export interface ServerOptions {
   /**
@@ -36,8 +43,11 @@ export interface ServerOptions {
    *   key: FS.readFileSync('localhost-key.pem'),
    * };
    * ```
+   *
+   * 默认值为 Common Name 是 plug2proxy 的过期证书，需配合出口
+   * `connect.options.rejectUnauthorized: false` 使用。
    */
-  http2: HTTP2.ServerOptions;
+  http2?: HTTP2.SecureServerOptions;
 }
 
 export class Server {
@@ -52,7 +62,7 @@ export class Server {
   constructor({
     password,
     listen: listenOptions,
-    http2: http2Options,
+    http2: http2Options = HTTP2_OPTIONS_DEFAULT,
   }: ServerOptions) {
     this.password = password;
 
