@@ -9,6 +9,7 @@ import {groupRawHeaders} from '../@utils';
 import {Client} from './client';
 
 const SESSION_PING_INTERVAL = 10_000;
+const CLIENT_CONNECT_TIMEOUT = 5_000;
 
 export class Session {
   private id = '-';
@@ -19,12 +20,15 @@ export class Session {
 
   constructor(readonly client: Client) {
     let pingTimer: NodeJS.Timer | undefined;
+    let connectTimeout: NodeJS.Timeout | undefined;
 
     let http2Client = HTTP2.connect(
       client.connectAuthority,
       client.connectOptions,
     )
       .on('connect', () => {
+        clearTimeout(connectTimeout!);
+
         pingTimer = setInterval(() => {
           http2Client.ping(error => {
             if (!error) {
@@ -107,6 +111,15 @@ export class Session {
           error.message,
         );
       });
+
+    connectTimeout = setTimeout(() => {
+      console.error(`(${client.id}) connect timeout.`);
+
+      client.removeSession(this);
+
+      sessionStream.destroy();
+      http2Client.destroy();
+    }, CLIENT_CONNECT_TIMEOUT);
   }
 
   private async connect(
