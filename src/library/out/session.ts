@@ -31,7 +31,10 @@ export class Session {
               return;
             }
 
-            console.error(`[${this.id}] ping error:`, error.message);
+            console.error(
+              `(${client.id})[${this.id}] ping error:`,
+              error.message,
+            );
             sessionStream.destroy();
             http2Client.destroy();
           });
@@ -47,21 +50,24 @@ export class Session {
             break;
           default:
             console.error(
-              `[${this.id}] received unexpected push stream ${headers.type}.`,
+              `(${client.id})[${this.id}] received unexpected push stream ${headers.type}.`,
             );
             pushStream.destroy();
             break;
         }
       })
       .on('close', () => {
-        console.debug(`[${this.id}] session "close"`);
+        console.debug(`(${client.id})[${this.id}] session "close"`);
 
         if (pingTimer) {
           clearInterval(pingTimer);
         }
       })
       .on('error', error => {
-        console.error(`[${this.id}] session error:`, error.message);
+        console.error(
+          `(${client.id})[${this.id}] session error:`,
+          error.message,
+        );
       });
 
     this.http2Client = http2Client;

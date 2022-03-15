@@ -48,7 +48,9 @@ export class Client {
 
     sessions.push(new Session(this));
 
-    console.info(`new session created, ${sessions.length} in total.`);
+    console.info(
+      `(${this.id}) new session created, ${sessions.length} in total.`,
+    );
 
     if (sessions.length < this.sessionCandidates) {
       this.createSession();
@@ -114,7 +116,7 @@ export class Client {
 
     sessions.splice(index, 1);
 
-    console.info(`removed 1 session, ${sessions.length} remains.`);
+    console.info(`(${this.id}) removed 1 session, ${sessions.length} remains.`);
 
     this.createSession();
   }
