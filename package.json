@@ -18,6 +18,7 @@
     "@types/node": "^16.11.10",
     "@types/tar-stream": "^2.2.2",
     "ip-matching": "^2.1.2",
+    "is-typeof-property": "^0.1.0",
     "lodash": "^4.17.21",
     "main-function": "^0.1.4",
     "maxmind": "^4.3.2",

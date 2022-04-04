@@ -1,6 +1,6 @@
 import {EventEmitter} from 'events';
 
-import {isTupleElementTypeOf} from './miscellaneous';
+import isTypeOfProperty from 'is-typeof-property';
 
 export class EventSession<
   TEndValue = void,
@@ -202,7 +202,7 @@ export function refEventEmitter(
   let [endOnEventNames, callback] =
     args.length === 2
       ? args
-      : isTupleElementTypeOf(args, 0, 'function')
+      : isTypeOfProperty(args, 0, 'function')
       ? [undefined, args[0]]
       : [args[0], undefined];
 
