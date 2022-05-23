@@ -3,6 +3,8 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 import {URL} from 'url';
 
+import bytes from 'bytes';
+
 import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
 
@@ -10,6 +12,8 @@ import {Client} from './client';
 
 const SESSION_PING_INTERVAL = 10_000;
 const CLIENT_CONNECT_TIMEOUT = 5_000;
+
+const WINDOW_SIZE = bytes('32MB');
 
 export class Session {
   private id = '-';
@@ -22,12 +26,19 @@ export class Session {
     let pingTimer: NodeJS.Timer | undefined;
     let connectTimeout: NodeJS.Timeout | undefined;
 
-    let http2Client = HTTP2.connect(
-      client.connectAuthority,
-      client.connectOptions,
-    )
+    let connectOptions = client.connectOptions;
+
+    let http2Client = HTTP2.connect(client.connectAuthority, {
+      settings: {
+        initialWindowSize: WINDOW_SIZE,
+        ...connectOptions.settings,
+      },
+      ...connectOptions,
+    })
       .on('connect', () => {
         clearTimeout(connectTimeout!);
+
+        http2Client.setLocalWindowSize(WINDOW_SIZE);
 
         pingTimer = setInterval(() => {
           http2Client.ping(error => {

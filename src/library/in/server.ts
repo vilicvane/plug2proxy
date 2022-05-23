@@ -3,10 +3,7 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 import * as Path from 'path';
 
-import bytes from 'bytes';
 import _ from 'lodash';
-
-const INITIAL_WINDOW_SIZE = bytes('128MB');
 
 const HTTP2_OPTIONS_DEFAULT: HTTP2.SecureServerOptions = {
   key: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.key')),
@@ -71,13 +68,7 @@ export class Server {
 
     let lastSessionId = 0;
 
-    let http2SecureServer = HTTP2.createSecureServer({
-      settings: {
-        initialWindowSize: INITIAL_WINDOW_SIZE,
-        ...http2Options.settings,
-      },
-      ...http2Options,
-    });
+    let http2SecureServer = HTTP2.createSecureServer(http2Options);
 
     http2SecureServer.on('stream', (stream, headers) => {
       if (headers.type !== 'session') {
