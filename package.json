@@ -13,10 +13,12 @@
     "test": "yarn lint-prettier && yarn build && yarn lint"
   },
   "dependencies": {
+    "@types/bytes": "^3.1.1",
     "@types/lodash": "^4.14.177",
     "@types/micromatch": "^4.0.2",
     "@types/node": "^16.11.10",
     "@types/tar-stream": "^2.2.2",
+    "bytes": "^3.1.2",
     "ip-matching": "^2.1.2",
     "is-typeof-property": "^0.1.0",
     "lodash": "^4.17.21",
