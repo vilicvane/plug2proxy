@@ -3,7 +3,10 @@ import * as HTTP2 from 'http2';
 import * as Net from 'net';
 import * as Path from 'path';
 
+import bytes from 'bytes';
 import _ from 'lodash';
+
+const WINDOW_SIZE = bytes('32MB');
 
 const HTTP2_OPTIONS_DEFAULT: HTTP2.SecureServerOptions = {
   key: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.key')),
@@ -68,71 +71,81 @@ export class Server {
 
     let lastSessionId = 0;
 
-    let http2SecureServer = HTTP2.createSecureServer(http2Options);
+    let http2SecureServer = HTTP2.createSecureServer({
+      settings: {
+        initialWindowSize: WINDOW_SIZE,
+        ...http2Options.settings,
+      },
+      ...http2Options,
+    });
 
-    http2SecureServer.on('stream', (stream, headers) => {
-      if (headers.type !== 'session') {
-        if (http2SecureServer.listenerCount('stream') === 1) {
-          console.error(
-            `received unexpected non-session request: ${headers.type}`,
-          );
+    http2SecureServer
+      .on('session', session => {
+        session.setLocalWindowSize(WINDOW_SIZE);
+      })
+      .on('stream', (stream, headers) => {
+        if (headers.type !== 'session') {
+          if (http2SecureServer.listenerCount('stream') === 1) {
+            console.error(
+              `received unexpected non-session request: ${headers.type}`,
+            );
+          }
+
+          return;
         }
 
-        return;
-      }
+        let remoteAddress = stream.session.socket.remoteAddress ?? '(unknown)';
 
-      let remoteAddress = stream.session.socket.remoteAddress ?? '(unknown)';
+        if (headers.password !== password) {
+          console.warn(
+            `authentication failed (remote ${remoteAddress}): wrong password`,
+          );
 
-      if (headers.password !== password) {
-        console.warn(
-          `authentication failed (remote ${remoteAddress}): wrong password`,
-        );
+          stream.respond(
+            {
+              ':status': 403,
+              message: 'wrong password',
+            },
+            {
+              endStream: true,
+            },
+          );
+          return;
+        }
 
-        stream.respond(
-          {
-            ':status': 403,
-            message: 'wrong password',
-          },
-          {
-            endStream: true,
-          },
-        );
-        return;
-      }
+        let id = (++lastSessionId).toString();
 
-      let id = (++lastSessionId).toString();
+        let logPrefix = `[${id}](${remoteAddress})`;
 
-      let logPrefix = `[${id}](${remoteAddress})`;
+        console.info(`${logPrefix} new session accepted.`);
 
-      console.info(`${logPrefix} new session accepted.`);
+        let candidate: SessionCandidate = {
+          id,
+          stream,
+        };
 
-      let candidate: SessionCandidate = {
-        id,
-        stream,
-      };
-
-      stream.respond({
-        ':status': 200,
-        id,
-      });
-
-      stream
-        .on('close', () => {
-          _.pull(this.sessionCandidates, candidate);
-          console.info(`${logPrefix} session "close".`);
-        })
-        .on('error', error => {
-          console.error(`${logPrefix} session error:`, error.message);
+        stream.respond({
+          ':status': 200,
+          id,
         });
 
-      this.sessionCandidates.push(candidate);
+        stream
+          .on('close', () => {
+            _.pull(this.sessionCandidates, candidate);
+            console.info(`${logPrefix} session "close".`);
+          })
+          .on('error', error => {
+            console.error(`${logPrefix} session error:`, error.message);
+          });
 
-      for (let resolver of this.sessionCandidateResolvers) {
-        resolver(candidate);
-      }
+        this.sessionCandidates.push(candidate);
 
-      this.sessionCandidateResolvers.splice(0);
-    });
+        for (let resolver of this.sessionCandidateResolvers) {
+          resolver(candidate);
+        }
+
+        this.sessionCandidateResolvers.splice(0);
+      });
 
     http2SecureServer.listen(listenOptions, () => {
       let address = http2SecureServer.address();
