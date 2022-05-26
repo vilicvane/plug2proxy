@@ -1,5 +1,5 @@
 import * as HTTP from 'http';
-import * as HTTP2 from 'http2';
+import type * as HTTP2 from 'http2';
 import * as Net from 'net';
 import * as OS from 'os';
 import {URL} from 'url';
@@ -10,9 +10,9 @@ import {
   writeHTTPHead,
 } from '../@common';
 import {groupRawHeaders, refEventEmitter} from '../@utils';
-import {InRoute} from '../types';
+import type {InRoute} from '../types';
 
-import {Server} from './server';
+import type {Server} from './server';
 
 const HOSTNAME = OS.hostname();
 

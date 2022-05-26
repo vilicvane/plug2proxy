@@ -1,6 +1,6 @@
 import * as FS from 'fs';
 import * as HTTP2 from 'http2';
-import * as Net from 'net';
+import type * as Net from 'net';
 import * as Path from 'path';
 
 import bytes from 'bytes';

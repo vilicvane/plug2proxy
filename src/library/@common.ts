@@ -1,9 +1,10 @@
-import * as HTTP2 from 'http2';
-import {Duplex, Readable, Transform, Writable} from 'stream';
+import type * as HTTP2 from 'http2';
+import type {Duplex, Readable, Writable} from 'stream';
+import { Transform} from 'stream';
 
-import {StreamJet} from 'socket-jet';
+import type {StreamJet} from 'socket-jet';
 
-import {InOutPacket, OutInPacket, StreamPacket} from './packets';
+import type {InOutPacket, OutInPacket, StreamPacket} from './packets';
 
 // create a case-insensitive RegExp to match "hop by hop" headers
 export const HOP_BY_HOP_HEADERS_REGEX = new RegExp(

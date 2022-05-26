@@ -3,12 +3,14 @@
   "version": "0.1.42",
   "license": "MIT",
   "author": "vilicvane",
-  "main": "bld/library/index.js",
-  "types": "bld/library/index.d.ts",
   "bin": "bld/cli/main.js",
+  "exports": {
+    "types": "./bld/library/index.d.ts",
+    "require": "./bld/library/index.js"
+  },
   "scripts": {
     "build": "rimraf ./bld && tsc --build",
-    "lint": "eslint .",
+    "lint": "run-in-every eslint-project --parallel --echo -- eslint --config {configFileName} .",
     "lint-prettier": "prettier --check .",
     "test": "yarn lint-prettier && yarn build && yarn lint"
   },
@@ -28,14 +30,15 @@
     "socket-jet": "^0.2.24",
     "tar-stream": "^2.2.0",
     "tslang": "^0.1.26",
-    "tslib": "^2.3.1"
+    "tslib": "^2.4.0"
   },
   "devDependencies": {
-    "@mufan/code": "^0.2.10",
-    "@mufan/eslint-plugin": "^0.1.48",
-    "eslint": "^8.4.0",
-    "prettier": "^2.5.1",
+    "@mufan/code": "^0.2.13",
+    "@mufan/eslint-plugin": "^0.1.67",
+    "eslint": "^8.16.0",
+    "prettier": "^2.6.2",
     "rimraf": "^3.0.2",
-    "typescript": "^4.5.2"
+    "run-in-every": "^0.2.0",
+    "typescript": "^4.7.2"
   }
 }

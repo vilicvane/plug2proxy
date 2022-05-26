@@ -4,7 +4,8 @@ import * as Path from 'path';
 
 import main, {BACKGROUND} from 'main-function';
 
-import {In, Out, Router, RouterOptions} from '../library';
+import type { RouterOptions} from '../library';
+import {In, Out, Router} from '../library';
 
 type Config =
   | {

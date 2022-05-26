@@ -1,6 +1,6 @@
-import {OutgoingHttpHeaders} from 'http';
+import type {OutgoingHttpHeaders} from 'http';
 
-import {InRoute} from './types';
+import type {InRoute} from './types';
 
 export type InOutPacket =
   | InOutPingPacket

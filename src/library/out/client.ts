@@ -1,9 +1,9 @@
-import * as HTTP2 from 'http2';
+import type * as HTTP2 from 'http2';
 
 import _ from 'lodash';
 
 import {BatchScheduler} from '../@utils';
-import {Router} from '../router';
+import type {Router} from '../router';
 
 import {Session} from './session';
 

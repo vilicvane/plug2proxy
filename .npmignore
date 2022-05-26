@@ -1,9 +1,7 @@
 *
-
-!/src/library/**/*.ts
-!/src/cli/**/*.ts
+!/src/library/**/*.{ts,tsx}
 !/bld/library/**
+!/src/cli/**/*.{ts,tsx}
 !/bld/cli/**
 !/certs/**
-
 *.tsbuildinfo

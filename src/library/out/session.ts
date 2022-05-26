@@ -8,7 +8,7 @@ import bytes from 'bytes';
 import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {groupRawHeaders} from '../@utils';
 
-import {Client} from './client';
+import type {Client} from './client';
 
 const SESSION_PING_INTERVAL = 10_000;
 const CLIENT_CONNECT_TIMEOUT = 5_000;
