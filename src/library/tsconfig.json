@@ -2,9 +2,7 @@
   "extends": "@mufan/code/tsconfig.json",
   "compilerOptions": {
     "composite": true,
-    "moduleResolution": "nodenext",
     "types": ["node"],
-    "noImplicitOverride": true,
     "outDir": "../../bld/library"
   }
 }
