@@ -31,15 +31,15 @@
   resolved "https://registry.yarnpkg.com/@humanwhocodes/object-schema/-/object-schema-1.2.1.tgz#b520529ec21d8e5945a1851dfd1c32e94e39ff45"
   integrity sha512-ZnQMnLV4e7hDlUvw8H+U8ASL02SS2Gn6+9Ac3wGGLIe7+je2AeAOxPY+izIPJDfFDb7eDjev0Us8MO1iFRN8hA==
 
-"@mufan/code@^0.2.13":
-  version "0.2.13"
-  resolved "https://registry.yarnpkg.com/@mufan/code/-/code-0.2.13.tgz#2145a5f44d8e9da0726bd31bc77e29c7bca54e9f"
-  integrity sha512-g3BwvL03TOSHRYnq1aiK5fIG9olGPPi063BNF99ubavHDRT6map9ZNeiizEAtQGXUKemmAzJEiQc4MVKoncTTg==
+"@mufan/code@^0.2.14":
+  version "0.2.14"
+  resolved "https://registry.yarnpkg.com/@mufan/code/-/code-0.2.14.tgz#2f6fb4e8e38ed892a1b2442785eece90cccc4693"
+  integrity sha512-j/um6QO32281oCQnRpgK+IYIVQfvOlO+EE2cKviQWxlv9d2OEM+BM0+RmgRxq5FqFNPA8ngH9/xbBmliTWD8Bw==
 
-"@mufan/eslint-plugin@^0.1.67":
-  version "0.1.67"
-  resolved "https://registry.yarnpkg.com/@mufan/eslint-plugin/-/eslint-plugin-0.1.67.tgz#b5a0f577625ab685cc2cc23153f111c12b36c06c"
-  integrity sha512-XRrmA+ZNQiq1ORjOh6XAZbdaL74VQpfne1aOxR6U7QqKATD2lRFh1j0S1/48vh52GUv3ynTW+KPTulRIL83O8g==
+"@mufan/eslint-plugin@^0.1.68":
+  version "0.1.68"
+  resolved "https://registry.yarnpkg.com/@mufan/eslint-plugin/-/eslint-plugin-0.1.68.tgz#165fc010818a2f8dbff5dd1ab5ca07f074e81509"
+  integrity sha512-yPZuUQqntaPFJ31y1QxTloroWp+dduQuJyMXTyWznot3twXC7LYZOfu2BJcq5sxGMRmKMwrd/t+Uu37jBH6WJg==
   dependencies:
     "@typescript-eslint/eslint-plugin" "^5.18.0"
     "@typescript-eslint/parser" "^5.18.0"
