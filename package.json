@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "rimraf ./bld && tsc --build",
-    "lint": "run-in-every eslint-project --parallel --echo -- eslint --config {configFileName} .",
+    "lint": "run-in-every eslint-project --parallel --echo -- eslint --config {configFileName} --no-error-on-unmatched-pattern .",
     "lint-prettier": "prettier --check .",
     "test": "yarn lint-prettier && yarn build && yarn lint"
   },
