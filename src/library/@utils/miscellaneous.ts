@@ -54,3 +54,9 @@ export function timeout(
     return timeoutRejection;
   }
 }
+
+export function generateRandomAuthoritySegment(): string {
+  return Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, '0');
+}

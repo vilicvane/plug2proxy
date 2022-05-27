@@ -3,7 +3,7 @@ import type * as HTTP2 from 'http2';
 import _ from 'lodash';
 import * as x from 'x-value';
 
-import {BatchScheduler} from '../@utils';
+import {BatchScheduler, generateRandomAuthoritySegment} from '../@utils';
 import type {Router} from '../router';
 
 import {Session} from './session';
@@ -62,7 +62,7 @@ export class Client {
     );
 
     if (sessions.length < this.sessionCandidates) {
-      this.createSession();
+      this.scheduleSessionCreation();
     }
   }, CREATE_SESSION_DEBOUNCE);
 
@@ -102,6 +102,11 @@ export class Client {
       } = {},
     } = options;
 
+    connectAuthority = connectAuthority.replace(
+      '#',
+      generateRandomAuthoritySegment(),
+    );
+
     this.password = password;
 
     this.connectAuthority = connectAuthority;
@@ -111,7 +116,7 @@ export class Client {
 
     console.info(`(${id}) new client (authority ${this.connectAuthority}).`);
 
-    this.createSession();
+    this.scheduleSessionCreation();
   }
 
   removeSession(session: Session): void {
@@ -127,7 +132,7 @@ export class Client {
 
     console.info(`(${this.id}) removed 1 session, ${sessions.length} remains.`);
 
-    this.createSession();
+    this.scheduleSessionCreation();
   }
 
   addActiveStream(
@@ -159,7 +164,7 @@ export class Client {
     void this.printActiveStreamsScheduler.schedule();
   }
 
-  private createSession(): void {
+  private scheduleSessionCreation(): void {
     void this.createSessionScheduler.schedule();
   }
 }
