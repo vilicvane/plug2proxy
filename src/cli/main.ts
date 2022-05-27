@@ -3,31 +3,36 @@
 import * as Path from 'path';
 
 import main, {BACKGROUND} from 'main-function';
+import * as x from 'x-value';
 
-import type { RouterOptions} from '../library';
-import {In, Out, Router} from '../library';
+import {In, Out, Router, RouterOptions} from '../library';
 
-type Config =
-  | {
-      mode: 'in';
-      server: In.ServerOptions;
-      proxy: In.ProxyOptions;
-    }
-  | {
-      mode: 'out';
-      router: RouterOptions;
-      clients: Out.ClientOptions[];
-    };
+const Config = x
+  .union(
+    x.object({
+      mode: x.literal('in'),
+      server: In.ServerOptions.optional(),
+      proxy: In.ProxyOptions.optional(),
+    }),
+    x.object({
+      mode: x.literal('out'),
+      router: RouterOptions.optional(),
+      clients: x.array(Out.ClientOptions),
+    }),
+  )
+  .exact();
+
+type Config = x.TypeOf<typeof Config>;
 
 main(async ([configModulePath]) => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports,@typescript-eslint/no-var-requires
-  const config: Config = require(Path.resolve(configModulePath));
+  const config = Config.satisfies(require(Path.resolve(configModulePath)));
 
   if (config.mode === 'in') {
-    const inServer = new In.Server(config.server);
-    const _inProxy = new In.Proxy(inServer, config.proxy);
+    const inServer = new In.Server(config.server ?? {});
+    const _inProxy = new In.Proxy(inServer, config.proxy ?? {});
   } else {
-    const router = new Router(config.router);
+    const router = new Router(config.router ?? {});
 
     for (let [index, clientOptions] of config.clients.entries()) {
       const _outClient = new Out.Client(

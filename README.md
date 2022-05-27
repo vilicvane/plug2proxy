@@ -36,7 +36,7 @@ module.exports = {
     password: '12345678',
     listen: {
       // 这是给代理出口连的端口。
-      port: 8001,
+      port: 8443,
     },
     http2: {
       // 可使用 acme.sh 等工具生成。
@@ -91,7 +91,7 @@ module.exports = {
       password: '12345678',
       connect: {
         // 入口服务器连接参数。
-        authority: 'https://localhost:8001',
+        authority: 'https://in-server:8443',
         options: {
           // 不检查连接安全性，搭配自签名证书使用。
           // rejectUnauthorized: false,

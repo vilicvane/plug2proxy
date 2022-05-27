@@ -4,12 +4,15 @@ import * as Net from 'net';
 import * as OS from 'os';
 import {URL} from 'url';
 
+import * as x from 'x-value';
+
 import {
   HOP_BY_HOP_HEADERS_REGEX,
   destroyOnDrain,
   writeHTTPHead,
 } from '../@common';
 import {groupRawHeaders, refEventEmitter} from '../@utils';
+import {IPPattern, Port} from '../@x-types';
 import type {InRoute} from '../types';
 
 import type {Server} from './server';
@@ -27,7 +30,10 @@ const VIA = `1.1 ${HOSTNAME} (${PACKAGE_NAME}/${PACKAGE_VERSION})`;
 const ROUTE_CACHE_EXPIRATION = 10 * 60_000;
 const SOCKET_TIMEOUT_AFTER_END = 60_000;
 
-export interface ProxyOptions {
+const LISTEN_HOST_DEFAULT = '127.0.0.1';
+const LISTEN_PORT_DEFAULT = 8000;
+
+export const ProxyOptions = x.object({
   /**
    * 代理入口监听选项，如：
    *
@@ -38,8 +44,15 @@ export interface ProxyOptions {
    * }
    * ```
    */
-  listen: Net.ListenOptions;
-}
+  listen: x
+    .object({
+      host: IPPattern.optional(),
+      port: Port.optional(),
+    })
+    .optional(),
+});
+
+export type ProxyOptions = x.TypeOf<typeof ProxyOptions>;
 
 export class Proxy {
   readonly httpServer: HTTP.Server;
@@ -55,15 +68,22 @@ export class Proxy {
     httpServer.on('connect', this.onHTTPServerConnect);
     httpServer.on('request', this.onHTTPServerRequest);
 
-    httpServer.listen(listenOptions, () => {
-      let address = httpServer.address();
+    httpServer.listen(
+      {
+        host: LISTEN_HOST_DEFAULT,
+        port: LISTEN_PORT_DEFAULT,
+        ...listenOptions,
+      },
+      () => {
+        let address = httpServer.address();
 
-      if (typeof address !== 'string') {
-        address = `${address?.address}:${address?.port}`;
-      }
+        if (typeof address !== 'string') {
+          address = `${address?.address}:${address?.port}`;
+        }
 
-      console.info('proxy address:', address);
-    });
+        console.info('proxy address:', address);
+      },
+    );
 
     this.httpServer = httpServer;
   }

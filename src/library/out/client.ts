@@ -1,6 +1,7 @@
 import type * as HTTP2 from 'http2';
 
 import _ from 'lodash';
+import * as x from 'x-value';
 
 import {BatchScheduler} from '../@utils';
 import type {Router} from '../router';
@@ -13,25 +14,33 @@ const PRINT_ACTIVE_STREAMS_TIME_SPAN = 5_000;
 
 const SESSION_CANDIDATES_DEFAULT = 1;
 
-export interface ClientOptions {
+export const ClientOptions = x.object({
   /**
    * 明文密码（HTTP2 中加密传输）。
    */
-  password?: string;
-  connect: {
+  password: x.string.optional(),
+  connect: x.object({
     /**
-     * 代理入口服务器，如 "example.com:8001"。
+     * 代理入口服务器，如 "example.com:8443"。
      */
-    authority: string;
-    options: HTTP2.SecureClientSessionOptions;
-  };
-  session?: {
-    /**
-     * 候选连接数量。
-     */
-    candidates?: number;
-  };
-}
+    authority: x.string,
+    options: x
+      .object({
+        rejectUnauthorized: x.boolean.optional(),
+      })
+      .optional(),
+  }),
+  session: x
+    .object({
+      /**
+       * 候选连接数量。
+       */
+      candidates: x.number.optional(),
+    })
+    .optional(),
+});
+
+export type ClientOptions = x.TypeOf<typeof ClientOptions>;
 
 export class Client {
   private sessions: Session[] = [];
@@ -87,7 +96,7 @@ export class Client {
   ) {
     let {
       password,
-      connect: {authority: connectAuthority, options: connectOptions},
+      connect: {authority: connectAuthority, options: connectOptions = {}},
       session: {
         candidates: sessionCandidates = SESSION_CANDIDATES_DEFAULT,
       } = {},

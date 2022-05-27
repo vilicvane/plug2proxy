@@ -1,33 +1,44 @@
 import * as FS from 'fs';
 import * as HTTP2 from 'http2';
-import type * as Net from 'net';
 import * as Path from 'path';
 
 import bytes from 'bytes';
 import _ from 'lodash';
+import * as x from 'x-value';
+import * as xn from 'x-value/node';
+
+import {IPPattern, Port} from '../@x-types';
 
 const WINDOW_SIZE = bytes('32MB');
 
-const HTTP2_OPTIONS_DEFAULT: HTTP2.SecureServerOptions = {
+const LISTEN_HOST_DEFAULT = '0.0.0.0';
+const LISTEN_PORT_DEFAULT = 8443;
+
+const HTTP2_OPTIONS_DEFAULT = {
   key: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.key')),
   cert: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.crt')),
 };
 
-export interface ServerOptions {
+export const ServerOptions = x.object({
   /**
    * 明文密码（TLS 中传输）。
    */
-  password?: string;
+  password: x.string.optional(),
   /**
    * 监听选项，供代理出口连接（注意此端口通常需要在防火墙中允许）。如：
    *
    * ```json
    * {
-   *   "port": 8001
+   *   "port": 8443
    * }
    * ```
    */
-  listen: Net.ListenOptions;
+  listen: x
+    .object({
+      port: Port.optional(),
+      host: IPPattern.optional(),
+    })
+    .optional(),
   /**
    * HTTP2 选项，配置证书等。如：
    *
@@ -44,14 +55,21 @@ export interface ServerOptions {
    * {
    *   cert: FS.readFileSync('localhost-cert.pem'),
    *   key: FS.readFileSync('localhost-key.pem'),
-   * };
+   * }
    * ```
    *
    * 默认值为 Common Name 是 plug2proxy 的过期证书，需配合出口
    * `connect.options.rejectUnauthorized: false` 使用。
    */
-  http2?: HTTP2.SecureServerOptions;
-}
+  http2: x
+    .object({
+      cert: x.union(x.string, xn.Buffer).optional(),
+      key: x.union(x.string, xn.Buffer).optional(),
+    })
+    .optional(),
+});
+
+export type ServerOptions = x.TypeOf<typeof ServerOptions>;
 
 export class Server {
   private sessionCandidates: SessionCandidate[] = [];
@@ -74,7 +92,6 @@ export class Server {
     let http2SecureServer = HTTP2.createSecureServer({
       settings: {
         initialWindowSize: WINDOW_SIZE,
-        ...http2Options.settings,
       },
       ...http2Options,
     });
@@ -147,15 +164,22 @@ export class Server {
         this.sessionCandidateResolvers.splice(0);
       });
 
-    http2SecureServer.listen(listenOptions, () => {
-      let address = http2SecureServer.address();
+    http2SecureServer.listen(
+      {
+        host: LISTEN_HOST_DEFAULT,
+        port: LISTEN_PORT_DEFAULT,
+        ...listenOptions,
+      },
+      () => {
+        let address = http2SecureServer.address();
 
-      if (typeof address !== 'string') {
-        address = `${address?.address}:${address?.port}`;
-      }
+        if (typeof address !== 'string') {
+          address = `${address?.address}:${address?.port}`;
+        }
 
-      console.info(`waiting for sessions on ${address}...`);
-    });
+        console.info(`waiting for sessions on ${address}...`);
+      },
+    );
 
     this.http2SecureServer = http2SecureServer;
   }

@@ -9,6 +9,9 @@ import * as IPMatching from 'ip-matching';
 import * as MaxMind from 'maxmind';
 import * as MicroMatch from 'micromatch';
 import * as TarStream from 'tar-stream';
+import * as x from 'x-value';
+
+import {IPMatchPattern} from '../@x-types';
 
 const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];
 
@@ -32,68 +35,84 @@ function MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL(licenseKey: string): string {
 
 const GEOLITE2_PATH_DEFAULT = 'geolite2.mmdb';
 
-export type RouterRule = (
-  | {
-      type: 'ip';
+const Route = x.union(x.literal('direct'), x.literal('proxy'));
+
+export const RouterRule = x.intersection(
+  x.union(
+    x.object({
+      type: x.literal('ip'),
       /**
        * 支持 "loopback", "private" 或类似 "10.0.0.0/24" 的格式。
        */
-      match: string | string[];
-    }
-  | {
-      type: 'geoip';
+      match: x.union(
+        x.literal('loopback'),
+        x.literal('private'),
+        IPMatchPattern,
+        x.array(IPMatchPattern),
+      ),
+    }),
+    x.object({
+      type: x.literal('geoip'),
       /**
        * 支持 MaxMind GeoLite2 数据中的 country.iso_code 字段，如 "CN"。需要下载并配置
        * 数据库文件，见下方 `geoIPDatabase` 参数。
        */
-      match: string | string[];
-    }
-  | {
-      type: 'domain';
+      match: x.union(x.string, x.array(x.string)),
+    }),
+    x.object({
+      type: x.literal('domain'),
       /**
        * 域名，支持 micromatch 格式。如 ["baidu.com", "*.baidu.com"]。
        */
-      match: string | string[];
-    }
-) & {
-  /**
-   * 是否反向匹配。
-   */
-  negate?: boolean;
-  /**
-   * 路由名称，配合 Plug2Proxy `Client` 使用时仅支持 'proxy' 和 'direct'。
-   */
-  route: string;
-};
+      match: x.union(x.string, x.array(x.string)),
+    }),
+  ),
+  x.object({
+    /**
+     * 是否反向匹配。
+     */
+    negate: x.boolean.optional(),
+    /**
+     * 路由名称，配合 Plug2Proxy `Client` 使用时仅支持 'proxy' 和 'direct'。
+     */
+    route: Route,
+  }),
+);
 
-export interface RouterOptions {
+export type RouterRule = x.TypeOf<typeof RouterRule>;
+
+export const RouterOptions = x.object({
   /**
    * 路由规则。
    */
-  rules?: RouterRule[];
+  rules: x.array(RouterRule).optional(),
   /**
    * 默认路由名称，配合 Plug2Proxy `Client` 使用时仅支持 'proxy' 和 'direct'。
    */
-  fallback?: string;
+  fallback: Route.optional(),
   /**
    * 路由匹配缓存时间（毫秒）。
    */
-  cacheExpiration?: number;
+  cacheExpiration: x.number.optional(),
   /**
    * MaxMind GeoLite2（Country）配置，用于 geoip 规则。
    */
-  geolite2?: {
-    /**
-     * mmdb 文件地址。
-     */
-    path?: string;
-    /**
-     * MaxMind License Key，填写后每日更新。
-     * @see https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key
-     */
-    licenseKey?: string;
-  };
-}
+  geolite2: x
+    .object({
+      /**
+       * mmdb 文件地址。
+       */
+      path: x.string.optional(),
+      /**
+       * MaxMind License Key，填写后每日更新。
+       * @see https://support.maxmind.com/hc/en-us/articles/4407111582235-Generate-a-License-Key
+       */
+      licenseKey: x.string.optional(),
+    })
+    .optional(),
+});
+
+export type RouterOptions = x.TypeOf<typeof RouterOptions>;
 
 export class Router {
   private routeCacheMap = new Map<string, [route: string, expiresAt: number]>();
