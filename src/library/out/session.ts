@@ -6,11 +6,12 @@ import {URL} from 'url';
 import bytes from 'bytes';
 
 import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
-import {groupRawHeaders} from '../@utils';
+import {generateRandomAuthoritySegment, groupRawHeaders} from '../@utils';
 
 import type {Client} from './client';
 
 const SESSION_PING_INTERVAL = 10_000;
+const SESSION_MAX_OUTSTANDING_PINGS = 2;
 const CLIENT_CONNECT_TIMEOUT = 5_000;
 
 const WINDOW_SIZE = bytes('32MB');
@@ -26,13 +27,21 @@ export class Session {
     let pingTimer: NodeJS.Timer | undefined;
     let connectTimeout: NodeJS.Timeout | undefined;
 
+    let connectAuthority = client.connectAuthority.replace(
+      '#',
+      generateRandomAuthoritySegment(),
+    );
+
+    console.info(`(${client.id}) session authority: ${connectAuthority}`);
+
     let connectOptions = client.connectOptions;
 
-    let http2Client = HTTP2.connect(client.connectAuthority, {
+    let http2Client = HTTP2.connect(connectAuthority, {
       settings: {
         initialWindowSize: WINDOW_SIZE,
         ...connectOptions.settings,
       },
+      maxOutstandingPings: SESSION_MAX_OUTSTANDING_PINGS,
       ...connectOptions,
     })
       .on('connect', () => {

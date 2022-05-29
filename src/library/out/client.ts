@@ -3,7 +3,7 @@ import type * as HTTP2 from 'http2';
 import _ from 'lodash';
 import * as x from 'x-value';
 
-import {BatchScheduler, generateRandomAuthoritySegment} from '../@utils';
+import {BatchScheduler} from '../@utils';
 import type {Router} from '../router';
 
 import {Session} from './session';
@@ -101,11 +101,6 @@ export class Client {
         candidates: sessionCandidates = SESSION_CANDIDATES_DEFAULT,
       } = {},
     } = options;
-
-    connectAuthority = connectAuthority.replace(
-      '#',
-      generateRandomAuthoritySegment(),
-    );
 
     this.password = password;
 
