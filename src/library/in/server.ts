@@ -104,7 +104,7 @@ export class Server {
         if (headers.type !== 'session') {
           if (http2SecureServer.listenerCount('stream') === 1) {
             console.error(
-              `received unexpected non-session request: ${headers.type}`,
+              `[server] received unexpected non-session request: ${headers.type}`,
             );
           }
 
@@ -115,7 +115,7 @@ export class Server {
 
         if (headers.password !== password) {
           console.warn(
-            `authentication failed (remote ${remoteAddress}): wrong password`,
+            `[server] authentication failed (remote ${remoteAddress}): wrong password`,
           );
 
           stream.respond(
@@ -177,7 +177,7 @@ export class Server {
           address = `${address?.address}:${address?.port}`;
         }
 
-        console.info(`waiting for sessions on ${address}...`);
+        console.info(`[server] waiting for sessions on ${address}...`);
       },
     );
 

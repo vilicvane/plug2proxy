@@ -304,9 +304,9 @@ export class Router {
         },
       ).on('error', reject);
     }).then(
-      () => console.info('geolite2 updated.'),
+      () => console.info('[router] geolite2 updated.'),
       error => {
-        console.error('geolite2 update error:', error.message);
+        console.error('[router] geolite2 update error.');
         throw error;
       },
     );

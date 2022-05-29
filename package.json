@@ -16,22 +16,25 @@
   },
   "dependencies": {
     "@types/bytes": "^3.1.1",
+    "@types/cloudflare": "^2.7.8",
     "@types/lodash": "^4.14.177",
     "@types/micromatch": "^4.0.2",
     "@types/node": "^16.11.10",
     "@types/tar-stream": "^2.2.2",
     "bytes": "^3.1.2",
+    "cloudflare": "^2.9.1",
     "ip-matching": "^2.1.2",
     "is-typeof-property": "^0.1.0",
     "lodash": "^4.17.21",
     "main-function": "^0.1.4",
     "maxmind": "^4.3.2",
     "micromatch": "^4.0.4",
+    "public-ip": "4",
     "socket-jet": "^0.2.24",
     "tar-stream": "^2.2.0",
     "tslang": "^0.1.26",
     "tslib": "^2.4.0",
-    "x-value": "^0.0.1-33"
+    "x-value": "^0.0.1-36"
   },
   "devDependencies": {
     "@mufan/code": "^0.2.14",

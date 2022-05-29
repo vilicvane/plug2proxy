@@ -81,7 +81,7 @@ export class Proxy {
           address = `${address?.address}:${address?.port}`;
         }
 
-        console.info('proxy address:', address);
+        console.info(`[proxy] listening on ${address}...`);
       },
     );
 
