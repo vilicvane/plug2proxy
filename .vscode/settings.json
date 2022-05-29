@@ -18,5 +18,14 @@
     "typescript",
     "typescriptreact"
   ],
-  "cSpell.words": ["DDNS", "geoip", "geolite", "maxmind", "mmdb", "netmasks"]
+  "cSpell.words": [
+    "alicloud",
+    "Aliyun",
+    "DDNS",
+    "geoip",
+    "geolite",
+    "maxmind",
+    "mmdb",
+    "netmasks"
+  ]
 }

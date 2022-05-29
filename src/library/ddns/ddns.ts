@@ -66,6 +66,6 @@ export class DDNS {
 
     this.ip = ip;
 
-    console.info(`[ddns] public ip ${ip}.`);
+    console.info(`[ddns] public ip ${ip} (${this.provider.name}).`);
   }
 }
