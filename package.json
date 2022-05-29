@@ -12,7 +12,8 @@
     "build": "rimraf ./bld && tsc --build",
     "lint": "run-in-every eslint-project --parallel --echo -- eslint --config {configFileName} --no-error-on-unmatched-pattern .",
     "lint-prettier": "prettier --check .",
-    "test": "yarn lint-prettier && yarn build && yarn lint"
+    "test": "yarn lint-prettier && yarn build && yarn lint",
+    "prepublishOnly": "yarn test"
   },
   "dependencies": {
     "@alicloud/alidns20150109": "^2.0.1",
