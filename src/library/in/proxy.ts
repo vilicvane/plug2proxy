@@ -35,7 +35,7 @@ const LISTEN_HOST_DEFAULT = '127.0.0.1';
 const LISTEN_PORT_DEFAULT = 8000;
 
 const IP_PROBE_ENABLED_DEFAULT = true;
-const IP_PROBE_TIMEOUT_DEFAULT = 200;
+const IP_PROBE_TIMEOUT_DEFAULT = 250;
 
 export const ProxyOptions = x.object({
   /**
@@ -187,7 +187,7 @@ export class Proxy {
 
     if (route === undefined && this.ipProbeEnabled && !Net.isIP(host)) {
       hostIP = await probeDestinationIP(host, port, this.ipProbeTimeout);
-      console.info(`${logPrefix} probed ip: ${hostIP}`);
+      console.info(`${logPrefix} probed ip: ${hostIP ?? '-'}`);
     }
 
     let sessionCandidate = await server.getSessionCandidate(logPrefix);
