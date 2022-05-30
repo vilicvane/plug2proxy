@@ -1,12 +1,13 @@
+import ms from 'ms';
 import PublicIP from 'public-ip';
 import * as x from 'x-value';
 
 import type {IDDNSProvider} from './ddns-provider';
 import {ProviderDDNSOptions, createDDNSProvider} from './providers';
 
-const CHECK_INTERVAL_DEFAULT = x.Integer.satisfies(5000);
+const CHECK_INTERVAL_DEFAULT = x.Integer.satisfies(ms('5s'));
 
-const CHECK_TIMEOUT = 300_000; // 5 minutes
+const CHECK_TIMEOUT = ms('5m');
 
 export const DDNSOptions = x.intersection(
   x.object({

@@ -8,6 +8,7 @@ import * as ZLib from 'zlib';
 import * as IPMatching from 'ip-matching';
 import * as MaxMind from 'maxmind';
 import * as MicroMatch from 'micromatch';
+import ms from 'ms';
 import * as TarStream from 'tar-stream';
 import * as x from 'x-value';
 
@@ -22,10 +23,11 @@ const PRIVATE_NETWORK_MATCHES = [
   '192.168.0.0/16',
 ];
 
-const GEOLITE2_UPDATE_INTERVAL = 24 * 3600_000;
+const GEOLITE2_UPDATE_INTERVAL = ms('24h');
 
 const FALLBACK_DEFAULT = 'direct';
-const CACHE_EXPIRATION_DEFAULT = 10 * 60_000;
+
+const CACHE_EXPIRATION_DEFAULT = ms('10m');
 
 function MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL(licenseKey: string): string {
   return `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${encodeURIComponent(
@@ -146,13 +148,19 @@ export class Router {
     this.rulesPromise = this.initialize(rules);
   }
 
-  async route(host: string): Promise<string> {
+  async route(
+    sessionId: string,
+    host: string,
+    hostIP?: string,
+  ): Promise<string> {
+    let key = `${sessionId}/${host}`;
+
     let routeCacheMap = this.routeCacheMap;
     let routingMap = this.routingMap;
 
     let now = Date.now();
 
-    let cache = routeCacheMap.get(host);
+    let cache = routeCacheMap.get(key);
 
     if (cache) {
       let [route, expiresAt] = cache;
@@ -162,23 +170,26 @@ export class Router {
       }
     }
 
-    let routing = routingMap.get(host);
+    let routing = routingMap.get(key);
 
     if (!routing) {
-      routing = this._route(host)
+      routing = this._route(host, hostIP)
         .then(route => {
-          routeCacheMap.set(host, [route, now + this.cacheExpiration]);
+          routeCacheMap.set(key, [route, now + this.cacheExpiration]);
           return route;
         })
         .finally(() => {
-          routingMap.delete(host);
+          routingMap.delete(key);
         });
     }
 
     return routing;
   }
 
-  private async _route(host: string): Promise<string> {
+  private async _route(
+    host: string,
+    hostIP: string | undefined,
+  ): Promise<string> {
     let rules = await this.rulesPromise;
 
     let domain: string | undefined;
@@ -188,6 +199,10 @@ export class Router {
       ips = [host];
     } else {
       domain = host;
+
+      if (hostIP) {
+        ips = [hostIP];
+      }
     }
 
     let resolve = (): Promise<string[]> | string[] =>

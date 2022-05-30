@@ -1,6 +1,7 @@
 import type * as HTTP2 from 'http2';
 
 import _ from 'lodash';
+import ms from 'ms';
 import * as x from 'x-value';
 
 import {BatchScheduler} from '../@utils';
@@ -8,9 +9,9 @@ import type {Router} from '../router';
 
 import {Session} from './session';
 
-const CREATE_SESSION_DEBOUNCE = 1_000;
+const CREATE_SESSION_DEBOUNCE = ms('1s');
 
-const PRINT_ACTIVE_STREAMS_TIME_SPAN = 5_000;
+const PRINT_ACTIVE_STREAMS_TIME_SPAN = ms('5s');
 
 const SESSION_CANDIDATES_DEFAULT = 1;
 

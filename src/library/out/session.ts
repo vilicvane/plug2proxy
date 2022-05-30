@@ -4,15 +4,17 @@ import * as Net from 'net';
 import {URL} from 'url';
 
 import bytes from 'bytes';
+import ms from 'ms';
 
 import {HOP_BY_HOP_HEADERS_REGEX, closeOnDrain} from '../@common';
 import {generateRandomAuthoritySegment, groupRawHeaders} from '../@utils';
 
 import type {Client} from './client';
 
-const SESSION_PING_INTERVAL = 10_000;
+const SESSION_PING_INTERVAL = ms('5s');
 const SESSION_MAX_OUTSTANDING_PINGS = 2;
-const CLIENT_CONNECT_TIMEOUT = 5_000;
+
+const CLIENT_CONNECT_TIMEOUT = ms('5s');
 
 const WINDOW_SIZE = bytes('32MB');
 
@@ -148,7 +150,11 @@ export class Session {
   ): Promise<void>;
   private async connect(
     pushStream: HTTP2.ClientHttp2Stream,
-    {host, port}: {host: string; port: string},
+    {
+      host,
+      port,
+      'host-ip': hostIP,
+    }: {host: string; port: string; 'host-ip': string | undefined},
   ): Promise<void> {
     const client = this.client;
 
@@ -174,7 +180,7 @@ export class Session {
     let route: string;
 
     try {
-      route = await client.router.route(host);
+      route = await client.router.route(this.id, host, hostIP);
 
       if (pushStream.destroyed) {
         console.debug(`${logPrefix} connect push stream closed while routing.`);
@@ -306,7 +312,7 @@ export class Session {
     let route: string;
 
     try {
-      route = await client.router.route(host);
+      route = await client.router.route(this.id, host);
 
       if (pushStream.destroyed) {
         console.debug(`${logPrefix} request push stream closed while routing.`);

@@ -4,6 +4,7 @@ import * as Net from 'net';
 import * as OS from 'os';
 import {URL} from 'url';
 
+import ms from 'ms';
 import * as x from 'x-value';
 
 import {
@@ -11,7 +12,7 @@ import {
   destroyOnDrain,
   writeHTTPHead,
 } from '../@common';
-import {groupRawHeaders, refEventEmitter} from '../@utils';
+import {groupRawHeaders, probeDestinationIP, refEventEmitter} from '../@utils';
 import {IPPattern, Port} from '../@x-types';
 import type {InRoute} from '../types';
 
@@ -27,11 +28,14 @@ const {
 
 const VIA = `1.1 ${HOSTNAME} (${PACKAGE_NAME}/${PACKAGE_VERSION})`;
 
-const ROUTE_CACHE_EXPIRATION = 10 * 60_000;
-const SOCKET_TIMEOUT_AFTER_END = 60_000;
+const ROUTE_CACHE_EXPIRATION = ms('10m');
+const SOCKET_TIMEOUT_AFTER_END = ms('1m');
 
 const LISTEN_HOST_DEFAULT = '127.0.0.1';
 const LISTEN_PORT_DEFAULT = 8000;
+
+const IP_PROBE_ENABLED_DEFAULT = true;
+const IP_PROBE_TIMEOUT_DEFAULT = 200;
 
 export const ProxyOptions = x.object({
   /**
@@ -50,6 +54,24 @@ export const ProxyOptions = x.object({
       port: Port.optional(),
     })
     .optional(),
+  /**
+   * 目前 Plug2Proxy 主要的路由功能是通过出口端完成的，客户端仅支持少量配置。
+   */
+  routing: x
+    .object({
+      /**
+       * 提前从客户端探测 IP 地址，供出口端路由参考。
+       */
+      ipProbe: x
+        .union(
+          x.boolean,
+          x.object({
+            timeout: x.number.optional(),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
 });
 
 export type ProxyOptions = x.TypeOf<typeof ProxyOptions>;
@@ -62,7 +84,16 @@ export class Proxy {
     [route: InRoute, expiresAt: number]
   >();
 
-  constructor(readonly server: Server, {listen: listenOptions}: ProxyOptions) {
+  private ipProbeEnabled: boolean;
+  private ipProbeTimeout: number;
+
+  constructor(
+    readonly server: Server,
+    {
+      listen: listenOptions,
+      routing: {ipProbe = IP_PROBE_ENABLED_DEFAULT} = {},
+    }: ProxyOptions,
+  ) {
     let httpServer = new HTTP.Server();
 
     httpServer.on('connect', this.onHTTPServerConnect);
@@ -86,6 +117,17 @@ export class Proxy {
     );
 
     this.httpServer = httpServer;
+
+    if (ipProbe !== false) {
+      let {timeout = IP_PROBE_TIMEOUT_DEFAULT} =
+        ipProbe === true ? {} : ipProbe;
+
+      this.ipProbeEnabled = true;
+      this.ipProbeTimeout = timeout;
+    } else {
+      this.ipProbeEnabled = false;
+      this.ipProbeTimeout = 0;
+    }
   }
 
   private onHTTPServerConnect = (
@@ -134,9 +176,18 @@ export class Proxy {
 
     console.info(`${logPrefix} connect: ${host}:${port}`);
 
-    if (this.getCachedRoute(host) === 'direct') {
+    let route = this.getCachedRoute(host);
+
+    if (route === 'direct') {
       this.directConnect(host, port, inSocket, logPrefix);
       return;
+    }
+
+    let hostIP: string | undefined;
+
+    if (route === undefined && this.ipProbeEnabled && !Net.isIP(host)) {
+      hostIP = await probeDestinationIP(host, port, this.ipProbeTimeout);
+      console.info(`${logPrefix} probed ip: ${hostIP}`);
     }
 
     let sessionCandidate = await server.getSessionCandidate(logPrefix);
@@ -176,7 +227,7 @@ export class Proxy {
         outConnectStream.respond();
 
         if (headers.type === 'connect-direct') {
-          console.info(`${logPrefix} routed to direct.`);
+          console.info(`${logPrefix} out routed to direct.`);
 
           this.setCachedRoute(host, 'direct');
           this.directConnect(host, port, inSocket, logPrefix);
@@ -224,7 +275,7 @@ export class Proxy {
     );
 
     sessionCandidate.stream.pushStream(
-      {type: 'connect', host, port},
+      {type: 'connect', host, port, 'host-ip': hostIP},
       (error, pushStream) => {
         if (error) {
           console.error(`${logPrefix} connect error:`, error.message);
@@ -457,7 +508,7 @@ export class Proxy {
         if (outHeaders.type === 'request-direct') {
           pushEventSession.end();
 
-          console.info(`${logPrefix} routed to direct.`);
+          console.info(`${logPrefix} out routed to direct.`);
 
           this.setCachedRoute(host, 'direct');
           this.directRequest(
