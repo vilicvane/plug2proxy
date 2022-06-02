@@ -87,6 +87,8 @@ export class Proxy {
   private ipProbeEnabled: boolean;
   private ipProbeTimeout: number;
 
+  private probingPromiseMap = new Map<string, Promise<string | undefined>>();
+
   constructor(
     readonly server: Server,
     {
@@ -186,8 +188,26 @@ export class Proxy {
     let hostIP: string | undefined;
 
     if (route === undefined && this.ipProbeEnabled && !Net.isIP(host)) {
-      hostIP = await probeDestinationIP(host, port, this.ipProbeTimeout);
-      console.info(`${logPrefix} probed ip: ${hostIP ?? '-'}`);
+      let probingPromiseMap = this.probingPromiseMap;
+
+      let promise = probingPromiseMap.get(host);
+      let reused = promise !== undefined;
+
+      if (promise === undefined) {
+        promise = probeDestinationIP(host, port, this.ipProbeTimeout).finally(
+          () => {
+            probingPromiseMap.delete(host);
+          },
+        );
+
+        probingPromiseMap.set(host, promise);
+      }
+
+      hostIP = await promise;
+
+      console.info(
+        `${logPrefix} probed ip: ${hostIP ?? '-'}${reused ? ' (reused)' : ''}`,
+      );
     }
 
     let sessionCandidate = await server.getSessionCandidate(logPrefix);
