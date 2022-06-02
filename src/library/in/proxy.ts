@@ -247,6 +247,8 @@ export class Proxy {
           return;
         }
 
+        this.setCachedRoute(host, 'proxy');
+
         console.info(`${logPrefix} connected.`);
 
         writeHTTPHead(inSocket, 200, 'OK');
@@ -557,6 +559,8 @@ export class Proxy {
           outStream.destroy();
           return;
         }
+
+        this.setCachedRoute(host, 'proxy');
 
         console.debug(`${logPrefix} request-response stream received.`);
 
