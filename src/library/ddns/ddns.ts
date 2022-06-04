@@ -57,7 +57,9 @@ export class DDNS {
   }
 
   private async _checkAndUpdate(): Promise<void> {
-    let ip = await PublicIP.v4();
+    let ip = await PublicIP.v4({
+      onlyHttps: true,
+    });
 
     if (this.ip === ip) {
       return;
