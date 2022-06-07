@@ -39,6 +39,12 @@ const GEOLITE2_PATH_DEFAULT = 'geolite2.mmdb';
 
 const Route = x.union(x.literal('direct'), x.literal('proxy'));
 
+const IPRuleMatchPattern = x.union(
+  x.literal('loopback'),
+  x.literal('private'),
+  IPMatchPattern,
+);
+
 export const RouterRule = x.intersection(
   x.union(
     x.object({
@@ -46,12 +52,7 @@ export const RouterRule = x.intersection(
       /**
        * 支持 "loopback", "private" 或类似 "10.0.0.0/24" 的格式。
        */
-      match: x.union(
-        x.literal('loopback'),
-        x.literal('private'),
-        IPMatchPattern,
-        x.array(IPMatchPattern),
-      ),
+      match: x.union(IPRuleMatchPattern, x.array(IPRuleMatchPattern)),
     }),
     x.object({
       type: x.literal('geoip'),
