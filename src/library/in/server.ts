@@ -152,6 +152,9 @@ export class Server {
             console.info(`${logPrefix} session "close".`);
           })
           .on('error', error => {
+            // Observing more session candidates than expected, pull on error
+            // for redundancy.
+            _.pull(this.sessionCandidates, candidate);
             console.error(`${logPrefix} session error:`, error.message);
           });
 
