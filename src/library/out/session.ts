@@ -94,6 +94,10 @@ export class Session {
           `(${client.id})[${this.id}] session error:`,
           error.message,
         );
+
+        if (pingTimer) {
+          clearInterval(pingTimer);
+        }
       });
 
     this.http2Client = http2Client;
