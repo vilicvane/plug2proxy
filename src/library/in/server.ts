@@ -11,7 +11,7 @@ import * as xn from 'x-value/node';
 import {IPPattern, Port} from '../@x-types';
 
 const SESSION_PING_INTERVAL = ms('5s');
-const SESSION_MAX_OUTSTANDING_PINGS = 0;
+const SESSION_MAX_OUTSTANDING_PINGS = 1;
 
 const WINDOW_SIZE = bytes('32MB');
 
@@ -119,6 +119,8 @@ export class Server {
             );
 
             session.destroy();
+
+            clearInterval(pingTimer);
           });
         }, SESSION_PING_INTERVAL);
 

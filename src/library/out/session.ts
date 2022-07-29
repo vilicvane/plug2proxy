@@ -12,7 +12,7 @@ import {generateRandomAuthoritySegment, groupRawHeaders} from '../@utils';
 import type {Client} from './client';
 
 const SESSION_PING_INTERVAL = ms('5s');
-const SESSION_MAX_OUTSTANDING_PINGS = 0;
+const SESSION_MAX_OUTSTANDING_PINGS = 1;
 
 const CLIENT_CONNECT_TIMEOUT = ms('5s');
 
@@ -26,7 +26,6 @@ export class Session {
   private http2Client: HTTP2.ClientHttp2Session;
 
   constructor(readonly client: Client) {
-    let pingTimer: NodeJS.Timer | undefined;
     let connectTimeout: NodeJS.Timeout | undefined;
 
     let connectAuthority = client.connectAuthority.replace(
@@ -51,7 +50,7 @@ export class Session {
 
         http2Client.setLocalWindowSize(WINDOW_SIZE);
 
-        pingTimer = setInterval(() => {
+        let pingTimer = setInterval(() => {
           http2Client.ping(error => {
             if (!error) {
               return;
@@ -63,8 +62,18 @@ export class Session {
             );
 
             http2Client.destroy();
+
+            clearInterval(pingTimer!);
           });
         }, SESSION_PING_INTERVAL);
+
+        http2Client
+          .on('close', () => {
+            clearInterval(pingTimer);
+          })
+          .on('error', () => {
+            clearInterval(pingTimer);
+          });
       })
       .on('stream', (pushStream, headers) => {
         switch (headers.type) {
@@ -84,20 +93,12 @@ export class Session {
       })
       .on('close', () => {
         console.debug(`(${client.id})[${this.id}] session "close"`);
-
-        if (pingTimer) {
-          clearInterval(pingTimer);
-        }
       })
       .on('error', error => {
         console.error(
           `(${client.id})[${this.id}] session error:`,
           error.message,
         );
-
-        if (pingTimer) {
-          clearInterval(pingTimer);
-        }
       });
 
     this.http2Client = http2Client;
