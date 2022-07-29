@@ -4,10 +4,14 @@ import * as Path from 'path';
 
 import bytes from 'bytes';
 import _ from 'lodash';
+import ms from 'ms';
 import * as x from 'x-value';
 import * as xn from 'x-value/node';
 
 import {IPPattern, Port} from '../@x-types';
+
+const SESSION_PING_INTERVAL = ms('5s');
+const SESSION_MAX_OUTSTANDING_PINGS = 0;
 
 const WINDOW_SIZE = bytes('32MB');
 
@@ -93,12 +97,38 @@ export class Server {
       settings: {
         initialWindowSize: WINDOW_SIZE,
       },
+      maxOutstandingPings: SESSION_MAX_OUTSTANDING_PINGS,
       ...http2Options,
-    });
-
-    http2SecureServer
+    })
       .on('session', session => {
+        // This `session` is HTTP2 session, not Plug2Proxy session.
+
         session.setLocalWindowSize(WINDOW_SIZE);
+
+        let remoteAddress = session.socket.remoteAddress ?? '(unknown)';
+
+        let pingTimer = setInterval(() => {
+          session.ping(error => {
+            if (!error) {
+              return;
+            }
+
+            console.error(
+              `[server] ping error (remote ${remoteAddress}):`,
+              error.message,
+            );
+
+            session.destroy();
+          });
+        }, SESSION_PING_INTERVAL);
+
+        session
+          .on('close', () => {
+            clearInterval(pingTimer);
+          })
+          .on('error', () => {
+            clearInterval(pingTimer);
+          });
       })
       .on('stream', (stream, headers) => {
         if (headers.type !== 'session') {

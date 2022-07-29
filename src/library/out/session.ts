@@ -12,7 +12,7 @@ import {generateRandomAuthoritySegment, groupRawHeaders} from '../@utils';
 import type {Client} from './client';
 
 const SESSION_PING_INTERVAL = ms('5s');
-const SESSION_MAX_OUTSTANDING_PINGS = 2;
+const SESSION_MAX_OUTSTANDING_PINGS = 0;
 
 const CLIENT_CONNECT_TIMEOUT = ms('5s');
 
@@ -61,7 +61,7 @@ export class Session {
               `(${client.id})[${this.id}] ping error:`,
               error.message,
             );
-            sessionStream.destroy();
+
             http2Client.destroy();
           });
         }, SESSION_PING_INTERVAL);
