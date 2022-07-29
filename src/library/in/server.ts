@@ -11,7 +11,7 @@ import * as xn from 'x-value/node';
 import {IPPattern, Port} from '../@x-types';
 
 const SESSION_PING_INTERVAL = ms('5s');
-const SESSION_MAX_OUTSTANDING_PINGS = 1;
+const SESSION_MAX_OUTSTANDING_PINGS = 2;
 
 const WINDOW_SIZE = bytes('32MB');
 
@@ -108,6 +108,11 @@ export class Server {
         let remoteAddress = session.socket.remoteAddress ?? '(unknown)';
 
         let pingTimer = setInterval(() => {
+          if (session.destroyed) {
+            clearInterval(pingTimer);
+            return;
+          }
+
           session.ping(error => {
             if (!error) {
               return;
@@ -119,8 +124,6 @@ export class Server {
             );
 
             session.destroy();
-
-            clearInterval(pingTimer);
           });
         }, SESSION_PING_INTERVAL);
 
