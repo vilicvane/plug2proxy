@@ -34,26 +34,11 @@ module.exports = {
   mode: 'in',
   server: {
     password: '12345678',
-    listen: {
-      // 这是给代理出口连的端口。
-      port: 8443,
-    },
-    http2: {
-      // 可使用 acme.sh 等工具生成。
-      // 不存在 http2 配置时会使用默认的过期证书（需搭配出口 `rejectUnauthorized: false`）使用。
-      cert: FS.readFileSync('server.crt'),
-      key: FS.readFileSync('server.key'),
-    },
-  },
-  proxy: {
-    listen: {
-      // 这是给终端连的。
-      host: '127.0.0.1',
-      port: 8000,
-    },
   },
 };
 ```
+
+> 入口服务器（在入口等待出口客户端连接的服务器）默认监听 0.0.0.0:8443，本地代理服务器默认监听 127.0.0.1:8000。
 
 ### 出口
 
@@ -88,15 +73,11 @@ module.exports = {
   },
   clients: [
     {
+      // 入口服务器连接参数。
+      authority: 'https://in-server:8443',
       password: '12345678',
-      connect: {
-        // 入口服务器连接参数。
-        authority: 'https://in-server:8443',
-        options: {
-          // 不检查连接安全性，搭配自签名证书使用。
-          // rejectUnauthorized: false,
-        },
-      },
+      // 不检查连接安全性，搭配自签名证书使用。
+      rejectUnauthorized: false,
     },
   ],
 };

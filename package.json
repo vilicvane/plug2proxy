@@ -1,6 +1,6 @@
 {
   "name": "plug2proxy",
-  "version": "0.1.57",
+  "version": "0.2.0",
   "license": "MIT",
   "author": "vilicvane",
   "bin": "bld/cli/main.js",
@@ -39,7 +39,7 @@
     "tar-stream": "^2.2.0",
     "tslang": "^0.1.26",
     "tslib": "^2.4.0",
-    "x-value": "^0.0.1-36"
+    "x-value": "^0.0.1-37"
   },
   "devDependencies": {
     "@mufan/code": "^0.2.14",

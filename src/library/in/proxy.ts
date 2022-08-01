@@ -31,29 +31,15 @@ const VIA = `1.1 ${HOSTNAME} (${PACKAGE_NAME}/${PACKAGE_VERSION})`;
 const ROUTE_CACHE_EXPIRATION = ms('10m');
 const SOCKET_TIMEOUT_AFTER_END = ms('1m');
 
-const LISTEN_HOST_DEFAULT = '127.0.0.1';
-const LISTEN_PORT_DEFAULT = 8000;
+const LISTEN_HOST_DEFAULT = IPPattern.nominalize('127.0.0.1');
+const LISTEN_PORT_DEFAULT = Port.nominalize(8000);
 
 const IP_PROBE_ENABLED_DEFAULT = true;
 const IP_PROBE_TIMEOUT_DEFAULT = 250;
 
 export const ProxyOptions = x.object({
-  /**
-   * 代理入口监听选项，如：
-   *
-   * ```json
-   * {
-   *   "host": "127.0.0.1",
-   *   "port": 8000
-   * }
-   * ```
-   */
-  listen: x
-    .object({
-      host: IPPattern.optional(),
-      port: Port.optional(),
-    })
-    .optional(),
+  host: IPPattern.optional(),
+  port: Port.optional(),
   /**
    * 目前 Plug2Proxy 主要的路由功能是通过出口端完成的，客户端仅支持少量配置。
    */
@@ -92,7 +78,8 @@ export class Proxy {
   constructor(
     readonly server: Server,
     {
-      listen: listenOptions,
+      host = LISTEN_HOST_DEFAULT,
+      port = LISTEN_PORT_DEFAULT,
       routing: {ipProbe = IP_PROBE_ENABLED_DEFAULT} = {},
     }: ProxyOptions,
   ) {
@@ -103,9 +90,8 @@ export class Proxy {
 
     httpServer.listen(
       {
-        host: LISTEN_HOST_DEFAULT,
-        port: LISTEN_PORT_DEFAULT,
-        ...listenOptions,
+        host,
+        port,
       },
       () => {
         let address = httpServer.address();

@@ -16,29 +16,16 @@ const PRINT_ACTIVE_STREAMS_TIME_SPAN = ms('5s');
 const SESSION_CANDIDATES_DEFAULT = 1;
 
 export const ClientOptions = x.object({
-  /**
-   * 明文密码（HTTP2 中加密传输）。
-   */
   password: x.string.optional(),
-  connect: x.object({
-    /**
-     * 代理入口服务器，如 "example.com:8443"。
-     */
-    authority: x.string,
-    options: x
-      .object({
-        rejectUnauthorized: x.boolean.optional(),
-      })
-      .optional(),
-  }),
-  session: x
-    .object({
-      /**
-       * 候选连接数量。
-       */
-      candidates: x.number.optional(),
-    })
-    .optional(),
+  /**
+   * 代理入口服务器，如 "https://example.com:8443"。
+   */
+  authority: x.string,
+  rejectUnauthorized: x.boolean.optional(),
+  /**
+   * 候选连接数量，默认为 1。
+   */
+  candidates: x.number.optional(),
 });
 
 export type ClientOptions = x.TypeOf<typeof ClientOptions>;
@@ -96,17 +83,16 @@ export class Client {
     readonly id = '-',
   ) {
     let {
+      authority,
+      rejectUnauthorized,
       password,
-      connect: {authority: connectAuthority, options: connectOptions = {}},
-      session: {
-        candidates: sessionCandidates = SESSION_CANDIDATES_DEFAULT,
-      } = {},
+      candidates: sessionCandidates = SESSION_CANDIDATES_DEFAULT,
     } = options;
 
     this.password = password;
 
-    this.connectAuthority = connectAuthority;
-    this.connectOptions = connectOptions;
+    this.connectAuthority = authority;
+    this.connectOptions = {rejectUnauthorized};
 
     this.sessionCandidates = sessionCandidates;
 

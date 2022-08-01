@@ -15,62 +15,17 @@ const SESSION_MAX_OUTSTANDING_PINGS = 2;
 
 const WINDOW_SIZE = bytes('32MB');
 
-const LISTEN_HOST_DEFAULT = '0.0.0.0';
-const LISTEN_PORT_DEFAULT = 8443;
+const LISTEN_HOST_DEFAULT = IPPattern.nominalize('0.0.0.0');
+const LISTEN_PORT_DEFAULT = Port.nominalize(8443);
 
-const HTTP2_OPTIONS_DEFAULT = {
-  key: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.key')),
-  cert: FS.readFileSync(Path.join(__dirname, '../../../certs/plug2proxy.crt')),
-};
+const CERTS_DIR = Path.join(__dirname, '../../../certs');
 
 export const ServerOptions = x.object({
-  /**
-   * 明文密码（TLS 中传输）。
-   */
+  host: IPPattern.optional(),
+  port: Port.optional(),
+  cert: x.union(x.string, xn.Buffer).optional(),
+  key: x.union(x.string, xn.Buffer).optional(),
   password: x.string.optional(),
-  /**
-   * 监听选项，供代理出口连接（注意此端口通常需要在防火墙中允许）。如：
-   *
-   * ```json
-   * {
-   *   "port": 8443
-   * }
-   * ```
-   */
-  listen: x
-    .object({
-      port: Port.optional(),
-      host: IPPattern.optional(),
-    })
-    .optional(),
-  /**
-   * HTTP2 选项，配置证书等。如：
-   *
-   * ```json
-   * {
-   *   "cert": "-----BEGIN CERTIFICATE-----\n[...]\n-----END CERTIFICATE-----",
-   *   "key": "-----BEGIN PRIVATE KEY-----\n[...]\n-----END PRIVATE KEY-----",
-   * }
-   * ```
-   *
-   * 如果使用 .js 配置文件，则可以直接使用 FS 模块证书。如：
-   *
-   * ```js
-   * {
-   *   cert: FS.readFileSync('localhost-cert.pem'),
-   *   key: FS.readFileSync('localhost-key.pem'),
-   * }
-   * ```
-   *
-   * 默认值为 Common Name 是 plug2proxy 的过期证书，需配合出口
-   * `connect.options.rejectUnauthorized: false` 使用。
-   */
-  http2: x
-    .object({
-      cert: x.union(x.string, xn.Buffer).optional(),
-      key: x.union(x.string, xn.Buffer).optional(),
-    })
-    .optional(),
 });
 
 export type ServerOptions = x.TypeOf<typeof ServerOptions>;
@@ -85,9 +40,11 @@ export class Server {
   readonly http2SecureServer: HTTP2.Http2SecureServer;
 
   constructor({
+    host = LISTEN_HOST_DEFAULT,
+    port = LISTEN_PORT_DEFAULT,
+    cert = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.crt')),
+    key = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.key')),
     password,
-    listen: listenOptions,
-    http2: http2Options = HTTP2_OPTIONS_DEFAULT,
   }: ServerOptions) {
     this.password = password;
 
@@ -98,7 +55,8 @@ export class Server {
         initialWindowSize: WINDOW_SIZE,
       },
       maxOutstandingPings: SESSION_MAX_OUTSTANDING_PINGS,
-      ...http2Options,
+      cert,
+      key,
     })
       .on('session', session => {
         // This `session` is HTTP2 session, not Plug2Proxy session.
@@ -204,9 +162,8 @@ export class Server {
 
     http2SecureServer.listen(
       {
-        host: LISTEN_HOST_DEFAULT,
-        port: LISTEN_PORT_DEFAULT,
-        ...listenOptions,
+        host,
+        port,
       },
       () => {
         let address = http2SecureServer.address();

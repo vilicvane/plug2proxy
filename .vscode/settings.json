@@ -26,6 +26,7 @@
     "geolite",
     "maxmind",
     "mmdb",
-    "netmasks"
+    "netmasks",
+    "nominalize"
   ]
 }
