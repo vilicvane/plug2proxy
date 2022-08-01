@@ -31,9 +31,12 @@ export const ServerOptions = x.object({
 export type ServerOptions = x.TypeOf<typeof ServerOptions>;
 
 export class Server {
-  private sessionCandidates: SessionCandidate[] = [];
+  private sessionCandidates: readonly SessionCandidate[] = [];
   private sessionCandidateResolvers: ((candidate: SessionCandidate) => void)[] =
     [];
+
+  private prioritizedSessionCandidatesRef = this.sessionCandidates;
+  private prioritizedSessionCandidates: SessionCandidate[] = [];
 
   readonly password: string | undefined;
 
@@ -132,6 +135,7 @@ export class Server {
         let candidate: SessionCandidate = {
           id,
           stream,
+          priority: Number(headers.priority) || 0,
         };
 
         stream.respond({
@@ -141,17 +145,25 @@ export class Server {
 
         stream
           .on('close', () => {
-            _.pull(this.sessionCandidates, candidate);
+            this.sessionCandidates = _.without(
+              this.sessionCandidates,
+              candidate,
+            );
+
             console.info(`${logPrefix} session "close".`);
           })
           .on('error', error => {
             // Observing more session candidates than expected, pull on error
             // for redundancy.
-            _.pull(this.sessionCandidates, candidate);
+            this.sessionCandidates = _.without(
+              this.sessionCandidates,
+              candidate,
+            );
+
             console.error(`${logPrefix} session error:`, error.message);
           });
 
-        this.sessionCandidates.push(candidate);
+        this.sessionCandidates = [...this.sessionCandidates, candidate];
 
         for (let resolver of this.sessionCandidateResolvers) {
           resolver(candidate);
@@ -180,14 +192,44 @@ export class Server {
   }
 
   async getSessionCandidate(logPrefix: string): Promise<SessionCandidate> {
-    let candidates = this.sessionCandidates;
+    let sessionCandidates = this.sessionCandidates;
+
+    if (sessionCandidates !== this.prioritizedSessionCandidatesRef) {
+      if (sessionCandidates.length > 0) {
+        let [firstCandidate, ...restCandidates] = _.sortBy(
+          sessionCandidates,
+          candidate => -candidate.priority,
+        );
+
+        let restPrioritizedEndAt = restCandidates.findIndex(
+          candidate => candidate.priority < firstCandidate.priority,
+        );
+
+        this.prioritizedSessionCandidates = [
+          firstCandidate,
+          ...(restPrioritizedEndAt < 0
+            ? restCandidates
+            : restCandidates.slice(0, restPrioritizedEndAt)),
+        ];
+      } else {
+        this.prioritizedSessionCandidates = [];
+      }
+
+      this.prioritizedSessionCandidatesRef = sessionCandidates;
+    }
+
+    let prioritizedSessionCandidates = this.prioritizedSessionCandidates;
 
     console.debug(
-      `${logPrefix} getting session candidates, ${candidates.length} available.`,
+      `${logPrefix} getting session candidates, ${
+        prioritizedSessionCandidates.length
+      } (priority ${prioritizedSessionCandidates[0]?.priority ?? 'n/a'}) / ${
+        sessionCandidates.length
+      } available.`,
     );
 
-    if (candidates.length > 0) {
-      return _.sample(candidates)!;
+    if (prioritizedSessionCandidates.length > 0) {
+      return _.sample(prioritizedSessionCandidates)!;
     } else {
       console.info(
         `${logPrefix} no session candidate is currently available, waiting for new session...`,
@@ -202,5 +244,6 @@ export class Server {
 
 export interface SessionCandidate {
   id: string;
+  priority: number;
   stream: HTTP2.ServerHttp2Stream;
 }

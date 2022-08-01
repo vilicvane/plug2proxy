@@ -14,6 +14,7 @@ const CREATE_SESSION_DEBOUNCE = ms('1s');
 const PRINT_ACTIVE_STREAMS_TIME_SPAN = ms('5s');
 
 const SESSION_CANDIDATES_DEFAULT = 1;
+const SESSION_PRIORITY_DEFAULT = 0;
 
 export const ClientOptions = x.object({
   password: x.string.optional(),
@@ -26,6 +27,11 @@ export const ClientOptions = x.object({
    * 候选连接数量，默认为 1。
    */
   candidates: x.number.optional(),
+  /**
+   * 优先级，数字越大优先级越高，当存在多个不同优先级的候选 session 时，仅在最高的优先级中选择其中一
+   * 个，默认为 0。
+   */
+  priority: x.number.optional(),
 });
 
 export type ClientOptions = x.TypeOf<typeof ClientOptions>;
@@ -34,11 +40,12 @@ export class Client {
   private sessions: Session[] = [];
 
   readonly password: string | undefined;
+  readonly priority: number;
 
   readonly connectAuthority: string;
   readonly connectOptions: HTTP2.SecureClientSessionOptions;
 
-  readonly sessionCandidates: number;
+  readonly candidates: number;
 
   private createSessionScheduler = new BatchScheduler(() => {
     let sessions = this.sessions;
@@ -49,7 +56,7 @@ export class Client {
       `(${this.id}) new session created, ${sessions.length} in total.`,
     );
 
-    if (sessions.length < this.sessionCandidates) {
+    if (sessions.length < this.candidates) {
       this.scheduleSessionCreation();
     }
   }, CREATE_SESSION_DEBOUNCE);
@@ -86,7 +93,8 @@ export class Client {
       authority,
       rejectUnauthorized,
       password,
-      candidates: sessionCandidates = SESSION_CANDIDATES_DEFAULT,
+      candidates = SESSION_CANDIDATES_DEFAULT,
+      priority = SESSION_PRIORITY_DEFAULT,
     } = options;
 
     this.password = password;
@@ -94,7 +102,8 @@ export class Client {
     this.connectAuthority = authority;
     this.connectOptions = {rejectUnauthorized};
 
-    this.sessionCandidates = sessionCandidates;
+    this.candidates = candidates;
+    this.priority = priority;
 
     console.info(`(${id}) new client (authority ${this.connectAuthority}).`);
 

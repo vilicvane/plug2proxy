@@ -111,6 +111,7 @@ export class Session {
         {
           type: 'session',
           password: client.password,
+          priority: client.priority,
         },
         {
           endStream: false,
