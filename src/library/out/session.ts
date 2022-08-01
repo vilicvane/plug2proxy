@@ -95,7 +95,7 @@ export class Session {
         }
       })
       .on('close', () => {
-        console.debug(`(${client.id})[${this.id}] session "close"`);
+        console.debug(`(${client.id})[${this.id}] session "close".`);
       })
       .on('error', error => {
         console.error(
