@@ -17,6 +17,7 @@ const SESSION_CANDIDATES_DEFAULT = 1;
 const SESSION_PRIORITY_DEFAULT = 0;
 
 export const ClientOptions = x.object({
+  label: x.string.optional(),
   password: x.string.optional(),
   /**
    * 代理入口服务器，如 "https://example.com:8443"。
@@ -39,6 +40,8 @@ export type ClientOptions = x.TypeOf<typeof ClientOptions>;
 export class Client {
   private sessions: Session[] = [];
 
+  readonly label: string;
+
   readonly password: string | undefined;
   readonly priority: number;
 
@@ -53,7 +56,7 @@ export class Client {
     sessions.push(new Session(this));
 
     console.info(
-      `(${this.id}) new session created, ${sessions.length} in total.`,
+      `(${this.label}) new session created, ${sessions.length} in total.`,
     );
 
     if (sessions.length < this.candidates) {
@@ -71,7 +74,9 @@ export class Client {
     }
 
     console.debug();
-    console.debug(`(${this.id})[session:push(stream)] read/write in/out name`);
+    console.debug(
+      `(${this.label})[session:push(stream)] read/write in/out name`,
+    );
 
     for (let {type, description, id, stream} of activeStreamEntrySet) {
       console.debug(
@@ -84,18 +89,17 @@ export class Client {
     console.debug();
   }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
 
-  constructor(
-    readonly router: Router,
-    readonly options: ClientOptions,
-    readonly id = '-',
-  ) {
+  constructor(readonly router: Router, readonly options: ClientOptions) {
     let {
+      label = '-',
       authority,
       rejectUnauthorized,
       password,
       candidates = SESSION_CANDIDATES_DEFAULT,
       priority = SESSION_PRIORITY_DEFAULT,
     } = options;
+
+    this.label = label;
 
     this.password = password;
 
@@ -105,7 +109,7 @@ export class Client {
     this.candidates = candidates;
     this.priority = priority;
 
-    console.info(`(${id}) new client (authority ${this.connectAuthority}).`);
+    console.info(`(${label}) new client (authority ${this.connectAuthority}).`);
 
     this.scheduleSessionCreation();
   }
@@ -121,7 +125,9 @@ export class Client {
 
     sessions.splice(index, 1);
 
-    console.info(`(${this.id}) removed 1 session, ${sessions.length} remains.`);
+    console.info(
+      `(${this.label}) removed 1 session, ${sessions.length} remains.`,
+    );
 
     this.scheduleSessionCreation();
   }

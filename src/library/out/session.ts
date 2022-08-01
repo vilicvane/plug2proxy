@@ -33,7 +33,7 @@ export class Session {
       generateRandomAuthoritySegment(),
     );
 
-    console.info(`(${client.id}) session authority: ${connectAuthority}`);
+    console.info(`(${client.label}) session authority: ${connectAuthority}`);
 
     let connectOptions = client.connectOptions;
 
@@ -62,7 +62,7 @@ export class Session {
             }
 
             console.error(
-              `(${client.id})[${this.id}] ping error:`,
+              `(${client.label})[${this.id}] ping error:`,
               error.message,
             );
 
@@ -88,18 +88,18 @@ export class Session {
             break;
           default:
             console.error(
-              `(${client.id})[${this.id}] received unexpected push stream ${headers.type}.`,
+              `(${client.label})[${this.id}] received unexpected push stream ${headers.type}.`,
             );
             pushStream.destroy();
             break;
         }
       })
       .on('close', () => {
-        console.debug(`(${client.id})[${this.id}] session "close".`);
+        console.debug(`(${client.label})[${this.id}] session "close".`);
       })
       .on('error', error => {
         console.error(
-          `(${client.id})[${this.id}] session error:`,
+          `(${client.label})[${this.id}] session error:`,
           error.message,
         );
       });
@@ -122,29 +122,29 @@ export class Session {
 
         if (status === 200) {
           this.id = headers.id as string;
-          console.info(`(${client.id})[${this.id}] session ready.`);
+          console.info(`(${client.label})[${this.id}] session ready.`);
           client.addActiveStream('request', 'session', this.id, sessionStream);
         } else {
           console.error(
-            `(${client.id})[${this.id}] session initialize error (${status}):`,
+            `(${client.label})[${this.id}] session initialize error (${status}):`,
             headers.message,
           );
           sessionStream.destroy();
         }
       })
       .on('close', () => {
-        console.debug(`(${client.id})[${this.id}] session stream "close".`);
+        console.debug(`(${client.label})[${this.id}] session stream "close".`);
         client.removeSession(this);
       })
       .on('error', error => {
         console.error(
-          `(${client.id})[${this.id}] session stream error:`,
+          `(${client.label})[${this.id}] session stream error:`,
           error.message,
         );
       });
 
     connectTimeout = setTimeout(() => {
-      console.error(`(${client.id}) connect timeout.`);
+      console.error(`(${client.label}) connect timeout.`);
 
       client.removeSession(this);
 
@@ -169,11 +169,11 @@ export class Session {
 
     let id = `${this.id}:${pushStream.id}`;
 
-    console.info(`(${client.id})[${id}] connect: ${host}:${port}`);
+    console.info(`(${client.label})[${id}] connect: ${host}:${port}`);
 
     client.addActiveStream('push', `connect ${host}:${port}`, id, pushStream);
 
-    let logPrefix = `(${client.id})[${id}][${host}]`;
+    let logPrefix = `(${client.label})[${id}][${host}]`;
 
     pushStream
       .on('end', () => {
@@ -299,13 +299,13 @@ export class Session {
 
     let id = `${this.id}:${pushStream.id}`;
 
-    console.info(`(${client.id})[${id}] request:`, method, url);
+    console.info(`(${client.label})[${id}] request:`, method, url);
 
     let host = new URL(url).hostname;
 
     client.addActiveStream('push', `request ${method} ${url}`, id, pushStream);
 
-    let logPrefix = `(${client.id})[${id}][${host}]`;
+    let logPrefix = `(${client.label})[${id}][${host}]`;
 
     pushStream
       .on('end', () => {

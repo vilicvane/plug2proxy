@@ -37,12 +37,14 @@ main(async ([configModulePath]) => {
   } else {
     const router = new Router(config.router ?? {});
 
-    for (let [index, clientOptions] of config.clients.entries()) {
-      const _outClient = new Out.Client(
-        router,
-        clientOptions,
-        index.toString(),
-      );
+    for (let [
+      index,
+      {label = index.toString(), ...restClientOptions},
+    ] of config.clients.entries()) {
+      const _outClient = new Out.Client(router, {
+        label,
+        ...restClientOptions,
+      });
     }
   }
 
