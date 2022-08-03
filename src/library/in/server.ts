@@ -42,6 +42,8 @@ export class Server {
 
   readonly http2SecureServer: HTTP2.Http2SecureServer;
 
+  private streamListenerMap = new Map<string, ServerStreamListener>();
+
   constructor({
     host = LISTEN_HOST_DEFAULT,
     port = LISTEN_PORT_DEFAULT,
@@ -98,11 +100,25 @@ export class Server {
       })
       .on('stream', (stream, headers) => {
         if (headers.type !== 'session') {
-          if (http2SecureServer.listenerCount('stream') === 1) {
+          let id = headers.id;
+
+          if (typeof id !== 'string') {
             console.error(
-              `[server] received unexpected non-session request: ${headers.type}`,
+              `[server] received unexpected non-session request without id: ${headers.type}`,
             );
+            return;
           }
+
+          let streamListener = this.streamListenerMap.get(id);
+
+          if (!streamListener) {
+            console.error(
+              `[server] received unexpected non-session request with unknown id: ${headers.type} ${id}`,
+            );
+            return;
+          }
+
+          streamListener(stream, headers);
 
           return;
         }
@@ -191,6 +207,14 @@ export class Server {
     this.http2SecureServer = http2SecureServer;
   }
 
+  onStream(id: string, listener: ServerStreamListener): () => void {
+    let streamListenerMap = this.streamListenerMap;
+
+    streamListenerMap.set(id, listener);
+
+    return () => streamListenerMap.delete(id);
+  }
+
   async getSessionCandidate(logPrefix: string): Promise<SessionCandidate> {
     let sessionCandidates = this.sessionCandidates;
 
@@ -247,3 +271,8 @@ export interface SessionCandidate {
   priority: number;
   stream: HTTP2.ServerHttp2Stream;
 }
+
+export type ServerStreamListener = (
+  stream: HTTP2.ServerHttp2Stream,
+  headers: HTTP2.IncomingHttpHeaders,
+) => void;

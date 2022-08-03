@@ -12,11 +12,11 @@ import {
   destroyOnDrain,
   writeHTTPHead,
 } from '../@common';
-import {groupRawHeaders, probeDestinationIP, refEventEmitter} from '../@utils';
+import {groupRawHeaders, probeDestinationIP} from '../@utils';
 import {IPPattern, Port} from '../@x-types';
 import type {InRoute} from '../types';
 
-import type {Server} from './server';
+import type {Server, ServerStreamListener} from './server';
 
 const HOSTNAME = OS.hostname();
 
@@ -207,80 +207,67 @@ export class Proxy {
 
     let id: string | undefined;
 
-    let connectEventSession = refEventEmitter(server.http2SecureServer).on(
-      'stream',
-      (
-        outConnectStream: HTTP2.ServerHttp2Stream,
-        headers: HTTP2.IncomingHttpHeaders,
-      ) => {
-        if (headers.id !== id) {
-          if (server.http2SecureServer.listenerCount('stream') === 1) {
-            console.error(
-              `${logPrefix} received unexpected request ${headers.id} (${headers.type}).`,
-            );
-          }
+    let removeServerStreamListener: () => void;
 
-          return;
-        }
+    let serverStreamListener: ServerStreamListener = (
+      outConnectStream: HTTP2.ServerHttp2Stream,
+      headers: HTTP2.IncomingHttpHeaders,
+    ) => {
+      removeServerStreamListener();
 
-        connectEventSession.end();
+      if (inSocket.destroyed) {
+        outConnectStream.destroy();
+        return;
+      }
 
-        if (inSocket.destroyed) {
-          outConnectStream.destroy();
-          return;
-        }
+      outConnectStream.respond();
 
-        outConnectStream.respond();
+      if (headers.type === 'connect-direct') {
+        console.info(`${logPrefix} out routed to direct.`);
 
-        if (headers.type === 'connect-direct') {
-          console.info(`${logPrefix} out routed to direct.`);
+        this.setCachedRoute(host, 'direct');
+        this.directConnect(host, port, inSocket, logPrefix);
 
-          this.setCachedRoute(host, 'direct');
-          this.directConnect(host, port, inSocket, logPrefix);
+        outConnectStream.end();
+        return;
+      }
 
-          outConnectStream.end();
-          return;
-        }
+      if (headers.type !== 'connect-ok') {
+        console.error(`${logPrefix} unexpected request type ${headers.type}.`);
 
-        if (headers.type !== 'connect-ok') {
-          console.error(
-            `${logPrefix} unexpected request type ${headers.type}.`,
-          );
+        writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
 
-          writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
+        outConnectStream.destroy();
+        return;
+      }
 
-          outConnectStream.destroy();
-          return;
-        }
+      this.setCachedRoute(host, 'proxy');
 
-        this.setCachedRoute(host, 'proxy');
+      console.info(`${logPrefix} connected.`);
 
-        console.info(`${logPrefix} connected.`);
+      writeHTTPHead(inSocket, 200, 'OK');
 
-        writeHTTPHead(inSocket, 200, 'OK');
+      inSocket.pipe(outConnectStream);
+      outConnectStream.pipe(inSocket);
 
-        inSocket.pipe(outConnectStream);
-        outConnectStream.pipe(inSocket);
+      // Debugging messages has already been added at the beginning of
+      // `connect()`.
+      inSocket.on('close', () => {
+        outConnectStream.destroy();
+      });
 
-        // Debugging messages has already been added at the beginning of
-        // `connect()`.
-        inSocket.on('close', () => {
-          outConnectStream.destroy();
+      outConnectStream
+        .on('end', () => {
+          console.debug(`${logPrefix} out stream "end".`);
+        })
+        .on('close', () => {
+          console.debug(`${logPrefix} out stream "close".`);
+          destroyOnDrain(inSocket);
+        })
+        .on('error', error => {
+          console.error(`${logPrefix} out stream error:`, error.message);
         });
-
-        outConnectStream
-          .on('end', () => {
-            console.debug(`${logPrefix} out stream "end".`);
-          })
-          .on('close', () => {
-            console.debug(`${logPrefix} out stream "close".`);
-            destroyOnDrain(inSocket);
-          })
-          .on('error', error => {
-            console.error(`${logPrefix} out stream error:`, error.message);
-          });
-      },
-    );
+    };
 
     sessionCandidate.stream.pushStream(
       {type: 'connect', host, port, 'host-ip': hostIP},
@@ -289,12 +276,13 @@ export class Proxy {
           console.error(`${logPrefix} connect error:`, error.message);
 
           writeHTTPHead(inSocket, 500, 'Internal Server Error', true);
-
-          connectEventSession.end();
           return;
         }
 
         id = `${sessionCandidate.id}:${pushStream.id}`;
+
+        removeServerStreamListener = server.onStream(id, serverStreamListener);
+
         logPrefix = `[${id}][${host}]`;
 
         pushStream
@@ -489,122 +477,104 @@ export class Proxy {
 
     let id: string | undefined;
 
-    let pushEventSession = refEventEmitter(server.http2SecureServer).on(
-      'stream',
-      (
-        outStream: HTTP2.ServerHttp2Stream,
-        outHeaders: HTTP2.IncomingHttpHeaders,
-      ) => {
-        if (outHeaders.id !== id) {
-          if (server.http2SecureServer.listenerCount('stream') === 1) {
-            console.error(
-              `${logPrefix} received unexpected request ${headers.id} (${headers.type}).`,
-            );
-          }
+    let removeServerStreamListener: () => void;
 
-          return;
+    let serverStreamListener: ServerStreamListener = (
+      outStream: HTTP2.ServerHttp2Stream,
+      outHeaders: HTTP2.IncomingHttpHeaders,
+    ) => {
+      if (request.socket.destroyed) {
+        removeServerStreamListener();
+        outStream.destroy();
+        return;
+      }
+
+      outStream.respond();
+
+      if (outHeaders.type === 'request-direct') {
+        removeServerStreamListener();
+
+        console.info(`${logPrefix} out routed to direct.`);
+
+        this.setCachedRoute(host, 'direct');
+        this.directRequest(method, url, headers, request, response, logPrefix);
+
+        outStream.end();
+        return;
+      }
+
+      if (
+        // This happens after 'request-response'.
+        outHeaders.type === 'response-headers' ||
+        outHeaders.type === 'response-headers-end'
+      ) {
+        removeServerStreamListener();
+
+        console.info(`${logPrefix} received response headers.`);
+
+        response.writeHead(
+          Number(outHeaders.status),
+          outHeaders.headers && JSON.parse(outHeaders.headers as string),
+        );
+
+        outStream.end();
+
+        if (outHeaders.type === 'response-headers-end') {
+          response.end();
         }
 
-        if (request.socket.destroyed) {
-          pushEventSession.end();
-          outStream.destroy();
-          return;
-        }
+        return;
+      }
 
-        outStream.respond();
+      if (outHeaders.type !== 'request-response') {
+        removeServerStreamListener();
 
-        if (outHeaders.type === 'request-direct') {
-          pushEventSession.end();
+        console.error(`${logPrefix} unexpected request type ${headers.type}.`);
+        response.writeHead(500).end();
+        outStream.destroy();
+        return;
+      }
 
-          console.info(`${logPrefix} out routed to direct.`);
+      this.setCachedRoute(host, 'proxy');
 
-          this.setCachedRoute(host, 'direct');
-          this.directRequest(
-            method,
-            url,
-            headers,
-            request,
-            response,
-            logPrefix,
-          );
+      console.debug(`${logPrefix} request-response stream received.`);
 
-          outStream.end();
-          return;
-        }
+      request.pipe(outStream);
+      outStream.pipe(response);
 
-        if (
-          // This happens after 'request-response'.
-          outHeaders.type === 'response-headers' ||
-          outHeaders.type === 'response-headers-end'
-        ) {
-          pushEventSession.end();
-
-          console.info(`${logPrefix} received response headers.`);
-
-          response.writeHead(
-            Number(outHeaders.status),
-            outHeaders.headers && JSON.parse(outHeaders.headers as string),
-          );
-
-          outStream.end();
-
-          if (outHeaders.type === 'response-headers-end') {
-            response.end();
-          }
-
-          return;
-        }
-
-        if (outHeaders.type !== 'request-response') {
-          pushEventSession.end();
-
+      outStream
+        .on('end', () => {
+          console.debug(`${logPrefix} out response stream "end".`);
+        })
+        .on('close', () => {
+          console.debug(`${logPrefix} out response stream "close".`);
+          destroyOnDrain(response);
+        })
+        .on('error', error => {
           console.error(
-            `${logPrefix} unexpected request type ${headers.type}.`,
+            `${logPrefix} out response stream error:`,
+            error.message,
           );
-          response.writeHead(500).end();
-          outStream.destroy();
-          return;
-        }
-
-        this.setCachedRoute(host, 'proxy');
-
-        console.debug(`${logPrefix} request-response stream received.`);
-
-        request.pipe(outStream);
-        outStream.pipe(response);
-
-        outStream
-          .on('end', () => {
-            console.debug(`${logPrefix} out response stream "end".`);
-          })
-          .on('close', () => {
-            console.debug(`${logPrefix} out response stream "close".`);
-            destroyOnDrain(response);
-          })
-          .on('error', error => {
-            console.error(
-              `${logPrefix} out response stream error:`,
-              error.message,
-            );
-          });
-
-        // Debugging messages added at the beginning of `request()`.
-        response.on('close', () => {
-          outStream!.destroy();
         });
-      },
-    );
+
+      // Debugging messages added at the beginning of `request()`.
+      response.on('close', () => {
+        outStream!.destroy();
+      });
+    };
 
     sessionCandidate.stream.pushStream(
       {type: 'request', method, url, headers: JSON.stringify(headers)},
       (error, pushStream) => {
         if (error) {
-          pushEventSession.end();
           response.writeHead(500).end();
           return;
         }
 
         id = `${sessionCandidate.id}:${pushStream.id}`;
+
+        removeServerStreamListener = server.onStream(id, serverStreamListener);
+
         logPrefix = `[${id}][${host}]`;
 
         pushStream
