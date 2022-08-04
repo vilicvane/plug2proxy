@@ -16,6 +16,8 @@ const PRINT_ACTIVE_STREAMS_TIME_SPAN = ms('5s');
 const SESSION_CANDIDATES_DEFAULT = 1;
 const SESSION_PRIORITY_DEFAULT = 0;
 
+const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 2;
+
 export const ClientOptions = x.object({
   label: x.string.optional(),
   password: x.string.optional(),
@@ -33,6 +35,8 @@ export const ClientOptions = x.object({
    * 个，默认为 0。
    */
   priority: x.number.optional(),
+  activationLatency: x.number.optional(),
+  deactivationLatency: x.number.optional(),
 });
 
 export type ClientOptions = x.TypeOf<typeof ClientOptions>;
@@ -44,6 +48,8 @@ export class Client {
 
   readonly password: string | undefined;
   readonly priority: number;
+  readonly activationLatency: number | undefined;
+  readonly deactivationLatency: number | undefined;
 
   readonly connectAuthority: string;
   readonly connectOptions: HTTP2.SecureClientSessionOptions;
@@ -97,6 +103,10 @@ export class Client {
       password,
       candidates = SESSION_CANDIDATES_DEFAULT,
       priority = SESSION_PRIORITY_DEFAULT,
+      activationLatency,
+      deactivationLatency = typeof activationLatency === 'number'
+        ? activationLatency * DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER
+        : undefined,
     } = options;
 
     this.label = label;
@@ -108,6 +118,8 @@ export class Client {
 
     this.candidates = candidates;
     this.priority = priority;
+    this.activationLatency = activationLatency;
+    this.deactivationLatency = deactivationLatency;
 
     console.info(`(${label}) new client (authority ${this.connectAuthority}).`);
 

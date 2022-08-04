@@ -31,12 +31,18 @@ export const ServerOptions = x.object({
 export type ServerOptions = x.TypeOf<typeof ServerOptions>;
 
 export class Server {
-  private sessionCandidates: readonly SessionCandidate[] = [];
+  private sessionToSessionCandidateMap = new Map<
+    HTTP2.Http2Session,
+    SessionCandidate
+  >();
+
   private sessionCandidateResolvers: ((candidate: SessionCandidate) => void)[] =
     [];
 
-  private prioritizedSessionCandidatesRef = this.sessionCandidates;
-  private prioritizedSessionCandidates: SessionCandidate[] = [];
+  // private activeSessionCandidates: readonly SessionCandidate[] = [];
+
+  // private prioritizedSessionCandidatesRef = this.activeSessionCandidates;
+  // private prioritizedSessionCandidates: SessionCandidate[] = [];
 
   readonly password: string | undefined;
 
@@ -70,25 +76,55 @@ export class Server {
 
         let remoteAddress = session.socket.remoteAddress ?? '(unknown)';
 
-        let pingTimer = setInterval(() => {
+        let ping = (): void => {
           if (session.destroyed) {
             clearInterval(pingTimer);
             return;
           }
 
-          session.ping(error => {
-            if (!error) {
+          session.ping((error, duration) => {
+            if (error) {
+              console.error(
+                `[server] ping error (remote ${remoteAddress}):`,
+                error.message,
+              );
+
+              session.destroy();
+
               return;
             }
 
-            console.error(
-              `[server] ping error (remote ${remoteAddress}):`,
-              error.message,
-            );
+            let candidate = this.sessionToSessionCandidateMap.get(session);
 
-            session.destroy();
+            if (!candidate) {
+              return;
+            }
+
+            let logPrefix = `[${candidate.id}](${remoteAddress})`;
+
+            if (candidate.active) {
+              if (duration > candidate.deactivationLatency) {
+                candidate.active = false;
+                console.info(
+                  `${logPrefix} 🟡 session deactivated (latency: ${duration.toFixed(
+                    2,
+                  )}ms).`,
+                );
+              }
+            } else {
+              if (duration < candidate.activationLatency) {
+                candidate.active = true;
+                console.info(
+                  `${logPrefix} 🟢 session activated (latency: ${duration.toFixed(
+                    2,
+                  )}ms).`,
+                );
+              }
+            }
           });
-        }, SESSION_PING_INTERVAL);
+        };
+
+        let pingTimer = setInterval(ping, SESSION_PING_INTERVAL);
 
         session
           .on('close', () => {
@@ -97,6 +133,8 @@ export class Server {
           .on('error', () => {
             clearInterval(pingTimer);
           });
+
+        ping();
       })
       .on('stream', (stream, headers) => {
         if (headers.type !== 'session') {
@@ -123,7 +161,9 @@ export class Server {
           return;
         }
 
-        let remoteAddress = stream.session.socket.remoteAddress ?? '(unknown)';
+        let session = stream.session;
+
+        let remoteAddress = session.socket.remoteAddress ?? '(unknown)';
 
         if (headers.password !== password) {
           console.warn(
@@ -148,9 +188,17 @@ export class Server {
 
         console.info(`${logPrefix} new session accepted.`);
 
+        let activationLatency =
+          Number(headers['activation-latency']) || Infinity;
+        let deactivationLatency =
+          Number(headers['deactivation-latency']) || Infinity;
+
         let candidate: SessionCandidate = {
           id,
           stream,
+          active: false,
+          activationLatency,
+          deactivationLatency,
           priority: Number(headers.priority) || 0,
         };
 
@@ -161,25 +209,19 @@ export class Server {
 
         stream
           .on('close', () => {
-            this.sessionCandidates = _.without(
-              this.sessionCandidates,
-              candidate,
-            );
+            this.sessionToSessionCandidateMap.delete(session);
 
-            console.info(`${logPrefix} session "close".`);
+            console.info(`${logPrefix} 🔴 session "close".`);
           })
           .on('error', error => {
             // Observing more session candidates than expected, pull on error
             // for redundancy.
-            this.sessionCandidates = _.without(
-              this.sessionCandidates,
-              candidate,
-            );
+            this.sessionToSessionCandidateMap.delete(session);
 
-            console.error(`${logPrefix} session error:`, error.message);
+            console.error(`${logPrefix} 🔴 session error:`, error.message);
           });
 
-        this.sessionCandidates = [...this.sessionCandidates, candidate];
+        this.sessionToSessionCandidateMap.set(session, candidate);
 
         for (let resolver of this.sessionCandidateResolvers) {
           resolver(candidate);
@@ -216,44 +258,39 @@ export class Server {
   }
 
   async getSessionCandidate(logPrefix: string): Promise<SessionCandidate> {
-    let sessionCandidates = this.sessionCandidates;
+    let allCandidates = Array.from(this.sessionToSessionCandidateMap.values());
 
-    if (sessionCandidates !== this.prioritizedSessionCandidatesRef) {
-      if (sessionCandidates.length > 0) {
-        let [firstCandidate, ...restCandidates] = _.sortBy(
-          sessionCandidates,
-          candidate => -candidate.priority,
-        );
+    let activeCandidates = allCandidates.filter(candidate => candidate.active);
 
-        let restPrioritizedEndAt = restCandidates.findIndex(
-          candidate => candidate.priority < firstCandidate.priority,
-        );
+    let priorityCandidates =
+      activeCandidates.length > 0 ? activeCandidates : allCandidates;
 
-        this.prioritizedSessionCandidates = [
-          firstCandidate,
-          ...(restPrioritizedEndAt < 0
-            ? restCandidates
-            : restCandidates.slice(0, restPrioritizedEndAt)),
-        ];
-      } else {
-        this.prioritizedSessionCandidates = [];
-      }
+    if (priorityCandidates.length > 0) {
+      let [firstCandidate, ...restCandidates] = _.sortBy(
+        priorityCandidates,
+        candidate => -candidate.priority,
+      );
 
-      this.prioritizedSessionCandidatesRef = sessionCandidates;
-    }
+      let restPrioritizedEndAt = restCandidates.findIndex(
+        candidate => candidate.priority < firstCandidate.priority,
+      );
 
-    let prioritizedSessionCandidates = this.prioritizedSessionCandidates;
+      let prioritizedCandidates = [
+        firstCandidate,
+        ...(restPrioritizedEndAt < 0
+          ? restCandidates
+          : restCandidates.slice(0, restPrioritizedEndAt)),
+      ];
 
-    console.debug(
-      `${logPrefix} getting session candidates, ${
-        prioritizedSessionCandidates.length
-      } (priority ${prioritizedSessionCandidates[0]?.priority ?? 'n/a'}) / ${
-        sessionCandidates.length
-      } available.`,
-    );
+      console.info(
+        `${logPrefix} getting session candidates, ${
+          prioritizedCandidates.length
+        } (priority ${prioritizedCandidates[0]?.priority ?? 'n/a'}) / ${
+          activeCandidates.length
+        } / ${allCandidates.length} available.`,
+      );
 
-    if (prioritizedSessionCandidates.length > 0) {
-      return _.sample(prioritizedSessionCandidates)!;
+      return _.sample(prioritizedCandidates)!;
     } else {
       console.info(
         `${logPrefix} no session candidate is currently available, waiting for new session...`,
@@ -269,6 +306,9 @@ export class Server {
 export interface SessionCandidate {
   id: string;
   priority: number;
+  active: boolean;
+  activationLatency: number;
+  deactivationLatency: number;
   stream: HTTP2.ServerHttp2Stream;
 }
 

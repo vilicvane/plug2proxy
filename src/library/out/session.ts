@@ -112,6 +112,8 @@ export class Session {
           type: 'session',
           password: client.password,
           priority: client.priority,
+          'activation-latency': client.activationLatency,
+          'deactivation-latency': client.deactivationLatency,
         },
         {
           endStream: false,
