@@ -28,8 +28,6 @@ plug2proxy in.p2p.js
 配置文件 `in.p2p.js`，详见 [in/server.ts](./src/library/in/server.ts)、[in/proxy.ts](./src/library/in/proxy.ts)。
 
 ```js
-const FS = require('fs');
-
 module.exports = {
   mode: 'in',
   server: {
@@ -39,6 +37,46 @@ module.exports = {
 ```
 
 > 入口服务器（在入口等待出口客户端连接的服务器）默认监听 0.0.0.0:8443，本地代理服务器默认监听 127.0.0.1:8000。
+
+更多选项：
+
+```js
+const FS = require('fs');
+
+module.exports = {
+  mode: 'in',
+  // 参考 src/library/ddns/ddns.ts 中的 DDNSOptions
+  ddns: {
+    provider: 'alicloud',
+    accessKeyId: '',
+    accessKeySecret: '',
+    domain: 'example.com',
+    record: 'p2p',
+  },
+  // 参考 src/library/in/server.ts 中的 ServerOptions
+  server: {
+    host: '0.0.0.0',
+    port: 8443,
+    cert: FS.readFileSync('example.crt'),
+    key: FS.readFileSync('example.key'),
+    password: '12345678',
+    session: {
+      // 当会话最近满足激活条件的比例低于此值时，将被避免使用。
+      qualityActivationOverride: 0.95,
+      // 统计多长时间内的会话状态（毫秒）。
+      qualityMeasurementDuration: 300_000,
+    },
+  },
+  // 参考 src/library/in/proxy.ts 中的 ProxyOptions
+  proxy: {
+    host: '127.0.0.1',
+    port: 8000,
+    routing: {
+      ipProbe: true,
+    },
+  },
+};
+```
 
 ### 出口
 
@@ -83,10 +121,25 @@ module.exports = {
 };
 ```
 
-## 路线图
+更多选项：
 
-- P2P 连接。
-
-## 授权协议
-
-MIT 协议
+```js
+module.exports = {
+  mode: 'out',
+  // 参考 src/library/router/router.ts 中的 RouterOptions
+  router: {},
+  clients: [
+    // 参考 src/library/out/client.ts 中的 ClientOptions
+    {
+      label: '🌏',
+      authority: 'https://in-server:8443',
+      rejectUnauthorized: false,
+      password: '12345678',
+      candidates: 1,
+      priority: 0,
+      activationLatency: 200,
+      deactivationLatency: 300,
+    },
+  ],
+};
+```

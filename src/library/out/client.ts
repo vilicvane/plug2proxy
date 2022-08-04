@@ -20,12 +20,12 @@ const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 1;
 
 export const ClientOptions = x.object({
   label: x.string.optional(),
-  password: x.string.optional(),
   /**
    * 代理入口服务器，如 "https://example.com:8443"。
    */
   authority: x.string,
   rejectUnauthorized: x.boolean.optional(),
+  password: x.string.optional(),
   /**
    * 候选连接数量，默认为 1。
    */
@@ -35,7 +35,13 @@ export const ClientOptions = x.object({
    * 个，默认为 0。
    */
   priority: x.number.optional(),
+  /**
+   * 当会话延迟小于此设置时激活，除非没有别的会话可用。
+   */
   activationLatency: x.number.optional(),
+  /**
+   * 当会话延迟大于此设置时取消激活。
+   */
   deactivationLatency: x.number.optional(),
 });
 
