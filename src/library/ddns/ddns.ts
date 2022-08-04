@@ -11,11 +11,7 @@ const CHECK_TIMEOUT = ms('5m');
 
 export const DDNSOptions = x.intersection(
   x.object({
-    check: x
-      .object({
-        interval: x.integerRange({min: 1000}).optional(),
-      })
-      .optional(),
+    checkInterval: x.integerRange({min: 1000}).optional(),
   }),
   ProviderDDNSOptions,
 );
@@ -30,7 +26,7 @@ export class DDNS {
   private ip: string | undefined;
 
   constructor({
-    check: {interval: checkInterval = CHECK_INTERVAL_DEFAULT} = {},
+    checkInterval = CHECK_INTERVAL_DEFAULT,
     ...options
   }: DDNSOptions) {
     this.provider = createDDNSProvider(options);
