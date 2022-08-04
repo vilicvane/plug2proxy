@@ -13,6 +13,9 @@ import {IPPattern, Port} from '../@x-types';
 const SESSION_PING_INTERVAL = ms('5s');
 const SESSION_MAX_OUTSTANDING_PINGS = 2;
 
+const SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT = ms('5min');
+const SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT = 0.95;
+
 const WINDOW_SIZE = bytes('32MB');
 
 const LISTEN_HOST_DEFAULT = IPPattern.nominalize('0.0.0.0');
@@ -26,6 +29,12 @@ export const ServerOptions = x.object({
   cert: x.union(x.string, xn.Buffer).optional(),
   key: x.union(x.string, xn.Buffer).optional(),
   password: x.string.optional(),
+  session: x
+    .object({
+      qualityActivationOverride: x.number.optional(),
+      qualityMeasurementDuration: x.number.optional(),
+    })
+    .optional(),
 });
 
 export type ServerOptions = x.TypeOf<typeof ServerOptions>;
@@ -39,16 +48,13 @@ export class Server {
   private sessionCandidateResolvers: ((candidate: SessionCandidate) => void)[] =
     [];
 
-  // private activeSessionCandidates: readonly SessionCandidate[] = [];
-
-  // private prioritizedSessionCandidatesRef = this.activeSessionCandidates;
-  // private prioritizedSessionCandidates: SessionCandidate[] = [];
-
   readonly password: string | undefined;
 
   readonly http2SecureServer: HTTP2.Http2SecureServer;
 
   private streamListenerMap = new Map<string, ServerStreamListener>();
+
+  private sessionQualityActivationOverride: number;
 
   constructor({
     host = LISTEN_HOST_DEFAULT,
@@ -56,8 +62,20 @@ export class Server {
     cert = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.crt')),
     key = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.key')),
     password,
+    session: {
+      qualityActivationOverride:
+        sessionQualityActivationOverride = SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT,
+      qualityMeasurementDuration:
+        sessionQualityMeasurementDuration = SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT,
+    } = {},
   }: ServerOptions) {
     this.password = password;
+
+    this.sessionQualityActivationOverride = sessionQualityActivationOverride;
+
+    let sessionStatusesLimit = Math.ceil(
+      sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
+    );
 
     let lastSessionId = 0;
 
@@ -120,6 +138,12 @@ export class Server {
                   )}ms).`,
                 );
               }
+            }
+
+            candidate.statuses.push(candidate.active);
+
+            if (candidate.statuses.length > sessionStatusesLimit) {
+              candidate.statuses.shift();
             }
           });
         };
@@ -197,6 +221,7 @@ export class Server {
           id,
           stream,
           active: false,
+          statuses: [],
           activationLatency,
           deactivationLatency,
           priority: Number(headers.priority) || 0,
@@ -262,8 +287,21 @@ export class Server {
 
     let activeCandidates = allCandidates.filter(candidate => candidate.active);
 
+    let qualityActivationOverride = this.sessionQualityActivationOverride;
+
+    let stableCandidates = activeCandidates.filter(
+      candidate =>
+        candidate.statuses.filter(active => active).length /
+          candidate.statuses.length >=
+        qualityActivationOverride,
+    );
+
     let priorityCandidates =
-      activeCandidates.length > 0 ? activeCandidates : allCandidates;
+      stableCandidates.length > 0
+        ? stableCandidates
+        : activeCandidates.length > 0
+        ? activeCandidates
+        : allCandidates;
 
     if (priorityCandidates.length > 0) {
       let [firstCandidate, ...restCandidates] = _.sortBy(
@@ -283,11 +321,13 @@ export class Server {
       ];
 
       console.info(
-        `${logPrefix} getting session candidates, ${
+        `${logPrefix} getting session candidate out of ${
           prioritizedCandidates.length
-        } (priority ${prioritizedCandidates[0]?.priority ?? 'n/a'}) / ${
-          activeCandidates.length
-        } / ${allCandidates.length} available.`,
+        } (priority ${prioritizedCandidates[0]?.priority ?? 'n/a'}), ${
+          stableCandidates.length
+        } stable / ${activeCandidates.length} active / ${
+          allCandidates.length
+        } in total.`,
       );
 
       return _.sample(prioritizedCandidates)!;
@@ -307,6 +347,7 @@ export interface SessionCandidate {
   id: string;
   priority: number;
   active: boolean;
+  statuses: boolean[];
   activationLatency: number;
   deactivationLatency: number;
   stream: HTTP2.ServerHttp2Stream;

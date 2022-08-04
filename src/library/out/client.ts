@@ -16,7 +16,7 @@ const PRINT_ACTIVE_STREAMS_TIME_SPAN = ms('5s');
 const SESSION_CANDIDATES_DEFAULT = 1;
 const SESSION_PRIORITY_DEFAULT = 0;
 
-const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 2;
+const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 1;
 
 export const ClientOptions = x.object({
   label: x.string.optional(),
