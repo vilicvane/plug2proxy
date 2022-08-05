@@ -416,23 +416,31 @@ export class Server {
           : restCandidates.slice(0, restPrioritizedEndAt)),
       ];
 
+      let candidate = _.sample(prioritizedCandidates)!;
+
       console.info(
-        `${logPrefix} getting session candidate out of ${
+        `${logPrefix} get session candidate (${candidate.outLabel}) out of ${
           prioritizedCandidates.length
-        } (priority ${prioritizedCandidates[0]?.priority ?? 'n/a'}), ${
+        } (priority ${candidate.priority ?? 'n/a'}), ${
           activeCandidates.length
         } active / ${allCandidates.length} in total.`,
       );
 
-      return _.sample(prioritizedCandidates)!;
+      return candidate;
     } else {
       console.info(
         `${logPrefix} no session candidate is currently available, waiting for new session...`,
       );
 
-      return new Promise(resolve => {
-        this.sessionCandidateResolvers.push(resolve);
-      });
+      return new Promise(resolve =>
+        this.sessionCandidateResolvers.push(candidate => {
+          console.info(
+            `${logPrefix} get new session candidate (${candidate.outLabel}).`,
+          );
+
+          resolve(candidate);
+        }),
+      );
     }
   }
 }
