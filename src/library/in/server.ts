@@ -73,11 +73,15 @@ export class Server {
       priority,
       latency,
       quality,
+      statuses,
+      statusesLimit,
     } of sessionCandidates) {
       console.debug(
         `  [${id}](${outLabel}) ${active ? '🟢' : '🟡'} ${
           latency ? `${latency.toFixed(2)}ms` : '-'
-        } / ${quality.toFixed(2)} / ${priority}`,
+        } / ${quality.toFixed(2)} (${
+          statuses.length
+        }/${statusesLimit}) / ${priority}`,
       );
     }
 
