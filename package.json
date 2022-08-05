@@ -1,6 +1,6 @@
 {
   "name": "plug2proxy",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "license": "MIT",
   "author": "vilicvane",
   "bin": "bld/cli/main.js",
