@@ -52,18 +52,26 @@ export class Server {
   private streamListenerMap = new Map<string, ServerStreamListener>();
 
   private printSessionCandidatesScheduler = new BatchScheduler(() => {
-    let sessionCandidates = Array.from(
-      this.sessionToSessionCandidateMap.values(),
-    ).sort(candidate => -candidate.priority);
+    let sessionCandidates = _.sortBy(
+      Array.from(this.sessionToSessionCandidateMap.values()),
+      candidate => -candidate.priority,
+    );
 
     console.debug();
     console.debug('[server] session candidates:');
 
-    for (let {id, outLabel, active, latency, quality} of sessionCandidates) {
+    for (let {
+      id,
+      outLabel,
+      active,
+      priority,
+      latency,
+      quality,
+    } of sessionCandidates) {
       console.debug(
-        `  [${id}](${outLabel}) ${active ? '🟢' : '🟡'} latency ${
+        `  [${id}](${outLabel}) ${active ? '🟢' : '🟡'} ${
           latency ? `${latency.toFixed(2)}ms` : '-'
-        } quality ${quality.toFixed(2)}`,
+        } (latency) ${quality.toFixed(2)} (quality) ${priority} (priority)`,
       );
     }
 
