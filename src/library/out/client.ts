@@ -112,7 +112,11 @@ export class Client {
     console.debug();
   }, PRINT_ACTIVE_STREAMS_TIME_SPAN);
 
-  constructor(readonly router: Router, readonly options: ClientOptions) {
+  constructor(
+    readonly outLabel: string | undefined,
+    readonly router: Router,
+    readonly options: ClientOptions,
+  ) {
     let {
       label = '-',
       authority,

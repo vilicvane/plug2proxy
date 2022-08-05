@@ -17,6 +17,7 @@ const Config = x
     }),
     x.object({
       mode: x.literal('out'),
+      label: x.string.optional(),
       router: RouterOptions.optional(),
       clients: x.array(Out.ClientOptions),
     }),
@@ -41,7 +42,7 @@ main(async ([configModulePath]) => {
       index,
       {label = index.toString(), ...restClientOptions},
     ] of config.clients.entries()) {
-      const _outClient = new Out.Client(router, {
+      const _outClient = new Out.Client(config.label, router, {
         label,
         ...restClientOptions,
       });

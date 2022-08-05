@@ -111,12 +111,14 @@ export class Session {
         {
           type: 'session',
           password: client.password,
+          'out-label': client.outLabel && encodeURIComponent(client.outLabel),
           priority: client.priority,
           'activation-latency': client.activationLatency,
           'deactivation-latency': client.deactivationLatency,
           'quality-deactivation-override': client.qualityDeactivationOverride,
           'quality-activation-override': client.qualityActivationOverride,
           'quality-measurement-duration': client.qualityMeasurementDuration,
+          [HTTP2.sensitiveHeaders]: ['password'],
         },
         {
           endStream: false,

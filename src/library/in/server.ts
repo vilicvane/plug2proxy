@@ -97,7 +97,7 @@ export class Server {
               return;
             }
 
-            let logPrefix = `[${candidate.id}](${remoteAddress})`;
+            let logPrefix = `[${candidate.id}](${candidate.outLabel})`;
 
             let previouslyActive = candidate.active;
 
@@ -221,7 +221,13 @@ export class Server {
 
         let id = (++lastSessionId).toString();
 
-        let logPrefix = `[${id}](${remoteAddress})`;
+        let outLabel = headers['out-label'] as string | undefined;
+
+        outLabel = outLabel
+          ? `${decodeURIComponent(outLabel)}${remoteAddress}`
+          : remoteAddress;
+
+        let logPrefix = `[${id}](${outLabel})`;
 
         console.info(`${logPrefix} new session accepted.`);
 
@@ -259,8 +265,11 @@ export class Server {
           deactivationLatency = Infinity;
         }
 
+        let priority = Number(headers.priority) || 0;
+
         let candidate: SessionCandidate = {
           id,
+          outLabel,
           stream,
           active: false,
           activeOverride: undefined,
@@ -270,7 +279,7 @@ export class Server {
           statusesLimit,
           qualityDeactivationOverride,
           qualityActivationOverride,
-          priority: Number(headers.priority) || 0,
+          priority,
         };
 
         stream.respond({
@@ -376,6 +385,7 @@ export class Server {
 
 export interface SessionCandidate {
   id: string;
+  outLabel: string;
   priority: number;
   active: boolean;
   activeOverride: false | undefined;
