@@ -8,7 +8,11 @@ import ms from 'ms';
 import * as x from 'x-value';
 import * as xn from 'x-value/node';
 
+import {BatchScheduler} from '../@utils';
 import {IPPattern, Port} from '../@x-types';
+
+const PRINT_SESSION_CANDIDATES_TIME_SPAN = ms('2s');
+const PRINT_SESSION_CANDIDATES_IDLE_TIME_SPAN = ms('30s');
 
 const SESSION_PING_INTERVAL = ms('5s');
 const SESSION_MAX_OUTSTANDING_PINGS = 2;
@@ -46,6 +50,30 @@ export class Server {
   readonly http2SecureServer: HTTP2.Http2SecureServer;
 
   private streamListenerMap = new Map<string, ServerStreamListener>();
+
+  private printSessionCandidatesScheduler = new BatchScheduler(() => {
+    let sessionCandidates = Array.from(
+      this.sessionToSessionCandidateMap.values(),
+    ).sort(candidate => -candidate.priority);
+
+    console.debug();
+    console.debug('[server] session candidates:');
+
+    for (let {id, outLabel, active, latency, quality} of sessionCandidates) {
+      console.debug(
+        `  [${id}](${outLabel}) ${active ? '🟢' : '🟡'} latency ${
+          latency ? `${latency.toFixed(2)}ms` : '-'
+        } quality ${quality.toFixed(2)}`,
+      );
+    }
+
+    console.debug();
+
+    setTimeout(
+      () => this.printSessionCandidatesScheduler.schedule(),
+      PRINT_SESSION_CANDIDATES_IDLE_TIME_SPAN,
+    );
+  }, PRINT_SESSION_CANDIDATES_TIME_SPAN);
 
   constructor({
     host = LISTEN_HOST_DEFAULT,
@@ -97,6 +125,12 @@ export class Server {
               return;
             }
 
+            candidate.latency = duration;
+
+            if (!isFinite(candidate.activationLatency)) {
+              return;
+            }
+
             let logPrefix = `[${candidate.id}](${candidate.outLabel})`;
 
             let previouslyActive = candidate.active;
@@ -122,7 +156,9 @@ export class Server {
               candidate.statusesLimit *
                 SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER
                 ? _.mean(candidate.statuses.map(active => (active ? 1 : 0)))
-                : 0;
+                : -1;
+
+            candidate.quality = quality;
 
             switch (candidate.activeOverride) {
               case undefined:
@@ -157,6 +193,10 @@ export class Server {
                   )}ms).`,
                 );
               }
+            }
+
+            if (candidate.active !== previouslyActive) {
+              void this.printSessionCandidatesScheduler.schedule();
             }
           });
         };
@@ -265,15 +305,19 @@ export class Server {
           deactivationLatency = Infinity;
         }
 
+        let active = isFinite(activationLatency) ? false : true;
+
         let priority = Number(headers.priority) || 0;
 
         let candidate: SessionCandidate = {
           id,
           outLabel,
           stream,
-          active: false,
+          active,
           activeOverride: undefined,
+          latency: undefined,
           statuses: [],
+          quality: active ? 1 : 0,
           activationLatency,
           deactivationLatency,
           statusesLimit,
@@ -291,6 +335,8 @@ export class Server {
           .on('close', () => {
             this.sessionToSessionCandidateMap.delete(session);
 
+            void this.printSessionCandidatesScheduler.schedule();
+
             console.info(`${logPrefix} 🔴 session "close".`);
           })
           .on('error', error => {
@@ -298,16 +344,24 @@ export class Server {
             // for redundancy.
             this.sessionToSessionCandidateMap.delete(session);
 
+            void this.printSessionCandidatesScheduler.schedule();
+
             console.error(`${logPrefix} 🔴 session error:`, error.message);
           });
 
         this.sessionToSessionCandidateMap.set(session, candidate);
+
+        void this.printSessionCandidatesScheduler.schedule();
 
         for (let resolver of this.sessionCandidateResolvers) {
           resolver(candidate);
         }
 
         this.sessionCandidateResolvers.splice(0);
+
+        if (active) {
+          console.info(`${logPrefix} 🟢 session activated.`);
+        }
       });
 
     http2SecureServer.listen(
@@ -390,6 +444,8 @@ export interface SessionCandidate {
   active: boolean;
   activeOverride: false | undefined;
   statuses: boolean[];
+  quality: number;
+  latency: number | undefined;
   activationLatency: number;
   deactivationLatency: number;
   statusesLimit: number;

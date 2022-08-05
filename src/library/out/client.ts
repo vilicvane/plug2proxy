@@ -92,10 +92,6 @@ export class Client {
   private printActiveStreamsScheduler = new BatchScheduler(() => {
     let activeStreamEntrySet = this.activeStreamEntrySet;
 
-    if (activeStreamEntrySet.size === 0) {
-      return;
-    }
-
     console.debug();
     console.debug(
       `(${this.label})[session:push(stream)] read/write in/out name`,
