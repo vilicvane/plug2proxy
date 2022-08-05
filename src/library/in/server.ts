@@ -13,11 +13,6 @@ import {IPPattern, Port} from '../@x-types';
 const SESSION_PING_INTERVAL = ms('5s');
 const SESSION_MAX_OUTSTANDING_PINGS = 2;
 
-const SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT = ms('5min');
-const SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT = 0.95;
-
-const DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF = 0.0;
-
 const WINDOW_SIZE = bytes('32MB');
 
 const LISTEN_HOST_DEFAULT = IPPattern.nominalize('0.0.0.0');
@@ -31,13 +26,6 @@ export const ServerOptions = x.object({
   cert: x.union(x.string, xn.Buffer).optional(),
   key: x.union(x.string, xn.Buffer).optional(),
   password: x.string.optional(),
-  session: x
-    .object({
-      qualityDeactivationOverride: x.number.optional(),
-      qualityActivationOverride: x.number.optional(),
-      qualityMeasurementDuration: x.number.optional(),
-    })
-    .optional(),
 });
 
 export type ServerOptions = x.TypeOf<typeof ServerOptions>;
@@ -63,21 +51,12 @@ export class Server {
     cert = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.crt')),
     key = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.key')),
     password,
-    session: {
-      qualityDeactivationOverride:
-        sessionQualityDeactivationOverride = SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT,
-      qualityActivationOverride:
-        sessionQualityActivationOverride = sessionQualityDeactivationOverride +
-          DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF,
-      qualityMeasurementDuration:
-        sessionQualityMeasurementDuration = SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT,
-    } = {},
   }: ServerOptions) {
     this.password = password;
 
-    let sessionStatusesLimit = Math.ceil(
-      sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
-    );
+    let sessionStatusesLimit: number;
+    let sessionQualityDeactivationOverride: number;
+    let sessionQualityActivationOverride: number;
 
     let lastSessionId = 0;
 
@@ -122,7 +101,7 @@ export class Server {
 
             let logPrefix = `[${candidate.id}](${remoteAddress})`;
 
-            let previousActive = candidate.active;
+            let previouslyActive = candidate.active;
 
             if (candidate.active) {
               if (duration > candidate.deactivationLatency) {
@@ -144,17 +123,24 @@ export class Server {
               candidate.statuses.map(active => (active ? 1 : 0)),
             );
 
-            if (candidate.active) {
-              if (quality < sessionQualityDeactivationOverride) {
-                candidate.active = false;
-              }
-            } else {
-              if (quality >= sessionQualityActivationOverride) {
-                candidate.active = true;
-              }
+            switch (candidate.activeOverride) {
+              case undefined:
+                if (quality < sessionQualityDeactivationOverride) {
+                  candidate.activeOverride = false;
+                }
+
+                break;
+              case false:
+                if (quality >= sessionQualityActivationOverride) {
+                  candidate.activeOverride = undefined;
+                }
+
+                break;
             }
 
-            if (previousActive) {
+            candidate.active = candidate.activeOverride ?? candidate.active;
+
+            if (previouslyActive) {
               if (!candidate.active) {
                 console.info(
                   `${logPrefix} 🟡 session deactivated (latency: ${duration.toFixed(
@@ -238,18 +224,51 @@ export class Server {
 
         console.info(`${logPrefix} new session accepted.`);
 
-        let activationLatency =
-          Number(headers['activation-latency']) || Infinity;
-        let deactivationLatency =
-          Number(headers['deactivation-latency']) || Infinity;
+        let qualityDeactivationOverride = Number(
+          headers['quality-deactivation-override'],
+        );
+        let qualityActivationOverride = Number(
+          headers['quality-activation-override'],
+        );
+
+        if (isNaN(qualityDeactivationOverride)) {
+          qualityDeactivationOverride = 0;
+        }
+
+        if (isNaN(qualityActivationOverride)) {
+          qualityActivationOverride = 0;
+        }
+
+        let sessionQualityMeasurementDuration =
+          Number(headers['quality-measurement-duration']) ||
+          SESSION_PING_INTERVAL;
+
+        let statusesLimit = Math.ceil(
+          sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
+        );
+
+        let activationLatency = Number(headers['activation-latency']);
+        let deactivationLatency = Number(headers['deactivation-latency']);
+
+        if (isNaN(activationLatency)) {
+          activationLatency = Infinity;
+        }
+
+        if (isNaN(deactivationLatency)) {
+          deactivationLatency = Infinity;
+        }
 
         let candidate: SessionCandidate = {
           id,
           stream,
           active: false,
+          activeOverride: undefined,
           statuses: [],
           activationLatency,
           deactivationLatency,
+          statusesLimit,
+          qualityDeactivationOverride,
+          qualityActivationOverride,
           priority: Number(headers.priority) || 0,
         };
 
@@ -358,9 +377,13 @@ export interface SessionCandidate {
   id: string;
   priority: number;
   active: boolean;
+  activeOverride: false | undefined;
   statuses: boolean[];
   activationLatency: number;
   deactivationLatency: number;
+  statusesLimit: number;
+  qualityDeactivationOverride: number;
+  qualityActivationOverride: number;
   stream: HTTP2.ServerHttp2Stream;
 }
 

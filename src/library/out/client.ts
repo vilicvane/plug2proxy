@@ -18,6 +18,11 @@ const SESSION_PRIORITY_DEFAULT = 0;
 
 const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 1;
 
+const SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT = ms('10min');
+const SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT = 0.95;
+
+const DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF = 0.03;
+
 export const ClientOptions = x.object({
   label: x.string.optional(),
   /**
@@ -43,6 +48,9 @@ export const ClientOptions = x.object({
    * 当会话延迟大于此设置时取消激活。
    */
   deactivationLatency: x.number.optional(),
+  qualityDeactivationOverride: x.number.optional(),
+  qualityActivationOverride: x.number.optional(),
+  qualityMeasurementDuration: x.number.optional(),
 });
 
 export type ClientOptions = x.TypeOf<typeof ClientOptions>;
@@ -56,6 +64,9 @@ export class Client {
   readonly priority: number;
   readonly activationLatency: number | undefined;
   readonly deactivationLatency: number | undefined;
+  readonly qualityActivationOverride: number;
+  readonly qualityDeactivationOverride: number;
+  readonly qualityMeasurementDuration: number;
 
   readonly connectAuthority: string;
   readonly connectOptions: HTTP2.SecureClientSessionOptions;
@@ -113,6 +124,13 @@ export class Client {
       deactivationLatency = typeof activationLatency === 'number'
         ? activationLatency * DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER
         : undefined,
+      qualityDeactivationOverride = SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT,
+      qualityActivationOverride = Math.min(
+        qualityDeactivationOverride +
+          DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF,
+        1,
+      ),
+      qualityMeasurementDuration = SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT,
     } = options;
 
     this.label = label;
@@ -126,6 +144,9 @@ export class Client {
     this.priority = priority;
     this.activationLatency = activationLatency;
     this.deactivationLatency = deactivationLatency;
+    this.qualityDeactivationOverride = qualityDeactivationOverride;
+    this.qualityActivationOverride = qualityActivationOverride;
+    this.qualityMeasurementDuration = qualityMeasurementDuration;
 
     console.info(`(${label}) new client (authority ${this.connectAuthority}).`);
 

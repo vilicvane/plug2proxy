@@ -114,6 +114,9 @@ export class Session {
           priority: client.priority,
           'activation-latency': client.activationLatency,
           'deactivation-latency': client.deactivationLatency,
+          'quality-deactivation-override': client.qualityDeactivationOverride,
+          'quality-activation-override': client.qualityActivationOverride,
+          'quality-measurement-duration': client.qualityMeasurementDuration,
         },
         {
           endStream: false,

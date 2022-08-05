@@ -60,14 +60,6 @@ module.exports = {
     cert: FS.readFileSync('example.crt'),
     key: FS.readFileSync('example.key'),
     password: '12345678',
-    session: {
-      // 当会话最近满足激活条件的比例低于此值时，将被标记为非活跃的。
-      qualityDeactivationOverride: 0.95,
-      // 当非活跃会话最近满足激活条件的比例大于此值时，将被重新被标记为活跃的。
-      qualityActivationOverride: 0.98,
-      // 统计多长时间内的会话状态（毫秒）。
-      qualityMeasurementDuration: 300_000,
-    },
   },
   // 参考 src/library/in/proxy.ts 中的 ProxyOptions
   proxy: {
@@ -139,8 +131,16 @@ module.exports = {
       password: '12345678',
       candidates: 1,
       priority: 0,
+      // 当会话延迟超过此值时，将标记为非活跃的。
       activationLatency: 200,
+      // 当非活跃会话延迟低于此值时，将标记为活跃的。
       deactivationLatency: 300,
+      // 当会话最近满足激活条件的比例低于此值时，将被标记为非活跃的。
+      qualityDeactivationOverride: 0.95,
+      // 当非活跃会话最近满足激活条件的比例大于此值时，将被重新被标记为活跃的。
+      qualityActivationOverride: 0.98,
+      // 统计多长时间内的会话状态（毫秒）。
+      qualityMeasurementDuration: 300_000,
     },
   ],
 };
