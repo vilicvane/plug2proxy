@@ -51,14 +51,20 @@ export class Server {
 
   private streamListenerMap = new Map<string, ServerStreamListener>();
 
+  private printSessionCandidatesSchedulerIdleTimer: NodeJS.Timer | undefined;
+
   private printSessionCandidatesScheduler = new BatchScheduler(() => {
+    if (this.printSessionCandidatesSchedulerIdleTimer) {
+      clearTimeout(this.printSessionCandidatesSchedulerIdleTimer);
+    }
+
     let sessionCandidates = _.sortBy(
       Array.from(this.sessionToSessionCandidateMap.values()),
       candidate => -candidate.priority,
     );
 
     console.debug();
-    console.debug('[server] session candidates:');
+    console.debug('[server] session candidates: latency / quality / priority');
 
     for (let {
       id,
@@ -71,13 +77,13 @@ export class Server {
       console.debug(
         `  [${id}](${outLabel}) ${active ? '🟢' : '🟡'} ${
           latency ? `${latency.toFixed(2)}ms` : '-'
-        } (latency) ${quality.toFixed(2)} (quality) ${priority} (priority)`,
+        } / ${quality.toFixed(2)} / ${priority}`,
       );
     }
 
     console.debug();
 
-    setTimeout(
+    this.printSessionCandidatesSchedulerIdleTimer = setTimeout(
       () => this.printSessionCandidatesScheduler.schedule(),
       PRINT_SESSION_CANDIDATES_IDLE_TIME_SPAN,
     );
