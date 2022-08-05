@@ -145,7 +145,7 @@ export class Server {
 
             candidate.latency = duration;
 
-            if (!isFinite(candidate.activationLatency)) {
+            if (candidate.statusesLimit === 0) {
               return;
             }
 
@@ -308,10 +308,6 @@ export class Server {
           Number(headers['quality-measurement-duration']) ||
           SESSION_PING_INTERVAL;
 
-        let statusesLimit = Math.ceil(
-          sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
-        );
-
         let activationLatency = Number(headers['activation-latency']);
         let deactivationLatency = Number(headers['deactivation-latency']);
 
@@ -324,6 +320,12 @@ export class Server {
         }
 
         let active = isFinite(activationLatency) ? false : true;
+
+        let statusesLimit = active
+          ? 0
+          : Math.ceil(
+              sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
+            );
 
         let priority = Number(headers.priority) || 0;
 
