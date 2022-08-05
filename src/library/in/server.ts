@@ -13,6 +13,8 @@ import {IPPattern, Port} from '../@x-types';
 const SESSION_PING_INTERVAL = ms('5s');
 const SESSION_MAX_OUTSTANDING_PINGS = 2;
 
+const SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER = 0.5;
+
 const WINDOW_SIZE = bytes('32MB');
 
 const LISTEN_HOST_DEFAULT = IPPattern.nominalize('0.0.0.0');
@@ -115,9 +117,12 @@ export class Server {
               candidate.statuses.shift();
             }
 
-            let quality = _.mean(
-              candidate.statuses.map(active => (active ? 1 : 0)),
-            );
+            let quality =
+              candidate.statuses.length >=
+              candidate.statusesLimit *
+                SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER
+                ? _.mean(candidate.statuses.map(active => (active ? 1 : 0)))
+                : 0;
 
             switch (candidate.activeOverride) {
               case undefined:
