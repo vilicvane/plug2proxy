@@ -61,8 +61,10 @@ module.exports = {
     key: FS.readFileSync('example.key'),
     password: '12345678',
     session: {
-      // 当会话最近满足激活条件的比例低于此值时，将被避免使用。
-      qualityActivationOverride: 0.95,
+      // 当会话最近满足激活条件的比例低于此值时，将被标记为非活跃的。
+      qualityDeactivationOverride: 0.95,
+      // 当非活跃会话最近满足激活条件的比例大于此值时，将被重新被标记为活跃的。
+      qualityActivationOverride: 0.98,
       // 统计多长时间内的会话状态（毫秒）。
       qualityMeasurementDuration: 300_000,
     },

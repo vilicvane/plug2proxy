@@ -14,7 +14,9 @@ const SESSION_PING_INTERVAL = ms('5s');
 const SESSION_MAX_OUTSTANDING_PINGS = 2;
 
 const SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT = ms('5min');
-const SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT = 0.95;
+const SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT = 0.95;
+
+const DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF = 0.03;
 
 const WINDOW_SIZE = bytes('32MB');
 
@@ -31,6 +33,7 @@ export const ServerOptions = x.object({
   password: x.string.optional(),
   session: x
     .object({
+      qualityDeactivationOverride: x.number.optional(),
       qualityActivationOverride: x.number.optional(),
       qualityMeasurementDuration: x.number.optional(),
     })
@@ -54,8 +57,6 @@ export class Server {
 
   private streamListenerMap = new Map<string, ServerStreamListener>();
 
-  private sessionQualityActivationOverride: number;
-
   constructor({
     host = LISTEN_HOST_DEFAULT,
     port = LISTEN_PORT_DEFAULT,
@@ -63,15 +64,16 @@ export class Server {
     key = FS.readFileSync(Path.join(CERTS_DIR, 'plug2proxy.key')),
     password,
     session: {
+      qualityDeactivationOverride:
+        sessionQualityDeactivationOverride = SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT,
       qualityActivationOverride:
-        sessionQualityActivationOverride = SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT,
+        sessionQualityActivationOverride = sessionQualityDeactivationOverride +
+          DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF,
       qualityMeasurementDuration:
         sessionQualityMeasurementDuration = SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT,
     } = {},
   }: ServerOptions) {
     this.password = password;
-
-    this.sessionQualityActivationOverride = sessionQualityActivationOverride;
 
     let sessionStatusesLimit = Math.ceil(
       sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
@@ -120,23 +122,15 @@ export class Server {
 
             let logPrefix = `[${candidate.id}](${remoteAddress})`;
 
+            let previousActive = candidate.active;
+
             if (candidate.active) {
               if (duration > candidate.deactivationLatency) {
                 candidate.active = false;
-                console.info(
-                  `${logPrefix} 🟡 session deactivated (latency: ${duration.toFixed(
-                    2,
-                  )}ms).`,
-                );
               }
             } else {
               if (duration < candidate.activationLatency) {
                 candidate.active = true;
-                console.info(
-                  `${logPrefix} 🟢 session activated (latency: ${duration.toFixed(
-                    2,
-                  )}ms).`,
-                );
               }
             }
 
@@ -144,6 +138,38 @@ export class Server {
 
             if (candidate.statuses.length > sessionStatusesLimit) {
               candidate.statuses.shift();
+            }
+
+            let quality = _.mean(
+              candidate.statuses.map(active => (active ? 1 : 0)),
+            );
+
+            if (candidate.active) {
+              if (quality < sessionQualityDeactivationOverride) {
+                candidate.active = false;
+              }
+            } else {
+              if (quality >= sessionQualityActivationOverride) {
+                candidate.active = true;
+              }
+            }
+
+            if (previousActive) {
+              if (!candidate.active) {
+                console.info(
+                  `${logPrefix} 🟡 session deactivated (latency: ${duration.toFixed(
+                    2,
+                  )}ms).`,
+                );
+              }
+            } else {
+              if (candidate.active) {
+                console.info(
+                  `${logPrefix} 🟢 session activated (latency: ${duration.toFixed(
+                    2,
+                  )}ms).`,
+                );
+              }
             }
           });
         };
@@ -287,21 +313,8 @@ export class Server {
 
     let activeCandidates = allCandidates.filter(candidate => candidate.active);
 
-    let qualityActivationOverride = this.sessionQualityActivationOverride;
-
-    let stableCandidates = activeCandidates.filter(
-      candidate =>
-        candidate.statuses.filter(active => active).length /
-          candidate.statuses.length >=
-        qualityActivationOverride,
-    );
-
     let priorityCandidates =
-      stableCandidates.length > 0
-        ? stableCandidates
-        : activeCandidates.length > 0
-        ? activeCandidates
-        : allCandidates;
+      activeCandidates.length > 0 ? activeCandidates : allCandidates;
 
     if (priorityCandidates.length > 0) {
       let [firstCandidate, ...restCandidates] = _.sortBy(
@@ -324,10 +337,8 @@ export class Server {
         `${logPrefix} getting session candidate out of ${
           prioritizedCandidates.length
         } (priority ${prioritizedCandidates[0]?.priority ?? 'n/a'}), ${
-          stableCandidates.length
-        } stable / ${activeCandidates.length} active / ${
-          allCandidates.length
-        } in total.`,
+          activeCandidates.length
+        } active / ${allCandidates.length} in total.`,
       );
 
       return _.sample(prioritizedCandidates)!;
