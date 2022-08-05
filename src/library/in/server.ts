@@ -54,10 +54,6 @@ export class Server {
   }: ServerOptions) {
     this.password = password;
 
-    let sessionStatusesLimit: number;
-    let sessionQualityDeactivationOverride: number;
-    let sessionQualityActivationOverride: number;
-
     let lastSessionId = 0;
 
     let http2SecureServer = HTTP2.createSecureServer({
@@ -115,7 +111,7 @@ export class Server {
 
             candidate.statuses.push(candidate.active);
 
-            if (candidate.statuses.length > sessionStatusesLimit) {
+            if (candidate.statuses.length > candidate.statusesLimit) {
               candidate.statuses.shift();
             }
 
@@ -125,13 +121,13 @@ export class Server {
 
             switch (candidate.activeOverride) {
               case undefined:
-                if (quality < sessionQualityDeactivationOverride) {
+                if (quality < candidate.qualityDeactivationOverride) {
                   candidate.activeOverride = false;
                 }
 
                 break;
               case false:
-                if (quality >= sessionQualityActivationOverride) {
+                if (quality >= candidate.qualityActivationOverride) {
                   candidate.activeOverride = undefined;
                 }
 
