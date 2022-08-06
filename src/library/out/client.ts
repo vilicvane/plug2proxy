@@ -16,12 +16,12 @@ const PRINT_ACTIVE_STREAMS_TIME_SPAN = ms('5s');
 const SESSION_CANDIDATES_DEFAULT = 1;
 const SESSION_PRIORITY_DEFAULT = 0;
 
-const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 1;
+const DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER = 1.5;
 
 const SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT = ms('10min');
-const SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT = 0.85;
-
-const DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF = 0.1;
+const SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT = 0.95;
+const SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT = 0.99;
+const SESSION_QUALITY_DROPPING_THRESHOLD_DEFAULT = 0.9;
 
 export const ClientOptions = x.object({
   label: x.string.optional(),
@@ -50,6 +50,7 @@ export const ClientOptions = x.object({
   deactivationLatency: x.number.optional(),
   qualityDeactivationOverride: x.number.optional(),
   qualityActivationOverride: x.number.optional(),
+  qualityDroppingThreshold: x.number.optional(),
   qualityMeasurementDuration: x.number.optional(),
 });
 
@@ -66,6 +67,7 @@ export class Client {
   readonly deactivationLatency: number | undefined;
   readonly qualityActivationOverride: number;
   readonly qualityDeactivationOverride: number;
+  readonly qualityDroppingThreshold: number;
   readonly qualityMeasurementDuration: number;
 
   readonly connectAuthority: string;
@@ -125,11 +127,8 @@ export class Client {
         ? activationLatency * DEFAULT_DEACTIVATING_LATENCY_MULTIPLIER
         : undefined,
       qualityDeactivationOverride = SESSION_QUALITY_DEACTIVATION_OVERRIDE_DEFAULT,
-      qualityActivationOverride = Math.min(
-        qualityDeactivationOverride +
-          DEFAULT_SESSION_QUALITY_ACTIVATION_OVERRIDE_DIFF,
-        1,
-      ),
+      qualityActivationOverride = SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT,
+      qualityDroppingThreshold = SESSION_QUALITY_DROPPING_THRESHOLD_DEFAULT,
       qualityMeasurementDuration = SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT,
     } = options;
 
@@ -143,9 +142,17 @@ export class Client {
     this.candidates = candidates;
     this.priority = priority;
     this.activationLatency = activationLatency;
-    this.deactivationLatency = deactivationLatency;
+    this.deactivationLatency =
+      typeof activationLatency === 'number' &&
+      typeof deactivationLatency === 'number'
+        ? Math.max(deactivationLatency, activationLatency)
+        : undefined;
     this.qualityDeactivationOverride = qualityDeactivationOverride;
-    this.qualityActivationOverride = qualityActivationOverride;
+    this.qualityActivationOverride = Math.max(
+      qualityActivationOverride,
+      qualityDeactivationOverride,
+    );
+    this.qualityDroppingThreshold = qualityDroppingThreshold;
     this.qualityMeasurementDuration = qualityMeasurementDuration;
 
     console.info(`(${label}) new client (authority ${this.connectAuthority}).`);

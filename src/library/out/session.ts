@@ -117,6 +117,7 @@ export class Session {
           'deactivation-latency': client.deactivationLatency,
           'quality-deactivation-override': client.qualityDeactivationOverride,
           'quality-activation-override': client.qualityActivationOverride,
+          'quality-dropping-threshold': client.qualityDroppingThreshold,
           'quality-measurement-duration': client.qualityMeasurementDuration,
           [HTTP2.sensitiveHeaders]: ['password'],
         },

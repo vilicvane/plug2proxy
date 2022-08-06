@@ -146,7 +146,9 @@ export class Server {
 
             candidate.latency = duration;
 
-            if (candidate.statusesLimit === 0) {
+            let statusesLimit = candidate.statusesLimit;
+
+            if (statusesLimit === 0) {
               return;
             }
 
@@ -164,34 +166,62 @@ export class Server {
               }
             }
 
-            candidate.statuses.push(candidate.active);
+            let statuses = candidate.statuses;
 
-            if (candidate.statuses.length > candidate.statusesLimit) {
-              candidate.statuses.shift();
+            statuses.push(candidate.active);
+
+            if (statuses.length > statusesLimit) {
+              statuses.shift();
             }
 
-            let quality =
-              candidate.statuses.length >=
-              candidate.statusesLimit *
-                SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER
-                ? _.mean(candidate.statuses.map(active => (active ? 1 : 0)))
-                : -1;
+            let quality = _.mean(statuses.map(active => (active ? 1 : 0)));
 
             candidate.quality = quality;
 
-            switch (candidate.activeOverride) {
-              case undefined:
-                if (quality < candidate.qualityDeactivationOverride) {
-                  candidate.activeOverride = false;
-                }
+            let statusesLength = statuses.length;
 
-                break;
-              case false:
-                if (quality >= candidate.qualityActivationOverride) {
-                  candidate.activeOverride = undefined;
-                }
+            let bestPossibleQuality =
+              (quality * statusesLength +
+                /* 1.0 * */ (statusesLimit - statusesLength)) /
+              statusesLimit;
 
-                break;
+            let qualityDroppingThreshold = candidate.qualityDroppingThreshold;
+
+            let havingEnoughStatuses =
+              statusesLength >=
+              statusesLimit *
+                SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER;
+
+            if (bestPossibleQuality < qualityDroppingThreshold) {
+              console.info(
+                `${logPrefix} dropping session with ${
+                  havingEnoughStatuses
+                    ? `quality (${quality.toFixed(2)})`
+                    : `best possible quality (${bestPossibleQuality.toFixed(
+                        2,
+                      )})`
+                } lower than threshold.`,
+              );
+
+              session.destroy();
+              return;
+            }
+
+            if (havingEnoughStatuses) {
+              switch (candidate.activeOverride) {
+                case undefined:
+                  if (quality < candidate.qualityDeactivationOverride) {
+                    candidate.activeOverride = false;
+                  }
+
+                  break;
+                case false:
+                  if (quality >= candidate.qualityActivationOverride) {
+                    candidate.activeOverride = undefined;
+                  }
+
+                  break;
+              }
             }
 
             let active = candidate.activeOverride ?? candidate.active;
@@ -305,6 +335,14 @@ export class Server {
           qualityActivationOverride = 0;
         }
 
+        let qualityDroppingThreshold = Number(
+          headers['quality-dropping-threshold'],
+        );
+
+        if (isNaN(qualityDroppingThreshold)) {
+          qualityDroppingThreshold = 0;
+        }
+
         let sessionQualityMeasurementDuration =
           Number(headers['quality-measurement-duration']) ||
           SESSION_PING_INTERVAL;
@@ -328,6 +366,10 @@ export class Server {
               sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
             );
 
+        let activeOverride = statusesLimit > 0 ? false : undefined;
+
+        let quality = active ? 1 : 0;
+
         let priority = Number(headers.priority) || 0;
 
         let candidate: SessionCandidate = {
@@ -335,15 +377,16 @@ export class Server {
           outLabel,
           stream,
           active,
-          activeOverride: undefined,
+          activeOverride,
           latency: undefined,
           statuses: [],
-          quality: active ? 1 : 0,
+          quality,
           activationLatency,
           deactivationLatency,
           statusesLimit,
           qualityDeactivationOverride,
           qualityActivationOverride,
+          qualityDroppingThreshold,
           priority,
         };
 
@@ -482,6 +525,7 @@ export interface SessionCandidate {
   statusesLimit: number;
   qualityDeactivationOverride: number;
   qualityActivationOverride: number;
+  qualityDroppingThreshold: number;
   stream: HTTP2.ServerHttp2Stream;
 }
 
