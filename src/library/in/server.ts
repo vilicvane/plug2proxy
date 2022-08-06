@@ -70,6 +70,7 @@ export class Server {
       id,
       outLabel,
       active,
+      activeOverride,
       priority,
       latency,
       quality,
@@ -77,7 +78,7 @@ export class Server {
       statusesLimit,
     } of sessionCandidates) {
       console.debug(
-        `  [${id}](${outLabel}) ${active ? '🟢' : '🟡'} ${
+        `  [${id}](${outLabel}) ${activeOverride ?? active ? '🟢' : '🟡'} ${
           latency ? `${latency.toFixed(2)}ms` : '-'
         } / ${quality.toFixed(2)} (${
           statuses.length
@@ -151,7 +152,7 @@ export class Server {
 
             let logPrefix = `[${candidate.id}](${candidate.outLabel})`;
 
-            let previouslyActive = candidate.active;
+            let previouslyActive = candidate.activeOverride ?? candidate.active;
 
             if (candidate.active) {
               if (duration > candidate.deactivationLatency) {
@@ -193,10 +194,10 @@ export class Server {
                 break;
             }
 
-            candidate.active = candidate.activeOverride ?? candidate.active;
+            let active = candidate.activeOverride ?? candidate.active;
 
             if (previouslyActive) {
-              if (!candidate.active) {
+              if (!active) {
                 console.info(
                   `${logPrefix} 🟡 session deactivated (latency: ${duration.toFixed(
                     2,
@@ -204,7 +205,7 @@ export class Server {
                 );
               }
             } else {
-              if (candidate.active) {
+              if (active) {
                 console.info(
                   `${logPrefix} 🟢 session activated (latency: ${duration.toFixed(
                     2,
@@ -213,7 +214,7 @@ export class Server {
               }
             }
 
-            if (candidate.active !== previouslyActive) {
+            if (active !== previouslyActive) {
               void this.printSessionCandidatesScheduler.schedule();
             }
           });
@@ -414,7 +415,9 @@ export class Server {
   async getSessionCandidate(logPrefix: string): Promise<SessionCandidate> {
     let allCandidates = Array.from(this.sessionToSessionCandidateMap.values());
 
-    let activeCandidates = allCandidates.filter(candidate => candidate.active);
+    let activeCandidates = allCandidates.filter(
+      candidate => candidate.activeOverride ?? candidate.active,
+    );
 
     let priorityCandidates =
       activeCandidates.length > 0 ? activeCandidates : allCandidates;
