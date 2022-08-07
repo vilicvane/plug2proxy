@@ -238,7 +238,7 @@ export class Server {
 
             if (active) {
               candidate.lastActiveAt = now;
-            } else {
+            } else if (candidate.activeOverride === false) {
               let lastActiveAt = candidate.lastActiveAt;
 
               let droppingAt = lastActiveAt + inactiveDroppingThreshold;
