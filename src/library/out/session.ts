@@ -119,6 +119,7 @@ export class Session {
           'quality-activation-override': client.qualityActivationOverride,
           'quality-dropping-threshold': client.qualityDroppingThreshold,
           'quality-measurement-duration': client.qualityMeasurementDuration,
+          'inactive-dropping-threshold': client.inactiveDroppingThreshold,
           [HTTP2.sensitiveHeaders]: ['password'],
         },
         {

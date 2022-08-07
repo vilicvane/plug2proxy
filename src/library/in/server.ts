@@ -144,29 +144,39 @@ export class Server {
               return;
             }
 
-            candidate.latency = duration;
+            let {
+              id,
+              outLabel,
+              statusesLimit,
+              activationLatency,
+              deactivationLatency,
+              statuses,
+              qualityDeactivationOverride,
+              qualityActivationOverride,
+              qualityDroppingThreshold,
+              qualityMeasurementDuration,
+              inactiveDroppingThreshold,
+            } = candidate;
 
-            let statusesLimit = candidate.statusesLimit;
+            candidate.latency = duration;
 
             if (statusesLimit === 0) {
               return;
             }
 
-            let logPrefix = `[${candidate.id}](${candidate.outLabel})`;
+            let logPrefix = `[${id}](${outLabel})`;
 
             let previouslyActive = candidate.activeOverride ?? candidate.active;
 
             if (candidate.active) {
-              if (duration > candidate.deactivationLatency) {
+              if (duration > deactivationLatency) {
                 candidate.active = false;
               }
             } else {
-              if (duration < candidate.activationLatency) {
+              if (duration < activationLatency) {
                 candidate.active = true;
               }
             }
-
-            let statuses = candidate.statuses;
 
             statuses.push(candidate.active);
 
@@ -174,7 +184,7 @@ export class Server {
               statuses.shift();
             }
 
-            let quality = _.mean(statuses.map(active => (active ? 1 : 0)));
+            let quality = _.mean(statuses);
 
             candidate.quality = quality;
 
@@ -184,8 +194,6 @@ export class Server {
               (quality * statusesLength +
                 /* 1.0 * */ (statusesLimit - statusesLength)) /
               statusesLimit;
-
-            let qualityDroppingThreshold = candidate.qualityDroppingThreshold;
 
             let havingEnoughStatuses =
               statusesLength >=
@@ -210,13 +218,13 @@ export class Server {
             if (havingEnoughStatuses) {
               switch (candidate.activeOverride) {
                 case undefined:
-                  if (quality < candidate.qualityDeactivationOverride) {
+                  if (quality < qualityDeactivationOverride) {
                     candidate.activeOverride = false;
                   }
 
                   break;
                 case false:
-                  if (quality >= candidate.qualityActivationOverride) {
+                  if (quality >= qualityActivationOverride) {
                     candidate.activeOverride = undefined;
                   }
 
@@ -225,6 +233,56 @@ export class Server {
             }
 
             let active = candidate.activeOverride ?? candidate.active;
+
+            let now = Date.now();
+
+            if (active) {
+              candidate.lastActiveAt = now;
+            } else {
+              let lastActiveAt = candidate.lastActiveAt;
+
+              let droppingAt = lastActiveAt + inactiveDroppingThreshold;
+
+              if (droppingAt <= now) {
+                console.info(
+                  `${logPrefix} dropping continuously inactive session exceeding threshold.`,
+                );
+
+                session.destroy();
+                return;
+              }
+
+              let availableStatusesTimeSpanBeforeDropping = Math.max(
+                now - (droppingAt - qualityMeasurementDuration),
+                0,
+              );
+
+              let availableStatusesBeforeDropping = statuses.slice(
+                -Math.round(
+                  (availableStatusesTimeSpanBeforeDropping /
+                    qualityMeasurementDuration) *
+                    statusesLimit,
+                ),
+              );
+
+              let bestPossibleQualityBeforeDropping =
+                (_.mean(availableStatusesBeforeDropping) *
+                  availableStatusesTimeSpanBeforeDropping +
+                  /* 1 * */ (qualityMeasurementDuration -
+                    availableStatusesTimeSpanBeforeDropping)) /
+                qualityMeasurementDuration;
+
+              if (
+                bestPossibleQualityBeforeDropping < qualityActivationOverride
+              ) {
+                console.info(
+                  `${logPrefix} dropping continuously inactive session not possible to be activated within threshold.`,
+                );
+
+                session.destroy();
+                return;
+              }
+            }
 
             if (previouslyActive) {
               if (!active) {
@@ -343,9 +401,13 @@ export class Server {
           qualityDroppingThreshold = 0;
         }
 
-        let sessionQualityMeasurementDuration =
+        let qualityMeasurementDuration =
           Number(headers['quality-measurement-duration']) ||
           SESSION_PING_INTERVAL;
+
+        let inactiveDroppingThreshold = Number(
+          headers['inactive-dropping-threshold'],
+        );
 
         let activationLatency = Number(headers['activation-latency']);
         let deactivationLatency = Number(headers['deactivation-latency']);
@@ -362,9 +424,7 @@ export class Server {
 
         let statusesLimit = active
           ? 0
-          : Math.ceil(
-              sessionQualityMeasurementDuration / SESSION_PING_INTERVAL,
-            );
+          : Math.ceil(qualityMeasurementDuration / SESSION_PING_INTERVAL);
 
         let activeOverride = statusesLimit > 0 ? false : undefined;
 
@@ -387,7 +447,10 @@ export class Server {
           qualityDeactivationOverride,
           qualityActivationOverride,
           qualityDroppingThreshold,
+          qualityMeasurementDuration,
+          inactiveDroppingThreshold,
           priority,
+          lastActiveAt: Date.now(),
         };
 
         stream.respond({
@@ -526,6 +589,9 @@ export interface SessionCandidate {
   qualityDeactivationOverride: number;
   qualityActivationOverride: number;
   qualityDroppingThreshold: number;
+  qualityMeasurementDuration: number;
+  inactiveDroppingThreshold: number;
+  lastActiveAt: number;
   stream: HTTP2.ServerHttp2Stream;
 }
 

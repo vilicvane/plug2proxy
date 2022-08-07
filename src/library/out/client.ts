@@ -52,6 +52,7 @@ export const ClientOptions = x.object({
   qualityActivationOverride: x.number.optional(),
   qualityDroppingThreshold: x.number.optional(),
   qualityMeasurementDuration: x.number.optional(),
+  inactiveDroppingThreshold: x.number.optional(),
 });
 
 export type ClientOptions = x.TypeOf<typeof ClientOptions>;
@@ -69,6 +70,7 @@ export class Client {
   readonly qualityDeactivationOverride: number;
   readonly qualityDroppingThreshold: number;
   readonly qualityMeasurementDuration: number;
+  readonly inactiveDroppingThreshold: number;
 
   readonly connectAuthority: string;
   readonly connectOptions: HTTP2.SecureClientSessionOptions;
@@ -130,6 +132,7 @@ export class Client {
       qualityActivationOverride = SESSION_QUALITY_ACTIVATION_OVERRIDE_DEFAULT,
       qualityDroppingThreshold = SESSION_QUALITY_DROPPING_THRESHOLD_DEFAULT,
       qualityMeasurementDuration = SESSION_QUALITY_MEASUREMENT_DURATION_DEFAULT,
+      inactiveDroppingThreshold = qualityMeasurementDuration,
     } = options;
 
     this.label = label;
@@ -154,6 +157,7 @@ export class Client {
     );
     this.qualityDroppingThreshold = qualityDroppingThreshold;
     this.qualityMeasurementDuration = qualityMeasurementDuration;
+    this.inactiveDroppingThreshold = inactiveDroppingThreshold;
 
     console.info(`(${label}) new client (authority ${this.connectAuthority}).`);
 
