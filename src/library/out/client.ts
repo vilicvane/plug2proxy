@@ -150,17 +150,17 @@ export class Client {
       typeof deactivationLatency === 'number'
         ? Math.max(deactivationLatency, activationLatency)
         : undefined;
-    this.qualityDeactivationOverride = qualityDeactivationOverride;
+    this.qualityDeactivationOverride = Math.min(
+      qualityDroppingThreshold,
+      qualityDeactivationOverride,
+    );
     this.qualityActivationOverride = Math.max(
       qualityActivationOverride,
       qualityDeactivationOverride,
     );
     this.qualityDroppingThreshold = qualityDroppingThreshold;
     this.qualityMeasurementDuration = qualityMeasurementDuration;
-    this.inactiveDroppingThreshold = Math.min(
-      inactiveDroppingThreshold,
-      qualityDeactivationOverride,
-    );
+    this.inactiveDroppingThreshold = inactiveDroppingThreshold;
 
     console.info(`(${label}) new client (authority ${this.connectAuthority}).`);
 
