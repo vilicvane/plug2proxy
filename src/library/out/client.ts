@@ -157,7 +157,10 @@ export class Client {
     );
     this.qualityDroppingThreshold = qualityDroppingThreshold;
     this.qualityMeasurementDuration = qualityMeasurementDuration;
-    this.inactiveDroppingThreshold = inactiveDroppingThreshold;
+    this.inactiveDroppingThreshold = Math.min(
+      inactiveDroppingThreshold,
+      qualityDeactivationOverride,
+    );
 
     console.info(`(${label}) new client (authority ${this.connectAuthority}).`);
 
