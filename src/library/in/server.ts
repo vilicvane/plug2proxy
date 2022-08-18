@@ -200,7 +200,10 @@ export class Server {
               statusesLimit *
                 SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER;
 
-            if (bestPossibleQuality < qualityDroppingThreshold) {
+            if (
+              bestPossibleQuality < qualityDroppingThreshold &&
+              this.hasActiveSessionCandidate()
+            ) {
               console.info(
                 `${logPrefix} dropping session with ${
                   havingEnoughStatuses
@@ -238,7 +241,10 @@ export class Server {
 
             if (active) {
               candidate.lastActiveAt = now;
-            } else if (candidate.activeOverride === false) {
+            } else if (
+              candidate.activeOverride === false &&
+              this.hasActiveSessionCandidate()
+            ) {
               let lastActiveAt = candidate.lastActiveAt;
 
               let droppingAt = lastActiveAt + inactiveDroppingThreshold;
@@ -516,6 +522,16 @@ export class Server {
     streamListenerMap.set(id, listener);
 
     return () => streamListenerMap.delete(id);
+  }
+
+  hasActiveSessionCandidate(): boolean {
+    for (let candidate of this.sessionToSessionCandidateMap.values()) {
+      if (candidate.activeOverride ?? candidate.active) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   async getSessionCandidate(logPrefix: string): Promise<SessionCandidate> {
