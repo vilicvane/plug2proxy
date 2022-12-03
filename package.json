@@ -39,7 +39,7 @@
     "tar-stream": "^2.2.0",
     "tslang": "^0.1.26",
     "tslib": "^2.4.0",
-    "x-value": "^0.0.1-37"
+    "x-value": "0.0.1-40"
   },
   "devDependencies": {
     "@mufan/code": "^0.2.14",
