@@ -8,6 +8,7 @@ export async function probeDestinationIP(
   let socket = TLS.connect({
     host,
     port,
+    servername: host,
   });
 
   return Promise.race([
