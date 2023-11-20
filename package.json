@@ -1,0 +1,33 @@
+{
+  "name": "plug2proxy",
+  "version": "0.0.0",
+  "license": "MIT",
+  "author": "vilicvane",
+  "type": "module",
+  "exports": {
+    "types": "./bld/library/index.d.ts",
+    "default": "./bld/library/index.js"
+  },
+  "scripts": {
+    "3": "pnpm install && pnpm dedupe && pnpm install",
+    "build": "rimraf ./bld && tsc --build",
+    "lint": "eslint --no-error-on-unmatched-pattern --report-unused-disable-directives . && run-in-every eslint-project --parallel --echo -- eslint --no-error-on-unmatched-pattern --report-unused-disable-directives .",
+    "lint-prettier": "prettier --check .",
+    "bare-test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
+    "test": "pnpm lint-prettier && pnpm build && pnpm lint && pnpm bare-test"
+  },
+  "dependencies": {
+    "tslib": "^2.6.2"
+  },
+  "devDependencies": {
+    "@mufan/eslint-plugin": "^0.2.17",
+    "@types/jest": "^29.5.8",
+    "cross-env": "^7.0.3",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.1.0",
+    "rimraf": "^5.0.5",
+    "run-in-every": "^0.2.0",
+    "typescript": "^5.3.2"
+  }
+}
