@@ -1,0 +1,7 @@
+# General
+.DS_Store
+*.tgz
+node_modules/
+# TypeScript Build Artifacts
+bld/
+*.tsbuildinfo

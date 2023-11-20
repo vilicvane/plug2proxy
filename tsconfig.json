@@ -1,0 +1,14 @@
+{
+  "references": [
+    {
+      "path": "src/library"
+    },
+    {
+      "path": "src/cli"
+    },
+    {
+      "path": "src/test"
+    }
+  ],
+  "files": []
+}
