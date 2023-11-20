@@ -2,7 +2,7 @@ import type {DnsRecord} from 'cloudflare';
 import Cloudflare from 'cloudflare';
 import * as x from 'x-value';
 
-import type {IDDNSProvider} from '../ddns-provider';
+import type {DDNSType, IDDNSProvider} from '../ddns-provider';
 
 export const CloudflareDDNSOptions = x.object({
   provider: x.literal('cloudflare'),
@@ -32,11 +32,10 @@ export class CloudflareDDNSProvider implements IDDNSProvider {
 
   private recordId: string | undefined;
 
-  constructor({
-    token,
-    zone: zoneId,
-    record: recordName,
-  }: CloudflareDDNSOptions) {
+  constructor(
+    readonly type: DDNSType,
+    {token, zone: zoneId, record: recordName}: CloudflareDDNSOptions,
+  ) {
     this.cloudflare = new Cloudflare({
       token,
     });
@@ -47,6 +46,8 @@ export class CloudflareDDNSProvider implements IDDNSProvider {
 
   async update(ip: string): Promise<void> {
     const DNSRecords = this.cloudflare.dnsRecords;
+
+    let type = this.type;
 
     let zoneId = this.zoneId;
     let recordName = this.recordName;
@@ -68,7 +69,7 @@ export class CloudflareDDNSProvider implements IDDNSProvider {
     }
 
     let record: DnsRecord = {
-      type: 'A',
+      type: type === 'ipv4' ? 'A' : 'AAAA',
       name: recordName,
       content: ip,
       /**

@@ -6,7 +6,7 @@ import AliCloudDNSClient, {
 import * as AliCloudOpenAPIClient from '@alicloud/openapi-client';
 import * as x from 'x-value';
 
-import type {IDDNSProvider} from '../ddns-provider';
+import type {DDNSType, IDDNSProvider} from '../ddns-provider';
 
 const ENDPOINT_DEFAULT = 'alidns.cn-shenzhen.aliyuncs.com';
 
@@ -31,13 +31,16 @@ export class AliCloudDDNSProvider implements IDDNSProvider {
 
   private recordId: string | undefined;
 
-  constructor({
-    accessKeyId,
-    accessKeySecret,
-    endpoint = ENDPOINT_DEFAULT,
-    domain,
-    record: recordName,
-  }: AliCloudDDNSOptions) {
+  constructor(
+    readonly type: DDNSType,
+    {
+      accessKeyId,
+      accessKeySecret,
+      endpoint = ENDPOINT_DEFAULT,
+      domain,
+      record: recordName,
+    }: AliCloudDDNSOptions,
+  ) {
     let config = new AliCloudOpenAPIClient.Config({
       accessKeyId,
       accessKeySecret,
@@ -58,6 +61,8 @@ export class AliCloudDDNSProvider implements IDDNSProvider {
 
   async update(ip: string): Promise<void> {
     const client = this.client;
+
+    let type = this.type;
 
     let domain = this.domain;
     let recordName = this.recordName;
@@ -86,7 +91,7 @@ export class AliCloudDDNSProvider implements IDDNSProvider {
 
     let recordPartial = {
       RR: recordName,
-      type: 'A',
+      type: type === 'ipv4' ? 'A' : 'AAAA',
       value: ip,
     };
 

@@ -21,13 +21,13 @@ const SESSION_QUALITY_MEASUREMENT_MIN_STATUSES_MULTIPLIER = 0.5;
 
 const WINDOW_SIZE = bytes('32MB');
 
-const LISTEN_HOST_DEFAULT = IPPattern.nominalize('0.0.0.0');
+const LISTEN_HOST_DEFAULT = '';
 const LISTEN_PORT_DEFAULT = Port.nominalize(8443);
 
 const CERTS_DIR = Path.join(__dirname, '../../../certs');
 
 export const ServerOptions = x.object({
-  host: IPPattern.optional(),
+  host: x.union(IPPattern, x.literal('')).optional(),
   port: Port.optional(),
   cert: x.union(x.string, xn.Buffer).optional(),
   key: x.union(x.string, xn.Buffer).optional(),

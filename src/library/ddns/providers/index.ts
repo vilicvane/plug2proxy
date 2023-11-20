@@ -1,6 +1,6 @@
 import * as x from 'x-value';
 
-import type {IDDNSProvider} from '../ddns-provider';
+import type {DDNSType, IDDNSProvider} from '../ddns-provider';
 
 import {
   AliCloudDDNSOptions,
@@ -19,13 +19,14 @@ export const ProviderDDNSOptions = x.union(
 export type ProviderDDNSOptions = x.TypeOf<typeof ProviderDDNSOptions>;
 
 export function createDDNSProvider(
+  type: DDNSType,
   options: ProviderDDNSOptions,
 ): IDDNSProvider {
   switch (options.provider) {
     case 'cloudflare':
-      return new CloudflareDDNSProvider(options);
+      return new CloudflareDDNSProvider(type, options);
     case 'alicloud':
-      return new AliCloudDDNSProvider(options);
+      return new AliCloudDDNSProvider(type, options);
   }
 }
 
