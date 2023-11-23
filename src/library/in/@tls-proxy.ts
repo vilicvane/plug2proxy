@@ -1,11 +1,16 @@
 import {once} from 'events';
+import {createWriteStream} from 'fs';
+import {Http2Session} from 'http2';
 import * as Net from 'net';
 import {PassThrough} from 'stream';
 import {pipeline} from 'stream/promises';
 import * as TLS from 'tls';
 
 import Forge from '@vilic/node-forge';
+import HPack from 'hpack.js';
 import {readTlsClientHello} from 'read-tls-client-hello';
+
+import {type LogContext, Logs} from '../@log.js';
 
 export type TLSProxyOptions = {
   ca: {
@@ -24,69 +29,141 @@ export class TLSProxy {
   }
 
   protected async connect(
+    id: number,
     inSocket: Net.Socket,
     host: string,
     port: number,
   ): Promise<void> {
-    console.log(`connect ${host}:${port}`);
-
-    const through = new PassThrough();
-
-    const helloChunks: Buffer[] = [];
-
-    const onHelloData = (data: Buffer): void => {
-      console.log({data});
-
-      helloChunks.push(data);
-      through.write(data);
+    const context: LogContext = {
+      type: 'connect',
+      id,
+      hostname: `${host}:${port}`,
     };
 
-    inSocket.write(`HTTP/1.1 200 OK\r\n\r\n`);
+    Logs.info(context);
 
-    inSocket.on('data', onHelloData);
+    let alpnProtocols: string[] | undefined;
+    let serverName: string | undefined;
 
-    const {alpnProtocols} = await readTlsClientHello(through);
+    // read client hello for ALPN
+    {
+      const through = new PassThrough();
 
-    console.log('in tls alpn protocols', alpnProtocols);
+      const helloChunks: Buffer[] = [];
 
-    inSocket.off('data', onHelloData);
+      const onHelloData = (data: Buffer): void => {
+        helloChunks.push(data);
+        through.write(data);
+      };
 
-    inSocket.unpipe(); // redundant?
-    inSocket.pause();
+      inSocket.on('data', onHelloData);
 
-    inSocket.unshift(Buffer.concat(helloChunks));
+      try {
+        ({alpnProtocols, serverName} = await readTlsClientHello(through));
 
-    const outSocket = await this.connectRemote(host, port);
+        if (alpnProtocols) {
+          Logs.debug(context, 'alpn protocols (in):', alpnProtocols.join(', '));
+        }
+      } catch (error) {
+        Logs.warn(context, 'failed to read client hello.');
+        Logs.debug(context, error);
+      }
 
-    console.log('remote connected');
+      inSocket.off('data', onHelloData);
+
+      inSocket.unpipe(); // redundant?
+      inSocket.pause();
+
+      inSocket.unshift(Buffer.concat(helloChunks));
+    }
+
+    let outSocket: Net.Socket;
+
+    try {
+      outSocket = await this.connectRemote(host, port);
+    } catch (error) {
+      Logs.error(context, 'failed to connect remote.');
+      Logs.debug(context, error);
+
+      inSocket.destroy();
+
+      return;
+    }
+
+    Logs.debug(context, 'connected to remote.');
 
     const outTLSSocket = TLS.connect({
       socket: outSocket,
+      servername: serverName,
       ALPNProtocols: alpnProtocols,
     });
 
-    await once(outTLSSocket, 'secureConnect');
+    try {
+      await once(outTLSSocket, 'secureConnect');
+    } catch (error) {
+      Logs.error(context, 'failed to create secure connection to remote.');
+      Logs.debug(context, error);
 
-    console.log('remote secure connected');
+      inSocket.destroy();
+      outSocket.destroy();
 
-    const remoteCertificate = outTLSSocket.getPeerCertificate();
+      return;
+    }
 
-    const {cert, key} = this.getP2PCertificate(
-      remoteCertificate,
-      outTLSSocket.authorized,
-    );
+    let inTLSSocket: TLS.TLSSocket;
 
-    const inTLSSocket = new TLS.TLSSocket(inSocket, {
-      isServer: true,
-      ALPNProtocols: alpnProtocols,
-      cert,
-      key,
+    {
+      const {alpnProtocol} = outTLSSocket;
+
+      Logs.debug(context, 'secure connection to remote established.');
+      Logs.debug(context, 'alpn protocol (out):', alpnProtocol || 'none');
+
+      const remoteCertificate = outTLSSocket.getPeerCertificate();
+
+      const {cert, key} = this.getP2PCertificate(
+        remoteCertificate,
+        outTLSSocket.authorized,
+      );
+
+      inTLSSocket = new TLS.TLSSocket(inSocket, {
+        isServer: true,
+        ALPNProtocols:
+          typeof alpnProtocol === 'string' ? [alpnProtocol] : undefined,
+        cert,
+        key,
+      });
+    }
+
+    // Scenarios:
+
+    // 1. HTTPS
+    // 2. HTTP/2 via ALPN or prior knowledge
+    // 3. HTTP/2 via Upgrade
+
+    const s = createWriteStream('http2-stream.bin');
+
+    inTLSSocket.on('data', data => {
+      s.write(data);
     });
 
-    await Promise.all([
-      pipeline(inTLSSocket, outTLSSocket),
-      pipeline(outTLSSocket, inTLSSocket),
-    ]);
+    // new (inTLSSocket);
+
+    // {
+    //   const through = new PassThrough();
+
+    //   try {
+    //     await Promise.all([
+    //       pipeline(inTLSSocket, outTLSSocket),
+    //       pipeline(outTLSSocket, inTLSSocket),
+    //     ]);
+    //   } catch (error) {
+    //     Logs.error(context, 'failed to create secure connection to remote.');
+    //     Logs.debug(context, error);
+
+    //     inSocket.destroy();
+    //     outSocket.destroy();
+    //   }
+    // }
   }
 
   private p2pCertificateMap = new Map<string, P2PCertificate>();

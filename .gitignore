@@ -9,3 +9,5 @@ bld/
 *.pem
 *.crt
 *.key
+*.bin
+test.*

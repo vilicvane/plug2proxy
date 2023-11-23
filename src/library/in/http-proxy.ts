@@ -12,6 +12,8 @@ export type HTTPProxyOptions = TLSProxyOptions & {
 export class HTTPProxy extends TLSProxy {
   readonly httpServer: HTTP.Server;
 
+  private lastContextId = 0;
+
   constructor({host, port, ...options}: HTTPProxyOptions) {
     super(options);
 
@@ -28,7 +30,9 @@ export class HTTPProxy extends TLSProxy {
     const [host, portString] = request.url!.split(':');
     const port = parseInt(portString) || 443;
 
-    this.connect(inSocket, host, port);
+    inSocket.write(`HTTP/1.1 200 OK\r\n\r\n`);
+
+    this.connect(++this.lastContextId, inSocket, host, port);
   };
 
   private onHTTPServerRequest = (): void => {};
