@@ -25,7 +25,11 @@ const server = createServer(async socket => {
 
   socket.pause();
 
-  socket.unshift(Buffer.concat(helloChunks));
+  const hello = Buffer.concat(helloChunks);
+
+  console.log(hello.length);
+
+  socket.unshift(hello);
 
   const tlsSocket = new TLSSocket(socket, {
     isServer: true,
@@ -36,5 +40,10 @@ const server = createServer(async socket => {
     }),
   });
 
-  // tlsSocket.on('keylog', console.log);
+  tlsSocket.on('session', () => {
+    console.log('secure connect');
+  });
+  tlsSocket.on('keylog', data => console.log(data.toString()));
+
+  // socket.resume();
 }).listen(8888);

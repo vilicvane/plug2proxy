@@ -1,6 +1,8 @@
 import * as HTTP from 'http';
 import type * as Net from 'net';
 
+import type {Router} from '../router.js';
+
 import type {TLSProxyOptions} from './@tls-proxy.js';
 import {TLSProxy} from './@tls-proxy.js';
 
@@ -14,8 +16,8 @@ export class HTTPProxy extends TLSProxy {
 
   private lastContextId = 0;
 
-  constructor({host, port, ...options}: HTTPProxyOptions) {
-    super(options);
+  constructor(router: Router, {host, port, ...options}: HTTPProxyOptions) {
+    super(router, options);
 
     this.httpServer = HTTP.createServer()
       .on('connect', this.onHTTPServerConnect)

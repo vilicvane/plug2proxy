@@ -1,19 +1,16 @@
 import {once} from 'events';
-import {createWriteStream} from 'fs';
-import {Http2Session} from 'http2';
 import * as Net from 'net';
-import {Duplex, PassThrough} from 'stream';
+import {PassThrough} from 'stream';
 import {pipeline} from 'stream/promises';
 import * as TLS from 'tls';
 
 import Forge from '@vilic/node-forge';
-import Duplexify from 'duplexify';
-import HPack from 'hpack.js';
-import {HTTPParser} from 'http-parser-js';
 import {readTlsClientHello} from 'read-tls-client-hello';
 import type {Nominal} from 'x-value';
 
 import {type LogContext, Logs} from '../@log.js';
+import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
+import type {Route, Router} from '../router.js';
 
 export type TLSProxyOptions = {
   ca: {
@@ -26,15 +23,15 @@ export class TLSProxy {
   readonly caCert: Forge.pki.Certificate;
   readonly caKey: Forge.pki.PrivateKey;
 
-  constructor({ca}: TLSProxyOptions) {
+  constructor(
+    readonly router: Router,
+    {ca}: TLSProxyOptions,
+  ) {
     this.caCert = Forge.pki.certificateFromPem(ca.cert);
     this.caKey = Forge.pki.privateKeyFromPem(ca.key);
   }
 
-  private knownALPNProtocolMap = new Map<
-    ALPNProtocolKey,
-    ALPNProtocol | false
-  >();
+  private knownALPNProtocolMap = new Map<ALPNProtocolKey, string | false>();
 
   protected async connect(
     id: number,
@@ -67,10 +64,10 @@ export class TLSProxy {
       inSocket.on('data', onHelloData);
 
       try {
-        ({alpnProtocols, serverName} = await readTlsClientHello(through));
+        ({alpnProtocols} = await readTlsClientHello(through));
 
         if (alpnProtocols) {
-          Logs.debug(context, 'alpn protocols (in):', alpnProtocols.join(', '));
+          Logs.debug(context, 'alpn protocols (IN):', alpnProtocols.join(', '));
         }
       } catch (error) {
         Logs.warn(context, 'failed to read client hello.');
@@ -79,7 +76,6 @@ export class TLSProxy {
 
       inSocket.off('data', onHelloData);
 
-      inSocket.unpipe(); // redundant?
       inSocket.pause();
 
       inSocket.unshift(Buffer.concat(helloChunks));
@@ -112,25 +108,15 @@ export class TLSProxy {
     } else {
       Logs.debug(context, 'known alpn protocol:', knownALPNProtocol);
 
-      // should not have two different handling here.
-
-      switch (knownALPNProtocol) {
-        case 'http/1.1':
-        case false:
-          await this.performHTTPConnect(
-            context,
-            host,
-            port,
-            inSocket,
-            alpnProtocols,
-            knownALPNProtocol,
-            serverName,
-          );
-          break;
-        case 'h2':
-          await this.performHTTP2Connect(host, port);
-          break;
-      }
+      await this.performHTTPConnect(
+        context,
+        host,
+        port,
+        inSocket,
+        alpnProtocols,
+        knownALPNProtocol,
+        serverName,
+      );
     }
   }
 
@@ -141,75 +127,79 @@ export class TLSProxy {
     inSocket: Net.Socket,
     alpnProtocols: string[] | undefined,
     serverName: string | undefined,
-  ) {
+  ): Promise<void> {
     Logs.debug(context, 'performing optimistic connect...');
 
-    let outSocket: Net.Socket;
+    const optimisticRoute = this.router.route(host);
+
+    let outTLSSocket: TLS.TLSSocket;
 
     try {
-      outSocket = await this.connectRemote(host, port);
+      outTLSSocket = await this.secureConnectOut(
+        context,
+        host,
+        port,
+        optimisticRoute,
+        alpnProtocols,
+        serverName,
+      );
     } catch (error) {
-      Logs.error(context, 'failed to connect remote.');
+      Logs.error(context, 'failed to secure connect OUT.');
       Logs.debug(context, error);
 
       inSocket.destroy();
-
-      return;
-    }
-
-    Logs.debug(context, 'connected to remote.');
-
-    const outTLSSocket = TLS.connect({
-      socket: outSocket,
-      servername: serverName,
-      ALPNProtocols: alpnProtocols,
-    });
-
-    try {
-      await once(outTLSSocket, 'secureConnect');
-    } catch (error) {
-      Logs.error(context, 'failed to create secure connection to remote.');
-      Logs.debug(context, error);
-
-      inSocket.destroy();
-      outSocket.destroy();
 
       return;
     }
 
     const alpnProtocol = outTLSSocket.alpnProtocol!;
 
-    Logs.debug(context, 'secure connection to remote established.');
-    Logs.debug(context, 'alpn protocol (out):', alpnProtocol || 'none');
+    Logs.debug(context, 'alpn protocol (OUT):', alpnProtocol || 'none');
 
     this.updateALPNProtocol(host, port, alpnProtocols, alpnProtocol);
 
-    const {cert, key} = this.getP2PCertificate(
-      host,
-      port,
-      outTLSSocket.getPeerCertificate(),
-      outTLSSocket.authorized,
-    );
+    const certificate = this.getP2PCertificate(host, port, outTLSSocket);
 
-    const inTLSSocket = new TLS.TLSSocket(inSocket, {
-      isServer: true,
-      ALPNProtocols: alpnProtocol ? [alpnProtocol] : undefined,
-      cert,
-      key,
-    });
+    let inTLSSocket: TLS.TLSSocket;
+    let referer: string | undefined;
 
     try {
-      await Promise.all([
-        pipeline(inTLSSocket, outTLSSocket),
-        pipeline(outTLSSocket, inTLSSocket),
-      ]);
+      [inTLSSocket, referer] = await this.secureConnectIn(
+        context,
+        inSocket,
+        certificate,
+        alpnProtocol,
+      );
     } catch (error) {
-      Logs.error(context, 'failed to create secure connection to remote.');
       Logs.debug(context, error);
 
-      inSocket.destroy();
-      outSocket.destroy();
+      return;
     }
+
+    if (referer !== undefined) {
+      const refererRoute = this.router.routeReferer(referer);
+
+      if (
+        refererRoute &&
+        (!optimisticRoute || optimisticRoute.id !== refererRoute.id)
+      ) {
+        Logs.info(
+          context,
+          'referer route is different from host route, switching OUT connection...',
+        );
+
+        outTLSSocket = await this.secureConnectOut(
+          context,
+          host,
+          port,
+          refererRoute,
+          alpnProtocols,
+          serverName,
+        );
+      }
+    }
+
+    await this.connectInOut(context, inTLSSocket, outTLSSocket);
   }
 
   private async performHTTPConnect(
@@ -218,106 +208,66 @@ export class TLSProxy {
     port: number,
     inSocket: Net.Socket,
     alpnProtocols: string[] | undefined,
-    alpnProtocol: ALPNProtocol | false,
+    alpnProtocol: string | false,
     serverName: string | undefined,
-  ) {
+  ): Promise<void> {
     const {
       id: certificateId,
-      certificate: {cert, key},
-      authorized,
+      certificate,
+      trusted,
     } = this.requireP2PCertificateForKnownRemote(host, port);
 
-    const inTLSSocket = new TLS.TLSSocket(inSocket, {
-      isServer: true,
-      ALPNProtocols: alpnProtocol ? [alpnProtocol] : undefined,
-      cert,
-      key,
-    });
-
-    const headerMap = new Map<string, string>();
+    let inTLSSocket: TLS.TLSSocket;
+    let referer: string | undefined;
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const peekedChunks: Buffer[] = [];
-
-        const parser = new HTTPParser(HTTPParser.REQUEST);
-
-        parser.onHeadersComplete = ({headers}) => {
-          for (let index = 0; index < headers.length; index += 2) {
-            headerMap.set(headers[index].toLowerCase(), headers[index + 1]);
-          }
-
-          inTLSSocket.off('data', onInTLSSocketData);
-          inTLSSocket.off('error', reject);
-
-          inTLSSocket.pause();
-          inTLSSocket.unshift(Buffer.concat(peekedChunks));
-
-          resolve();
-        };
-
-        const onInTLSSocketData = (data: Buffer): void => {
-          peekedChunks.push(data);
-          parser.execute(data);
-        };
-
-        inTLSSocket.on('data', onInTLSSocketData).on('error', reject);
-      });
-    } catch (error) {
-      Logs.error(context, 'failed to read referer.');
-      Logs.debug(context, error);
-    }
-
-    let outSocket: Net.Socket;
-
-    try {
-      outSocket = await this.connectRemote(
-        host,
-        port,
-        headerMap.get('referer'),
+      [inTLSSocket, referer] = await this.secureConnectIn(
+        context,
+        inSocket,
+        certificate,
+        alpnProtocol,
       );
     } catch (error) {
-      Logs.error(context, 'failed to connect remote.');
       Logs.debug(context, error);
-
-      inSocket.destroy();
 
       return;
     }
 
-    const outTLSSocket = TLS.connect({
-      socket: outSocket,
-      servername: serverName,
-      ALPNProtocols: alpnProtocols,
-    });
+    const route =
+      referer !== undefined
+        ? this.router.routeReferer(referer)
+        : this.router.route(host);
+
+    let outTLSSocket: TLS.TLSSocket;
 
     try {
-      await once(outTLSSocket, 'secureConnect');
+      outTLSSocket = await this.secureConnectOut(
+        context,
+        host,
+        port,
+        route,
+        alpnProtocols,
+        serverName,
+      );
     } catch (error) {
-      Logs.error(context, 'failed to create secure connection to remote.');
+      Logs.error(context, 'failed to establish secure out connection.');
       Logs.debug(context, error);
 
-      inSocket.destroy();
-      outSocket.destroy();
+      inTLSSocket.destroy();
 
       return;
     }
 
-    if (outTLSSocket.authorized !== authorized) {
+    if (isTLSSocketTrusted(outTLSSocket) !== trusted) {
       Logs.info(
         context,
-        'certificate authorized status changed, reset connection.',
+        'certificate trusted status changed, reset connection.',
       );
 
-      this.createP2PCertificate(
-        host,
-        port,
-        outTLSSocket.getPeerCertificate(),
-        outTLSSocket.authorized,
-      );
+      this.createP2PCertificate(host, port, outTLSSocket);
 
-      inSocket.destroy();
-      outSocket.destroy();
+      inTLSSocket.destroy();
+      outTLSSocket.destroy();
 
       return;
     }
@@ -332,40 +282,93 @@ export class TLSProxy {
         outTLSSocket.alpnProtocol!,
       );
 
-      inSocket.destroy();
-      outSocket.destroy();
+      inTLSSocket.destroy();
+      outTLSSocket.destroy();
 
       return;
     }
 
-    // TODO: upgrade h2c
+    await this.connectInOut(context, inTLSSocket, outTLSSocket);
+  }
 
+  private async secureConnectOut(
+    context: LogContext,
+    host: string,
+    port: number,
+    route: Route | undefined,
+    alpnProtocols: string[] | undefined,
+    serverName: string | undefined,
+  ): Promise<TLS.TLSSocket> {
+    // TODO: connect via proxy
+
+    const socket = Net.connect(port, host);
+
+    await once(socket, 'connect');
+
+    const tlsSocket = TLS.connect({
+      socket,
+      servername: serverName,
+      ALPNProtocols: alpnProtocols,
+      rejectUnauthorized: false,
+    });
+
+    await once(tlsSocket, 'secureConnect');
+
+    Logs.debug(context, 'established secure OUT connection.');
+
+    return tlsSocket;
+  }
+
+  private async secureConnectIn(
+    context: LogContext,
+    socket: Net.Socket,
+    {cert, key}: P2PCertificate,
+    alpnProtocol: string | false,
+  ): Promise<[inTLSSocket: TLS.TLSSocket, referer: string | undefined]> {
+    const tlsSocket = new TLS.TLSSocket(socket, {
+      isServer: true,
+      ALPNProtocols:
+        typeof alpnProtocol === 'string' ? [alpnProtocol] : undefined,
+      cert,
+      key,
+    });
+
+    Logs.debug(context, 'established secure IN connection.');
+
+    let headerMap: Map<string, string>;
+
+    try {
+      headerMap = await readHTTPRequestStreamHeaders(tlsSocket);
+    } catch (error) {
+      Logs.error(context, 'failed to read request headers.');
+
+      tlsSocket.destroy();
+
+      throw error;
+    }
+
+    return [tlsSocket, headerMap.get('referer')];
+  }
+
+  private async connectInOut(
+    context: LogContext,
+    inTLSSocket: TLS.TLSSocket,
+    outTLSSocket: TLS.TLSSocket,
+  ): Promise<void> {
     try {
       await Promise.all([
         pipeline(inTLSSocket, outTLSSocket),
         pipeline(outTLSSocket, inTLSSocket),
       ]);
+
+      Logs.info(context, 'connection closed.');
     } catch (error) {
-      Logs.error(context, 'failed to create secure connection to remote.');
+      Logs.error(context, 'connecting IN and OUT resulted in an error.');
       Logs.debug(context, error);
 
-      inSocket.destroy();
-      outSocket.destroy();
+      inTLSSocket.destroy();
+      outTLSSocket.destroy();
     }
-  }
-
-  private async performHTTP2Connect(host: string, port: number) {}
-
-  private async connectRemote(
-    host: string,
-    port: number,
-    referer?: string,
-  ): Promise<Net.Socket> {
-    const socket = Net.connect(port, host);
-
-    await once(socket, 'connect');
-
-    return socket;
   }
 
   private p2pCertificateMap = new Map<CertificateId, P2PCertificate>();
@@ -374,19 +377,18 @@ export class TLSProxy {
     CertificateStateKey,
     {
       id: CertificateId;
-      authorized: boolean;
+      trusted: boolean;
     }
   >();
 
   private getP2PCertificate(
     host: string,
     port: number,
-    certificate: TLS.PeerCertificate,
-    authorized: boolean,
+    tlsSocket: TLS.TLSSocket,
   ): P2PCertificate {
     const {p2pCertificateMap} = this;
 
-    const id = CERTIFICATE_ID(certificate);
+    const id = CERTIFICATE_ID(tlsSocket.getPeerCertificate());
 
     const p2pCert = p2pCertificateMap.get(id);
 
@@ -394,15 +396,17 @@ export class TLSProxy {
       return p2pCert;
     }
 
-    return this.createP2PCertificate(host, port, certificate, authorized);
+    return this.createP2PCertificate(host, port, tlsSocket);
   }
 
   private createP2PCertificate(
     host: string,
     port: number,
-    certificate: TLS.PeerCertificate,
-    authorized: boolean,
+    tlsSocket: TLS.TLSSocket,
   ): P2PCertificate {
+    const certificate = tlsSocket.getPeerCertificate();
+    const trusted = isTLSSocketTrusted(tlsSocket);
+
     const {caCert, caKey} = this;
 
     const asn1Cert = Forge.asn1.fromDer(
@@ -415,14 +419,14 @@ export class TLSProxy {
 
     cert.publicKey = publicKey;
 
-    if (authorized) {
+    if (trusted) {
       cert.setIssuer(caCert.subject.attributes);
       cert.sign(caKey, Forge.md.sha512.create());
     } else {
       cert.setIssuer([
         {
           shortName: 'CN',
-          value: `Plug2Proxy Unauthorized CA (${cert.issuer.getField('CN')})`,
+          value: `Plug2Proxy Untrusted CA (${cert.issuer.getField('CN')})`,
         },
       ]);
       cert.sign(privateKey, Forge.md.sha512.create());
@@ -441,7 +445,7 @@ export class TLSProxy {
 
     certificateStateMap.set(CERTIFICATE_STATE_KEY(host, port), {
       id,
-      authorized,
+      trusted,
     });
 
     return p2pCert;
@@ -453,7 +457,7 @@ export class TLSProxy {
   ): {
     id: CertificateId;
     certificate: P2PCertificate;
-    authorized: boolean;
+    trusted: boolean;
   } {
     const state = this.certificateStateMap.get(
       CERTIFICATE_STATE_KEY(host, port),
@@ -465,14 +469,14 @@ export class TLSProxy {
       );
     }
 
-    const {authorized, id} = state;
+    const {trusted, id} = state;
 
     const certificate = this.p2pCertificateMap.get(id)!;
 
     return {
       id,
       certificate,
-      authorized,
+      trusted,
     };
   }
 
@@ -520,8 +524,6 @@ function CERTIFICATE_ID({
   return `${CN} ${serialNumber}`;
 }
 
-type ALPNProtocol = 'h2' | 'http/1.1';
-
 type ALPNProtocolKey = Nominal<'alpn protocol key', string>;
 
 function ALPN_PROTOCOL_KEY(
@@ -537,4 +539,21 @@ function ALPN_PROTOCOL_KEY(
   const hostname = `${host}:${port}`;
 
   return alpnProtocols ? `${hostname} ${alpnProtocols.join(',')}` : hostname;
+}
+
+function isTLSSocketTrusted({
+  authorized,
+  authorizationError,
+}: TLS.TLSSocket): boolean {
+  if (authorized) {
+    return true;
+  }
+
+  switch (authorizationError.name) {
+    case 'CERT_NOT_YET_VALID':
+    case 'CERT_HAS_EXPIRED':
+      return true;
+    default:
+      return false;
+  }
 }

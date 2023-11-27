@@ -52,4 +52,19 @@ export const RouteMatchOptions = x.object({
   priority: x.number.optional(),
 });
 
-export class Router {}
+export class Router {
+  route(host: string): Route | undefined {
+    return {
+      id: 'default',
+    };
+  }
+
+  routeReferer(referer: string): Route | undefined {
+    const host = new URL(referer).host;
+    return this.route(host);
+  }
+}
+
+export type Route = {
+  id: string;
+};
