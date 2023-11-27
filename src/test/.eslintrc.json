@@ -7,6 +7,13 @@
       "parserOptions": {
         "project": "tsconfig.json"
       }
+    },
+    {
+      "files": ["*.test.ts"],
+      "rules": {
+        "@mufan/import": "off",
+        "@mufan/scoped-modules": "off"
+      }
     }
   ]
 }

@@ -1,6 +1,6 @@
-import {Duplex} from 'stream';
-
 declare module 'spdy-transport' {
+  import {Duplex} from 'stream';
+
   namespace SPDYTransport {
     namespace protocol {
       namespace http2 {

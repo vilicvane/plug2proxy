@@ -14,4 +14,5 @@ parser.setCompression(pool.get());
 
 parser.on('data', console.log);
 
-parser.end(http2Buffer);
+parser.write(http2Buffer.subarray(0, 100));
+parser.write(http2Buffer.subarray(100));

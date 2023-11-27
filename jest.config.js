@@ -2,4 +2,5 @@
 export default {
   transform: {},
   testMatch: ['<rootDir>/bld/test/*.test.js'],
+  prettierPath: null,
 };

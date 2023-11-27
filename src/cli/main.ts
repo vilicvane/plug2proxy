@@ -1,7 +1,5 @@
 import {readFile} from 'fs/promises';
 
-import {identifier} from 'spdy-transport';
-
 import {In} from '../library/index.js';
 
 // const proxy = new In.HTTPProxy({
@@ -14,5 +12,3 @@ import {In} from '../library/index.js';
 // });
 
 const http2Buffer = await readFile('http2-stream.bin');
-
-const x = spdy;
