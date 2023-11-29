@@ -3,9 +3,13 @@ import type * as Net from 'net';
 
 import * as x from 'x-value';
 
+import type {ConnectionId} from '../common.js';
+import {TunnelId} from '../common.js';
 import {IPPattern, Port} from '../x.js';
 
-import type {TLSProxy} from './tls-proxy.js';
+import type {Router} from './namespace.js';
+import type {TLSProxy, TLSProxyOptions} from './tls-proxy.js';
+import type {TunnelServer} from './tunnel-server.js';
 
 export const HTTPProxyOptions = x.object({
   host: x.union([IPPattern, x.literal('')]).optional(),
@@ -17,9 +21,10 @@ export type HTTPProxyOptions = x.TypeOf<typeof HTTPProxyOptions>;
 export class HTTPProxy {
   readonly server: HTTP.Server;
 
-  private lastContextId = 0;
+  private lastContextIdNumber = 0;
 
   constructor(
+    readonly tunnelServer: TunnelServer,
     readonly tlsProxy: TLSProxy,
     {host, port}: HTTPProxyOptions,
   ) {
@@ -38,8 +43,12 @@ export class HTTPProxy {
 
     inSocket.write(`HTTP/1.1 200 OK\r\n\r\n`);
 
-    this.tlsProxy.connect(++this.lastContextId, inSocket, host, port);
+    this.tlsProxy.connect(this.getNextContextId(), inSocket, host, port);
   };
 
   private onHTTPServerRequest = (): void => {};
+
+  private getNextContextId(): ConnectionId {
+    return ++this.lastContextIdNumber as ConnectionId;
+  }
 }

@@ -1,14 +1,14 @@
+import assert from 'assert';
 import * as DNS from 'dns';
 import * as Net from 'net';
 
+import type {TunnelId} from '../../common.js';
 import {
   ROUTE_MATCH_PRIORITY_DEFAULT,
   ROUTE_MATCH_RULE_NEGATE_DEFAULT,
-  type RouteMatchIncludeRule,
   type RouteMatchOptions,
   type RouteMatchRule,
 } from '../../router.js';
-import type {TunnelCandidateId} from '../tunnel.js';
 
 import type {GeoLite2} from './geolite2.js';
 import {
@@ -18,44 +18,36 @@ import {
 } from './rule-match.js';
 
 export class Router {
-  private optionsMap = new Map<
-    TunnelCandidateId,
-    InitializedRouteMatchOptions
-  >();
+  private candidateMap = new Map<TunnelId, RouteCandidate>();
 
   constructor(readonly geolite2: GeoLite2) {}
 
   register(
-    id: TunnelCandidateId,
-    {
-      include = [],
-      exclude = [],
-      priority = ROUTE_MATCH_PRIORITY_DEFAULT,
-    }: RouteMatchOptions,
-  ): () => void {
-    this.optionsMap.set(id, {
-      include: include.map(rule => {
-        return {
-          match: this.createMatchFunction(rule),
-          negate: rule.negate ?? ROUTE_MATCH_RULE_NEGATE_DEFAULT,
-          priority: rule.priority ?? priority,
-        };
-      }),
-      exclude: exclude.map(rule => {
-        return {
-          match: this.createMatchFunction(rule),
-          negate: rule.negate ?? ROUTE_MATCH_RULE_NEGATE_DEFAULT,
-        };
-      }),
-      priority,
+    id: TunnelId,
+    remote: string,
+    routeMatchOptions: RouteMatchOptions,
+  ): void {
+    this.candidateMap.set(id, {
+      id,
+      remote,
+      routeMatchOptions: this.initializeRouteMatchOptions(routeMatchOptions),
     });
-
-    return () => {
-      this.optionsMap.delete(id);
-    };
   }
 
-  async route(host: string): Promise<Route | undefined> {
+  unregister(id: TunnelId): void {
+    this.candidateMap.delete(id);
+  }
+
+  update(id: TunnelId, routeMatchOptions: RouteMatchOptions): void {
+    const candidate = this.candidateMap.get(id);
+
+    assert(candidate);
+
+    candidate.routeMatchOptions =
+      this.initializeRouteMatchOptions(routeMatchOptions);
+  }
+
+  async route(host: string): Promise<TunnelId | undefined> {
     let domain: string | undefined;
     let ips: string[] | undefined;
 
@@ -72,22 +64,43 @@ export class Router {
         return ips;
       });
 
-    for (const [id, routeMatchOptions] of this.optionsMap) {
+    for (const [id, {routeMatchOptions}] of this.candidateMap) {
       const priority = await match(domain, resolve, routeMatchOptions);
 
       if (priority !== false) {
-        return {
-          id,
-        };
+        return id;
       }
     }
 
     return undefined;
   }
 
-  routeReferer(referer: string): Promise<Route | undefined> {
+  routeReferer(referer: string): Promise<TunnelId | undefined> {
     const host = new URL(referer).host;
     return this.route(host);
+  }
+
+  private initializeRouteMatchOptions({
+    include = [],
+    exclude = [],
+    priority = ROUTE_MATCH_PRIORITY_DEFAULT,
+  }: RouteMatchOptions): InitializedRouteMatchOptions {
+    return {
+      include: include.map(rule => {
+        return {
+          match: this.createMatchFunction(rule),
+          negate: rule.negate ?? ROUTE_MATCH_RULE_NEGATE_DEFAULT,
+          priority: rule.priority ?? priority,
+        };
+      }),
+      exclude: exclude.map(rule => {
+        return {
+          match: this.createMatchFunction(rule),
+          negate: rule.negate ?? ROUTE_MATCH_RULE_NEGATE_DEFAULT,
+        };
+      }),
+      priority,
+    };
   }
 
   private createMatchFunction(match: RouteMatchRule): RuleMatch {
@@ -102,8 +115,10 @@ export class Router {
   }
 }
 
-export type Route = {
-  id: TunnelCandidateId;
+export type RouteCandidate = {
+  id: TunnelId;
+  remote: string;
+  routeMatchOptions: InitializedRouteMatchOptions;
 };
 
 type InitializedRouteMatchOptions = {

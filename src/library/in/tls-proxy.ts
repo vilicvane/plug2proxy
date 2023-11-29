@@ -1,5 +1,6 @@
 import {once} from 'events';
 import * as Net from 'net';
+import type {Duplex} from 'stream';
 import {PassThrough} from 'stream';
 import {pipeline} from 'stream/promises';
 import * as TLS from 'tls';
@@ -10,8 +11,10 @@ import type {Nominal} from 'x-value';
 
 import {type LogContext, Logs} from '../@log.js';
 import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
+import type {ConnectionId, TunnelId} from '../common.js';
 
-import type {Route, Router} from './router/router.js';
+import type {Router} from './router/index.js';
+import type {TunnelServer} from './tunnel-server.js';
 
 export type TLSProxyOptions = {
   ca: {
@@ -25,6 +28,7 @@ export class TLSProxy {
   readonly caKey: Forge.pki.PrivateKey;
 
   constructor(
+    readonly tunnelServer: TunnelServer,
     readonly router: Router,
     {ca}: TLSProxyOptions,
   ) {
@@ -35,7 +39,7 @@ export class TLSProxy {
   private knownALPNProtocolMap = new Map<ALPNProtocolKey, string | false>();
 
   async connect(
-    id: number,
+    id: ConnectionId,
     inSocket: Net.Socket,
     host: string,
     port: number,
@@ -145,7 +149,7 @@ export class TLSProxy {
         serverName,
       );
     } catch (error) {
-      Logs.error(context, 'failed to secure connect OUT.');
+      Logs.error(context, 'failed to establish secure OUT connection.');
       Logs.debug(context, error);
 
       inSocket.destroy();
@@ -180,23 +184,29 @@ export class TLSProxy {
     if (referer !== undefined) {
       const refererRoute = await this.router.routeReferer(referer);
 
-      if (
-        refererRoute &&
-        (!optimisticRoute || optimisticRoute.id !== refererRoute.id)
-      ) {
+      if (refererRoute && optimisticRoute !== refererRoute) {
         Logs.info(
           context,
           'referer route is different from host route, switching OUT connection...',
         );
 
-        outTLSSocket = await this.secureConnectOut(
-          context,
-          host,
-          port,
-          refererRoute,
-          alpnProtocols,
-          serverName,
-        );
+        try {
+          outTLSSocket = await this.secureConnectOut(
+            context,
+            host,
+            port,
+            refererRoute,
+            alpnProtocols,
+            serverName,
+          );
+        } catch (error) {
+          Logs.error(context, 'failed to establish secure OUT connection.');
+          Logs.debug(context, error);
+
+          inTLSSocket.destroy();
+
+          return;
+        }
       }
     }
 
@@ -250,7 +260,7 @@ export class TLSProxy {
         serverName,
       );
     } catch (error) {
-      Logs.error(context, 'failed to establish secure out connection.');
+      Logs.error(context, 'failed to establish secure OUT connection.');
       Logs.debug(context, error);
 
       inTLSSocket.destroy();
@@ -295,18 +305,21 @@ export class TLSProxy {
     context: LogContext,
     host: string,
     port: number,
-    route: Route | undefined,
+    tunnelId: TunnelId | undefined,
     alpnProtocols: string[] | undefined,
     serverName: string | undefined,
   ): Promise<TLS.TLSSocket> {
-    // TODO: connect via proxy
+    let stream: Duplex;
 
-    const socket = Net.connect(port, host);
-
-    await once(socket, 'connect');
+    if (tunnelId !== undefined) {
+      stream = await this.tunnelServer.connect(context, tunnelId, host, port);
+    } else {
+      stream = Net.connect(port, host);
+      await once(stream, 'connect');
+    }
 
     const tlsSocket = TLS.connect({
-      socket,
+      socket: stream,
       servername: serverName,
       ALPNProtocols: alpnProtocols,
       rejectUnauthorized: false,

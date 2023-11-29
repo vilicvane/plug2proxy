@@ -1,10 +1,16 @@
 import Chalk from 'chalk';
 
+import type {ConnectionId, TunnelId, TunnelStreamId} from './common.js';
+
 export type LogContext =
   | {
       type: 'connect';
-      id: number;
+      id: ConnectionId;
+
       hostname: string;
+    }
+  | {
+      type: 'tunnel-server';
     }
   | {
       type: 'router';
