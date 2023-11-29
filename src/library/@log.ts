@@ -1,10 +1,17 @@
 import Chalk from 'chalk';
 
-export type LogContext = {
-  type: 'connect';
-  id: number;
-  hostname: string;
-};
+export type LogContext =
+  | {
+      type: 'connect';
+      id: number;
+      hostname: string;
+    }
+  | {
+      type: 'router';
+    }
+  | {
+      type: 'geolite2';
+    };
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -31,6 +38,9 @@ function createLogger<TLevel extends LogLevel>(level: TLevel) {
     switch (context.type) {
       case 'connect':
         args = [`[${context.id}]`, ...args];
+        break;
+      default:
+        args = [`[${context.type}]`, ...args];
         break;
     }
 

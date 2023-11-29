@@ -2,6 +2,10 @@ import * as x from 'x-value';
 
 import {IPMatchPattern} from './x.js';
 
+export const ROUTE_MATCH_PRIORITY_DEFAULT = 0;
+
+export const ROUTE_MATCH_RULE_NEGATE_DEFAULT = false;
+
 export const RouteMatchIPRuleMatchPattern = x.union([
   x.literal('loopback'),
   x.literal('private'),
@@ -46,25 +50,21 @@ export const RouteMatchRule = x.intersection([
   }),
 ]);
 
+export type RouteMatchRule = x.TypeOf<typeof RouteMatchRule>;
+
+export const RouteMatchIncludeRule = x.intersection([
+  RouteMatchRule,
+  x.object({
+    priority: x.number.optional(),
+  }),
+]);
+
+export type RouteMatchIncludeRule = x.TypeOf<typeof RouteMatchIncludeRule>;
+
 export const RouteMatchOptions = x.object({
-  include: x.array(RouteMatchRule).optional(),
+  include: x.array(RouteMatchIncludeRule).optional(),
   exclude: x.array(RouteMatchRule).optional(),
   priority: x.number.optional(),
 });
 
-export class Router {
-  route(host: string): Route | undefined {
-    return {
-      id: 'default',
-    };
-  }
-
-  routeReferer(referer: string): Route | undefined {
-    const host = new URL(referer).host;
-    return this.route(host);
-  }
-}
-
-export type Route = {
-  id: string;
-};
+export type RouteMatchOptions = x.TypeOf<typeof RouteMatchOptions>;

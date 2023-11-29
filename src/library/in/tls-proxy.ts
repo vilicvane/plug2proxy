@@ -10,7 +10,8 @@ import type {Nominal} from 'x-value';
 
 import {type LogContext, Logs} from '../@log.js';
 import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
-import type {Route, Router} from '../router.js';
+
+import type {Route, Router} from './router/router.js';
 
 export type TLSProxyOptions = {
   ca: {
@@ -33,7 +34,7 @@ export class TLSProxy {
 
   private knownALPNProtocolMap = new Map<ALPNProtocolKey, string | false>();
 
-  protected async connect(
+  async connect(
     id: number,
     inSocket: Net.Socket,
     host: string,
@@ -130,7 +131,7 @@ export class TLSProxy {
   ): Promise<void> {
     Logs.debug(context, 'performing optimistic connect...');
 
-    const optimisticRoute = this.router.route(host);
+    const optimisticRoute = await this.router.route(host);
 
     let outTLSSocket: TLS.TLSSocket;
 
@@ -177,7 +178,7 @@ export class TLSProxy {
     }
 
     if (referer !== undefined) {
-      const refererRoute = this.router.routeReferer(referer);
+      const refererRoute = await this.router.routeReferer(referer);
 
       if (
         refererRoute &&
@@ -211,11 +212,10 @@ export class TLSProxy {
     alpnProtocol: string | false,
     serverName: string | undefined,
   ): Promise<void> {
-    const {
-      id: certificateId,
-      certificate,
-      trusted,
-    } = this.requireP2PCertificateForKnownRemote(host, port);
+    const {certificate, trusted} = this.requireP2PCertificateForKnownRemote(
+      host,
+      port,
+    );
 
     let inTLSSocket: TLS.TLSSocket;
     let referer: string | undefined;
@@ -235,8 +235,8 @@ export class TLSProxy {
 
     const route =
       referer !== undefined
-        ? this.router.routeReferer(referer)
-        : this.router.route(host);
+        ? await this.router.routeReferer(referer)
+        : await this.router.route(host);
 
     let outTLSSocket: TLS.TLSSocket;
 
@@ -455,7 +455,6 @@ export class TLSProxy {
     host: string,
     port: number,
   ): {
-    id: CertificateId;
     certificate: P2PCertificate;
     trusted: boolean;
   } {
@@ -474,7 +473,6 @@ export class TLSProxy {
     const certificate = this.p2pCertificateMap.get(id)!;
 
     return {
-      id,
       certificate,
       trusted,
     };

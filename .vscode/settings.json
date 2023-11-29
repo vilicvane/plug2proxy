@@ -23,5 +23,12 @@
     "typescript",
     "typescriptreact"
   ],
-  "cSpell.words": ["duplexify", "SPDY"]
+  "cSpell.words": [
+    "duplexify",
+    "geolite",
+    "maxmind",
+    "mmdb",
+    "nominalize",
+    "SPDY"
+  ]
 }

@@ -1,25 +1,29 @@
 import * as HTTP from 'http';
 import type * as Net from 'net';
 
-import type {Router} from '../router.js';
+import * as x from 'x-value';
 
-import type {TLSProxyOptions} from './@tls-proxy.js';
-import {TLSProxy} from './@tls-proxy.js';
+import {IPPattern, Port} from '../x.js';
 
-export type HTTPProxyOptions = TLSProxyOptions & {
-  host: string;
-  port: number;
-};
+import type {TLSProxy} from './tls-proxy.js';
 
-export class HTTPProxy extends TLSProxy {
-  readonly httpServer: HTTP.Server;
+export const HTTPProxyOptions = x.object({
+  host: x.union([IPPattern, x.literal('')]).optional(),
+  port: Port.optional(),
+});
+
+export type HTTPProxyOptions = x.TypeOf<typeof HTTPProxyOptions>;
+
+export class HTTPProxy {
+  readonly server: HTTP.Server;
 
   private lastContextId = 0;
 
-  constructor(router: Router, {host, port, ...options}: HTTPProxyOptions) {
-    super(router, options);
-
-    this.httpServer = HTTP.createServer()
+  constructor(
+    readonly tlsProxy: TLSProxy,
+    {host, port}: HTTPProxyOptions,
+  ) {
+    this.server = HTTP.createServer()
       .on('connect', this.onHTTPServerConnect)
       .on('request', this.onHTTPServerRequest)
       .listen(port, host);
@@ -34,7 +38,7 @@ export class HTTPProxy extends TLSProxy {
 
     inSocket.write(`HTTP/1.1 200 OK\r\n\r\n`);
 
-    this.connect(++this.lastContextId, inSocket, host, port);
+    this.tlsProxy.connect(++this.lastContextId, inSocket, host, port);
   };
 
   private onHTTPServerRequest = (): void => {};

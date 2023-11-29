@@ -11,3 +11,4 @@ bld/
 *.key
 *.bin
 test.*
+geolite2.mmdb
