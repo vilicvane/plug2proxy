@@ -14,7 +14,7 @@ import {Logs} from '../../@log.js';
 
 import type {RuleMatch} from './rule-match.js';
 
-const CONTEXT: LogContext = {type: 'geolite2'};
+const CONTEXT: LogContext = {type: 'in:geolite2'};
 
 const MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL =
   'https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb';

@@ -1,13 +1,25 @@
-import {once} from 'events';
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
+import {pipeline} from 'stream/promises';
 
+import ms from 'ms';
 import * as x from 'x-value';
 
+import type {OutTunnelLogContext, OutTunnelStreamLogContext} from '../@log.js';
 import {Logs} from '../@log.js';
 import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
 import {TUNNEL_HEADER_NAME} from '../common.js';
 import {RouteMatchOptions} from '../router.js';
+
+const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
+
+function RECONNECT_DELAY(attempts: number): number {
+  return RECONNECT_DELAYS[Math.min(attempts, RECONNECT_DELAYS.length) - 1];
+}
+
+const CONTEXT: OutTunnelLogContext = {
+  type: 'out:tunnel',
+};
 
 export const TunnelConfig = x.object({
   routeMatchOptions: RouteMatchOptions,
@@ -21,7 +33,7 @@ export const TunnelOptions = x.object({
    */
   authority: x.string,
   rejectUnauthorized: x.boolean.optional(),
-  config: TunnelConfig.optional(),
+  config: TunnelConfig,
 });
 
 export type TunnelOptions = x.TypeOf<typeof TunnelOptions>;
@@ -30,9 +42,13 @@ export class Tunnel {
   readonly authority: string;
   readonly rejectUnauthorized: boolean;
 
-  config: TunnelConfig | undefined;
+  config: TunnelConfig;
+
+  private continuousFailedAttempts = 0;
 
   private client: HTTP2.ClientHttp2Session | undefined;
+
+  private clientConfigured = false;
 
   constructor({authority, rejectUnauthorized = true, config}: TunnelOptions) {
     this.authority = authority;
@@ -50,39 +66,70 @@ export class Tunnel {
   private connect(): void {
     const client = HTTP2.connect(this.authority, {
       rejectUnauthorized: this.rejectUnauthorized,
-    }).on('stream', (stream, headers) => {
-      const data = JSON.parse(
-        headers[TUNNEL_HEADER_NAME] as string,
-      ) as TunnelInOutHeaderData;
+    })
+      .on('connect', () => {
+        Logs.info(CONTEXT, 'tunnel connection established.');
+        this._configure();
+      })
+      .on('stream', (stream, headers) => {
+        const data = JSON.parse(
+          headers[TUNNEL_HEADER_NAME] as string,
+        ) as TunnelInOutHeaderData;
 
-      switch (data.type) {
-        case 'in-out-stream':
-          void this.handleInOutStream(data, stream, client);
-          break;
-      }
-    });
+        switch (data.type) {
+          case 'in-out-stream':
+            void this.handleInOutStream(data, stream, client);
+            break;
+        }
+      })
+      .on('close', () => {
+        Logs.info(CONTEXT, 'tunnel connection closed.');
+        this.scheduleReconnect();
+      })
+      .on('error', error => {
+        Logs.error(CONTEXT, 'tunnel connection error.');
+        Logs.debug(CONTEXT, error);
+      });
 
     this.client = client;
+    this.clientConfigured = false;
+  }
 
-    this._configure();
+  private scheduleReconnect(): void {
+    const delay = RECONNECT_DELAY(this.continuousFailedAttempts++);
+
+    Logs.info(CONTEXT, `reconnect in ${ms(delay)}...`);
+
+    setTimeout(() => this.connect(), delay);
   }
 
   private _configure(): void {
     const {client, config} = this;
 
-    if (!client || !config) {
+    if (!client) {
       return;
     }
 
-    client.request(
-      {
-        [TUNNEL_HEADER_NAME]: JSON.stringify({
-          type: 'tunnel',
-          ...config,
-        } satisfies TunnelOutInHeaderData),
-      },
-      {endStream: true},
-    );
+    client
+      .request(
+        {
+          [TUNNEL_HEADER_NAME]: JSON.stringify({
+            type: 'tunnel',
+            ...config,
+          } satisfies TunnelOutInHeaderData),
+        },
+        {endStream: true},
+      )
+      .on('headers', headers => {
+        if (this.clientConfigured) {
+          return;
+        }
+
+        if (headers[':status'] === 200) {
+          this.clientConfigured = true;
+          this.continuousFailedAttempts = 0;
+        }
+      });
   }
 
   private async handleInOutStream(
@@ -90,13 +137,14 @@ export class Tunnel {
     inOutStream: HTTP2.ClientHttp2Stream,
     client: HTTP2.ClientHttp2Session,
   ): Promise<void> {
-    const outStream = Net.connect(port, host);
+    const context: OutTunnelStreamLogContext = {
+      type: 'out:tunnel-stream',
+      stream: id,
+    };
 
-    await once(outStream, 'connect');
+    Logs.info(context, `received IN-OUT stream for ${host}:${port}.`);
 
-    // inOutStream.on('data', data => console.log('tunnel in-out stream', data));
-
-    inOutStream.pipe(outStream);
+    const proxyStream = Net.connect(port, host);
 
     const outInStream = client.request(
       {
@@ -105,25 +153,37 @@ export class Tunnel {
           id,
         } satisfies TunnelOutInHeaderData),
       },
-      {
-        endStream: false,
-      },
+      {endStream: false},
     );
 
     outInStream.on('response', headers => {
       if (headers[':status'] === 200) {
-        Logs.info(
-          {
-            type: 'tunnel-out-in',
-            stream: id,
-            host,
-            port,
-          },
-          `established OUT-IN stream.`,
-        );
+        Logs.info(context, 'OUT-IN stream established.');
       }
     });
 
-    outStream.pipe(outInStream);
+    try {
+      await Promise.all([
+        pipeline(inOutStream, proxyStream),
+        pipeline(proxyStream, outInStream),
+      ]);
+
+      Logs.info(context, 'OUT-IN stream closed.');
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'ERR_STREAM_PREMATURE_CLOSE'
+      ) {
+        Logs.info(context, 'OUT-IN stream closed.');
+      } else {
+        Logs.warn(context, 'OUT-IN stream error.');
+        Logs.debug(context, error);
+      }
+
+      inOutStream.destroy();
+      outInStream.destroy();
+      proxyStream.destroy();
+    }
   }
 }

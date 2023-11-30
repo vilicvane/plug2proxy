@@ -1,3 +1,4 @@
+import assert from 'assert';
 import {once} from 'events';
 import * as Net from 'net';
 import type {Duplex} from 'stream';
@@ -10,9 +11,12 @@ import Chalk from 'chalk';
 import {readTlsClientHello} from 'read-tls-client-hello';
 import type {Nominal} from 'x-value';
 
-import type {ConnectLogContext, LogContext} from '../@log.js';
+import type {InConnectLogContext, LogContext} from '../@log.js';
 import {Logs} from '../@log.js';
-import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
+import {
+  handleErrorWhile,
+  readHTTPRequestStreamHeaders,
+} from '../@utils/index.js';
 import type {ConnectionId, TunnelId} from '../common.js';
 
 import type {Router} from './router/index.js';
@@ -46,8 +50,8 @@ export class TLSProxy {
     host: string,
     port: number,
   ): Promise<void> {
-    const context: ConnectLogContext = {
-      type: 'connect',
+    const context: InConnectLogContext = {
+      type: 'in:connect',
       id,
       host,
       port,
@@ -72,7 +76,10 @@ export class TLSProxy {
       inSocket.on('data', onHelloData);
 
       try {
-        ({alpnProtocols, serverName} = await readTlsClientHello(through));
+        ({alpnProtocols, serverName} = await handleErrorWhile(
+          readTlsClientHello(through),
+          [inSocket],
+        ));
 
         if (alpnProtocols) {
           Logs.debug(context, 'alpn protocols (IN):', alpnProtocols.join(', '));
@@ -133,7 +140,7 @@ export class TLSProxy {
   }
 
   private async performOptimisticConnect(
-    context: ConnectLogContext,
+    context: InConnectLogContext,
     host: string,
     port: number,
     inSocket: Net.Socket,
@@ -145,8 +152,6 @@ export class TLSProxy {
     const optimisticRoute = await this.router.route(host);
 
     let outTLSSocket: TLS.TLSSocket;
-
-    console.log({serverName});
 
     try {
       outTLSSocket = await this.secureConnectOut(
@@ -234,7 +239,7 @@ export class TLSProxy {
   }
 
   private async performHTTPConnect(
-    context: ConnectLogContext,
+    context: InConnectLogContext,
     host: string,
     port: number,
     inSocket: Net.Socket,
@@ -271,8 +276,6 @@ export class TLSProxy {
         : await this.router.route(host);
 
     let outTLSSocket: TLS.TLSSocket;
-
-    console.log({serverName});
 
     try {
       outTLSSocket = await this.secureConnectOut(
@@ -327,7 +330,7 @@ export class TLSProxy {
   }
 
   private async secureConnectOut(
-    context: ConnectLogContext,
+    context: InConnectLogContext,
     host: string,
     port: number,
     tunnelId: TunnelId | undefined,
@@ -414,14 +417,9 @@ export class TLSProxy {
     }
   }
 
-  private p2pCertificateMap = new Map<CertificateId, P2PCertificate>();
-
-  private certificateStateMap = new Map<
-    CertificateStateKey,
-    {
-      id: CertificateId;
-      trusted: boolean;
-    }
+  private p2pCertificateStateMap = new Map<
+    P2PCertificateKey,
+    P2PCertificateState
   >();
 
   private getP2PCertificate(
@@ -430,23 +428,14 @@ export class TLSProxy {
     serverName: string | undefined,
     tlsSocket: TLS.TLSSocket,
   ): P2PCertificate {
-    const {p2pCertificateMap, certificateStateMap} = this;
+    const {p2pCertificateStateMap} = this;
 
-    const id = CERTIFICATE_ID(tlsSocket.getPeerCertificate());
+    const p2pCertificateState = p2pCertificateStateMap.get(
+      P2P_CERTIFICATE_KEY(host, port, serverName),
+    );
 
-    const p2pCert = p2pCertificateMap.get(id);
-
-    if (p2pCert) {
-      const stateKey = CERTIFICATE_STATE_KEY(host, port, serverName);
-
-      if (!certificateStateMap.has(stateKey)) {
-        certificateStateMap.set(stateKey, {
-          id,
-          trusted: isTLSSocketTrusted(tlsSocket),
-        });
-      }
-
-      return p2pCert;
+    if (p2pCertificateState) {
+      return p2pCertificateState.certificate;
     }
 
     return this.createP2PCertificate(host, port, serverName, tlsSocket);
@@ -460,8 +449,6 @@ export class TLSProxy {
   ): P2PCertificate {
     const certificate = tlsSocket.getPeerCertificate();
     const trusted = isTLSSocketTrusted(tlsSocket);
-
-    console.log('trusted:', trusted);
 
     const {caCert, caKey} = this;
 
@@ -488,21 +475,15 @@ export class TLSProxy {
       cert.sign(privateKey, Forge.md.sha512.create());
     }
 
-    const {p2pCertificateMap, certificateStateMap} = this;
-
-    const id = CERTIFICATE_ID(certificate);
+    const {p2pCertificateStateMap} = this;
 
     const p2pCert = {
       cert: Forge.pki.certificateToPem(cert),
       key: Forge.pki.privateKeyToPem(privateKey),
     };
 
-    p2pCertificateMap.set(id, p2pCert);
-
-    console.log('cert state', CERTIFICATE_STATE_KEY(host, port, serverName));
-
-    certificateStateMap.set(CERTIFICATE_STATE_KEY(host, port, serverName), {
-      id,
+    p2pCertificateStateMap.set(P2P_CERTIFICATE_KEY(host, port, serverName), {
+      certificate: p2pCert,
       trusted,
     });
 
@@ -514,35 +495,14 @@ export class TLSProxy {
     host: string,
     port: number,
     serverName: string | undefined,
-  ): {
-    certificate: P2PCertificate;
-    trusted: boolean;
-  } {
-    console.log(
-      'require cert state',
-      CERTIFICATE_STATE_KEY(host, port, serverName),
+  ): P2PCertificateState {
+    const state = this.p2pCertificateStateMap.get(
+      P2P_CERTIFICATE_KEY(host, port, serverName),
     );
 
-    const state = this.certificateStateMap.get(
-      CERTIFICATE_STATE_KEY(host, port, serverName),
-    );
+    assert(state);
 
-    if (!state) {
-      Logs.debug(context, 'no certificate state found for known remote.');
-
-      throw new Error(
-        'Not expecting requiring P2P certificate for unknown remote.',
-      );
-    }
-
-    const {trusted, id} = state;
-
-    const certificate = this.p2pCertificateMap.get(id)!;
-
-    return {
-      certificate,
-      trusted,
-    };
+    return state;
   }
 
   private updateALPNProtocol(
@@ -558,8 +518,6 @@ export class TLSProxy {
       serverName,
       alpnProtocols,
     );
-
-    console.log({alpnProtocolKey, alpnProtocol});
 
     const {knownALPNProtocolMap} = this;
 
@@ -580,30 +538,25 @@ type P2PCertificate = {
   key: string;
 };
 
-type CertificateStateKey = Nominal<'certificate state key', string>;
+type P2PCertificateState = {
+  certificate: P2PCertificate;
+  trusted: boolean;
+};
 
-function CERTIFICATE_STATE_KEY(
+type P2PCertificateKey = Nominal<'p2p certificate key', string>;
+
+function P2P_CERTIFICATE_KEY(
   host: string,
   port: number,
   serverName: string | undefined,
-): CertificateStateKey {
+): P2PCertificateKey {
   let key = `${host}:${port}`;
 
   if (serverName !== undefined) {
     key += ` ${serverName}`;
   }
 
-  return key as CertificateStateKey;
-}
-
-type CertificateId = Nominal<'certificate id', string>;
-
-function CERTIFICATE_ID(certificate: TLS.PeerCertificate): CertificateId;
-function CERTIFICATE_ID({
-  issuer: {CN},
-  serialNumber,
-}: TLS.PeerCertificate): string {
-  return `${CN} ${serialNumber}`;
+  return key as P2PCertificateKey;
 }
 
 type ALPNProtocolKey = Nominal<'alpn protocol key', string>;
@@ -613,13 +566,7 @@ function ALPN_PROTOCOL_KEY(
   port: number,
   serverName: string | undefined,
   alpnProtocols: string[] | undefined,
-): ALPNProtocolKey;
-function ALPN_PROTOCOL_KEY(
-  host: string,
-  port: number,
-  serverName: string | undefined,
-  alpnProtocols: string[] | undefined,
-): string {
+): ALPNProtocolKey {
   const hostname = `${host}:${port}`;
 
   let key = hostname;
@@ -632,15 +579,13 @@ function ALPN_PROTOCOL_KEY(
     key += ` ${alpnProtocols.join(',')}`;
   }
 
-  return key;
+  return key as ALPNProtocolKey;
 }
 
 function isTLSSocketTrusted({
   authorized,
   authorizationError,
 }: TLS.TLSSocket): boolean {
-  console.log({authorized, authorizationError});
-
   if (authorized) {
     return true;
   }
