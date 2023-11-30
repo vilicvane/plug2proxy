@@ -68,11 +68,11 @@ dependencies:
 
 devDependencies:
   '@mufan/eslint-plugin':
-    specifier: ^0.2.17
-    version: 0.2.17(eslint@8.54.0)(typescript@5.3.2)
+    specifier: ^0.2.18
+    version: 0.2.18(eslint@8.54.0)(typescript@5.3.2)
   '@types/jest':
-    specifier: ^29.5.8
-    version: 29.5.8
+    specifier: ^29.5.10
+    version: 29.5.10
   '@types/node':
     specifier: ^20.9.3
     version: 20.9.3
@@ -776,8 +776,8 @@ packages:
       '@jridgewell/sourcemap-codec': 1.4.15
     dev: true
 
-  /@mufan/eslint-plugin@0.2.17(eslint@8.54.0)(typescript@5.3.2):
-    resolution: {integrity: sha512-06jJ6oIucToDXxAKu3mAWuL9RvSz6z7JFB/ClYN9HJGgxJLS5Et9FQ9KOe7biOrJR7xH301keOg+7avAb/QqNw==}
+  /@mufan/eslint-plugin@0.2.18(eslint@8.54.0)(typescript@5.3.2):
+    resolution: {integrity: sha512-M/kGXb7I51ViQ1l7A1lYD2/Qv0Zf9mP040U633EN+N9iti1288+0uT7mFxvsK76YJ3Mks9KTi6PXPOPRK+ymKg==}
     peerDependencies:
       eslint: '8'
       typescript: '5'
@@ -924,8 +924,8 @@ packages:
       '@types/istanbul-lib-report': 3.0.3
     dev: true
 
-  /@types/jest@29.5.8:
-    resolution: {integrity: sha512-fXEFTxMV2Co8ZF5aYFJv+YeA08RTYJfhtN5c9JSv/mFEMe+xxjufCb+PHL+bJcMs/ebPUsBu+UNTEz+ydXrR6g==}
+  /@types/jest@29.5.10:
+    resolution: {integrity: sha512-tE4yxKEphEyxj9s4inideLHktW/x6DwesIwWZ9NN1FKf9zbJYsnhBoA9vrHA/IuIOKwPa5PcFBNV4lpMIOEzyQ==}
     dependencies:
       expect: 29.7.0
       pretty-format: 29.7.0
