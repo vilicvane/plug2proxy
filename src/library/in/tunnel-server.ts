@@ -1,24 +1,24 @@
 import assert from 'assert';
 import * as HTTP2 from 'http2';
-import type * as Net from 'net';
 import type {Duplex} from 'stream';
 
 import bytes from 'bytes';
+import Chalk from 'chalk';
 import type {Duplexify} from 'duplexify';
 import duplexify from 'duplexify';
 import * as x from 'x-value';
 import * as xn from 'x-value/node';
 
-import type {LogContext} from '../@log.js';
+import type {LogContext, TunnelConnectLogContext} from '../@log.js';
 import {Logs} from '../@log.js';
 import type {
+  ConnectionId,
   TunnelId,
   TunnelInOutHeaderData,
   TunnelOutInHeaderData,
   TunnelStreamId,
 } from '../common.js';
 import {TUNNEL_HEADER_NAME} from '../common.js';
-import type {RouteMatchOptions} from '../router.js';
 import {IPPattern, Port} from '../x.js';
 
 import type {Router} from './router/index.js';
@@ -88,20 +88,32 @@ export class TunnelServer {
   }
 
   async connect(
-    context: LogContext,
+    connectionId: ConnectionId,
     tunnelId: TunnelId,
     host: string,
     port: number,
   ): Promise<Duplex> {
     const tunnel = this.tunnelMap.get(tunnelId);
 
-    if (!tunnel) {
-      throw new Error(`Tunnel ${tunnelId} not found.`);
-    }
+    assert(tunnel);
 
     const {tunnelStream} = tunnel;
 
     const id = ++tunnel.lastStreamIdNumber as TunnelStreamId;
+
+    const context: TunnelConnectLogContext = {
+      type: 'tunnel-connect',
+      connection: connectionId,
+      tunnel: tunnelId,
+      stream: id,
+    };
+
+    Logs.info(
+      context,
+      `${Chalk.cyan('tunnel connect')} ${host}:${port} via ${Chalk.yellow(
+        tunnel.remoteAddress,
+      )}...`,
+    );
 
     return new Promise((resolve, reject) => {
       tunnelStream.pushStream(
@@ -119,9 +131,7 @@ export class TunnelServer {
             return;
           }
 
-          Logs.debug(context, `in-out-stream ${id}.`);
-
-          // inOutStream.respond({':status': 200});
+          Logs.debug(context, `established IN-OUT stream.`);
 
           const stream = duplexify(inOutStream);
 
@@ -155,6 +165,7 @@ export class TunnelServer {
 
       this.tunnelMap.set(id, {
         id,
+        remoteAddress: session.socket!.remoteAddress!,
         tunnelStream: stream,
         connectionMap: new Map(),
         lastStreamIdNumber: 0,
@@ -196,9 +207,7 @@ export class TunnelServer {
 
     assert(connection);
 
-    Logs.debug(connection.context, `out-in-stream ${id}.`);
-
-    stream.on('data', console.log);
+    Logs.debug(connection.context, `established OUT-IN stream.`);
 
     connection.stream.setReadable(stream);
 
@@ -219,6 +228,7 @@ export type TunnelConnection = {
 
 export type Tunnel = {
   id: TunnelId;
+  remoteAddress: string;
   tunnelStream: HTTP2.ServerHttp2Stream;
   connectionMap: Map<TunnelStreamId, TunnelConnection>;
   lastStreamIdNumber: number;

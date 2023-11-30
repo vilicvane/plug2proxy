@@ -4,6 +4,7 @@ import * as Net from 'net';
 
 import * as x from 'x-value';
 
+import {Logs} from '../@log.js';
 import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
 import {TUNNEL_HEADER_NAME} from '../common.js';
 import {RouteMatchOptions} from '../router.js';
@@ -108,6 +109,20 @@ export class Tunnel {
         endStream: false,
       },
     );
+
+    outInStream.on('response', headers => {
+      if (headers[':status'] === 200) {
+        Logs.info(
+          {
+            type: 'tunnel-out-in',
+            stream: id,
+            host,
+            port,
+          },
+          `established OUT-IN stream.`,
+        );
+      }
+    });
 
     outStream.pipe(outInStream);
   }

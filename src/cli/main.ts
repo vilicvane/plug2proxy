@@ -36,7 +36,6 @@ const tunnel = new Out.Tunnel({
         {
           type: 'domain',
           match: 'baidu.com',
-          negate: true,
         },
         {
           type: 'geoip',
