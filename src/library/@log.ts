@@ -3,6 +3,7 @@ import type {Debugger} from 'debug';
 import Debug from 'debug';
 
 import type {ConnectionId, TunnelId, TunnelStreamId} from './common.js';
+import type {Out} from './out/index.js';
 
 export type InConnectLogContext = {
   type: 'in:connect';
@@ -25,6 +26,7 @@ export type InTunnelLogContext = {
 
 export type OutTunnelLogContext = {
   type: 'out:tunnel';
+  id: Out.TunnelId;
 };
 
 export type OutTunnelStreamLogContext = {
@@ -92,7 +94,7 @@ function createLogger<TLevel extends LogLevel>(
         break;
       case 'in:tunnel-connect':
         args = [
-          `[${CONNECTION(context.connection)}${TUNNEL(context.tunnel)}${
+          `[${CONNECTION(context.connection)}${IN_TUNNEL(context.tunnel)}${
             context.stream !== undefined
               ? `${TUNNEL_STREAM(context.stream)}`
               : ''
@@ -101,7 +103,10 @@ function createLogger<TLevel extends LogLevel>(
         ];
         break;
       case 'in:tunnel':
-        args = [`[${TUNNEL(context.id)}]`, ...args];
+        args = [`[${IN_TUNNEL(context.id)}]`, ...args];
+        break;
+      case 'out:tunnel':
+        args = [`[${OUT_TUNNEL(context.id)}]`, ...args];
         break;
       case 'out:tunnel-stream':
         args = [`[${TUNNEL_STREAM(context.stream)}]`, ...args];
@@ -119,8 +124,12 @@ function CONNECTION(id: ConnectionId): string {
   return `#${id}`;
 }
 
-function TUNNEL(id: TunnelId): string {
+function IN_TUNNEL(id: TunnelId): string {
   return `>${id}`;
+}
+
+function OUT_TUNNEL(id: Out.TunnelId): string {
+  return `<${id}`;
 }
 
 function TUNNEL_STREAM(id: TunnelStreamId): string {

@@ -2,7 +2,6 @@ import assert from 'assert';
 import * as HTTP2 from 'http2';
 import type {Duplex} from 'stream';
 
-import bytes from 'bytes';
 import Chalk from 'chalk';
 import type {Duplexify} from 'duplexify';
 import duplexify from 'duplexify';
@@ -15,6 +14,7 @@ import type {
   LogContext,
 } from '../@log.js';
 import {Logs} from '../@log.js';
+import {setupSessionPing} from '../@utils/index.js';
 import type {
   ConnectionId,
   TunnelId,
@@ -22,7 +22,11 @@ import type {
   TunnelOutInHeaderData,
   TunnelStreamId,
 } from '../common.js';
-import {TUNNEL_HEADER_NAME} from '../common.js';
+import {
+  CONNECTION_WINDOW_SIZE,
+  STREAM_WINDOW_SIZE,
+  TUNNEL_HEADER_NAME,
+} from '../common.js';
 import {IPPattern, Port} from '../x.js';
 
 import type {Router} from './router/index.js';
@@ -31,10 +35,10 @@ const CONTEXT: LogContext = {
   type: 'in:tunnel-server',
 };
 
+const MAX_OUTSTANDING_PINGS = 5;
+
 const HOST_DEFAULT = '';
 const PORT_DEFAULT = Port.nominalize(8443);
-
-const WINDOW_SIZE = bytes('32MB');
 
 export const TunnelServerOptions = x.object({
   host: x.union([IPPattern, x.literal('')]).optional(),
@@ -64,13 +68,16 @@ export class TunnelServer {
   ) {
     this.server = HTTP2.createSecureServer({
       settings: {
-        initialWindowSize: WINDOW_SIZE,
+        initialWindowSize: STREAM_WINDOW_SIZE,
       },
       cert,
       key,
+      maxOutstandingPings: MAX_OUTSTANDING_PINGS,
     })
       .on('session', session => {
-        session.setLocalWindowSize(WINDOW_SIZE); // necessary?
+        session.setLocalWindowSize(CONNECTION_WINDOW_SIZE);
+
+        setupSessionPing(session);
       })
       .on('stream', (stream, headers) => {
         const data = JSON.parse(
@@ -135,7 +142,7 @@ export class TunnelServer {
             return;
           }
 
-          Logs.debug(context, `established IN-OUT stream.`);
+          Logs.debug(context, 'established IN-OUT stream.');
 
           const stream = duplexify(inOutStream);
 
@@ -145,12 +152,12 @@ export class TunnelServer {
           });
 
           stream.on('error', error => {
-            Logs.warn(context, `error IN-OUT stream.`);
+            Logs.warn(context, 'error IN-OUT stream.');
             Logs.debug(context, error);
           });
 
           stream.on('close', () => {
-            Logs.debug(context, `closed IN-OUT stream.`);
+            Logs.debug(context, 'closed IN-OUT stream.');
 
             tunnel.connectionMap.delete(id);
           });
@@ -213,7 +220,7 @@ export class TunnelServer {
       stream.respond({':status': 200});
 
       Logs.info(context, 'tunnel established.');
-      Logs.debug(context, `route match options:`, routeMatchOptions);
+      Logs.debug(context, 'route match options:', routeMatchOptions);
     } else {
       const context: InTunnelLogContext = {
         type: 'in:tunnel',
@@ -229,7 +236,7 @@ export class TunnelServer {
       stream.respond({':status': 200}, {endStream: true});
 
       Logs.info(context, 'tunnel updated.');
-      Logs.debug(context, `route match options:`, routeMatchOptions);
+      Logs.debug(context, 'route match options:', routeMatchOptions);
     }
   }
 
@@ -247,7 +254,7 @@ export class TunnelServer {
 
     assert(connection);
 
-    Logs.debug(connection.context, `established OUT-IN stream.`);
+    Logs.debug(connection.context, 'established OUT-IN stream.');
 
     connection.stream.setReadable(stream);
 

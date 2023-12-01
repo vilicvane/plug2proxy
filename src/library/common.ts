@@ -1,6 +1,10 @@
+import bytes from 'bytes';
 import type * as x from 'x-value';
 
 import type {RouteMatchOptions} from './router.js';
+
+export const CONNECTION_WINDOW_SIZE = bytes('128MB');
+export const STREAM_WINDOW_SIZE = bytes('32MB');
 
 export type ConnectionId = x.Nominal<'connection id', number>;
 

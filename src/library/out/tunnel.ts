@@ -7,8 +7,13 @@ import * as x from 'x-value';
 
 import type {OutTunnelLogContext, OutTunnelStreamLogContext} from '../@log.js';
 import {Logs} from '../@log.js';
+import {setupSessionPing} from '../@utils/index.js';
 import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
-import {TUNNEL_HEADER_NAME} from '../common.js';
+import {
+  CONNECTION_WINDOW_SIZE,
+  STREAM_WINDOW_SIZE,
+  TUNNEL_HEADER_NAME,
+} from '../common.js';
 import {RouteMatchOptions} from '../router.js';
 
 const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
@@ -16,10 +21,6 @@ const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
 function RECONNECT_DELAY(attempts: number): number {
   return RECONNECT_DELAYS[Math.min(attempts, RECONNECT_DELAYS.length) - 1];
 }
-
-const CONTEXT: OutTunnelLogContext = {
-  type: 'out:tunnel',
-};
 
 export const TunnelConfig = x.object({
   routeMatchOptions: RouteMatchOptions,
@@ -38,8 +39,13 @@ export const TunnelOptions = x.object({
 
 export type TunnelOptions = x.TypeOf<typeof TunnelOptions>;
 
+export type TunnelId = x.Nominal<'tunnel id', number>;
+
 export class Tunnel {
+  readonly context: OutTunnelLogContext;
+
   readonly authority: string;
+
   readonly rejectUnauthorized: boolean;
 
   config: TunnelConfig;
@@ -50,7 +56,15 @@ export class Tunnel {
 
   private clientConfigured = false;
 
-  constructor({authority, rejectUnauthorized = true, config}: TunnelOptions) {
+  constructor(
+    readonly id: TunnelId,
+    {authority, rejectUnauthorized = true, config}: TunnelOptions,
+  ) {
+    this.context = {
+      type: 'out:tunnel',
+      id,
+    };
+
     this.authority = authority;
     this.rejectUnauthorized = rejectUnauthorized;
     this.config = config;
@@ -64,11 +78,21 @@ export class Tunnel {
   }
 
   private connect(): void {
+    const {context} = this;
+
     const client = HTTP2.connect(this.authority, {
       rejectUnauthorized: this.rejectUnauthorized,
+      settings: {
+        initialWindowSize: STREAM_WINDOW_SIZE,
+      },
     })
-      .on('connect', () => {
-        Logs.info(CONTEXT, 'tunnel connection established.');
+      .on('connect', session => {
+        Logs.info(context, 'tunnel established.');
+
+        session.setLocalWindowSize(CONNECTION_WINDOW_SIZE);
+
+        setupSessionPing(session);
+
         this._configure();
       })
       .on('stream', (stream, headers) => {
@@ -83,12 +107,12 @@ export class Tunnel {
         }
       })
       .on('close', () => {
-        Logs.info(CONTEXT, 'tunnel connection closed.');
+        Logs.info(context, 'tunnel closed.');
         this.scheduleReconnect();
       })
       .on('error', error => {
-        Logs.error(CONTEXT, 'tunnel connection error.');
-        Logs.debug(CONTEXT, error);
+        Logs.error(context, 'tunnel error.');
+        Logs.debug(context, error);
       });
 
     this.client = client;
@@ -96,9 +120,9 @@ export class Tunnel {
   }
 
   private scheduleReconnect(): void {
-    const delay = RECONNECT_DELAY(this.continuousFailedAttempts++);
+    const delay = RECONNECT_DELAY(++this.continuousFailedAttempts);
 
-    Logs.info(CONTEXT, `reconnect in ${ms(delay)}...`);
+    Logs.info(this.context, `reconnect in ${ms(delay)}...`);
 
     setTimeout(() => this.connect(), delay);
   }
@@ -129,6 +153,9 @@ export class Tunnel {
           this.clientConfigured = true;
           this.continuousFailedAttempts = 0;
         }
+      })
+      .on('error', error => {
+        Logs.debug(this.context, error);
       });
   }
 

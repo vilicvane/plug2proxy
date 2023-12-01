@@ -28,7 +28,7 @@ if (process.argv.includes('--in')) {
     }),
   );
 } else if (process.argv.includes('--out')) {
-  const tunnel = new Out.Tunnel({
+  const tunnel = new Out.Tunnel(1 as Out.TunnelId, {
     authority: 'https://172.19.32.1:8443',
     rejectUnauthorized: false,
     config: {
