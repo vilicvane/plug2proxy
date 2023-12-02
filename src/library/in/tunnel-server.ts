@@ -27,7 +27,7 @@ import {
   STREAM_WINDOW_SIZE,
   TUNNEL_HEADER_NAME,
 } from '../common.js';
-import {IPPattern, Port} from '../x.js';
+import {ListeningHost, ListeningPort} from '../x.js';
 
 import type {Router} from './router/index.js';
 
@@ -38,11 +38,11 @@ const CONTEXT: LogContext = {
 const MAX_OUTSTANDING_PINGS = 5;
 
 const HOST_DEFAULT = '';
-const PORT_DEFAULT = Port.nominalize(8443);
+const PORT_DEFAULT = ListeningPort.nominalize(8443);
 
 export const TunnelServerOptions = x.object({
-  host: x.union([IPPattern, x.literal('')]).optional(),
-  port: Port.optional(),
+  host: ListeningHost.optional(),
+  port: ListeningPort.optional(),
   cert: x.union([x.string, xn.Buffer]).optional(),
   key: x.union([x.string, xn.Buffer]).optional(),
   password: x.string.optional(),

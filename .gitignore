@@ -12,3 +12,4 @@ bld/
 *.bin
 test.*
 geolite2.mmdb
+p2p.*.js

@@ -1,8 +1,6 @@
 import IPMatching from 'ip-matching';
 import * as x from 'x-value';
 
-export const Port = x.integerRange<'port'>({min: 1, max: 65535});
-
 export const IPMatchPattern = x.string.refined<'ip match pattern'>(value => {
   IPMatching.getMatch(value);
   return value;
@@ -17,3 +15,7 @@ export const IPPattern = x.string.refined<'ip pattern'>(value => {
 
   return value;
 });
+
+export const ListeningHost = x.union([IPPattern, x.literal('')]);
+
+export const ListeningPort = x.integerRange<'port'>({min: 1, max: 65535});

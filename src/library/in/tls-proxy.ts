@@ -590,9 +590,12 @@ function isTLSSocketTrusted({
     return true;
   }
 
-  switch (authorizationError.name) {
+  switch (authorizationError as unknown as string | null) {
+    // Those error are supposed to be handled by the real clients (e.g.,
+    // browsers).
     case 'CERT_NOT_YET_VALID':
     case 'CERT_HAS_EXPIRED':
+    case 'ERR_TLS_CERT_ALTNAME_INVALID':
       return true;
     default:
       return false;

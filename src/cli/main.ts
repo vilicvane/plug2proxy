@@ -1,6 +1,37 @@
 import {readFile} from 'fs/promises';
 
+import {cosmiconfig} from 'cosmiconfig';
+import * as x from 'x-value';
+
 import {In, Out} from '../library/index.js';
+
+import {setupIn} from './@in.js';
+import {setupOut} from './@out.js';
+
+// const configExplorer = cosmiconfig('p2p');
+
+// const configPath = process.argv[2] as string | undefined;
+
+// const result =
+//   configPath === undefined
+//     ? await configExplorer.search()
+//     : await configExplorer.load(configPath);
+
+// if (!result) {
+//   console.error('config file not found.');
+//   process.exit(1);
+// }
+
+// const config = x.union([In.Config, Out.Config]).satisfies(result?.config);
+
+// switch (config.mode) {
+//   case 'in':
+//     setupIn(config);
+//     break;
+//   case 'out':
+//     setupOut(config);
+//     break;
+// }
 
 if (process.argv.includes('--in')) {
   const geolite2 = new In.GeoLite2({});

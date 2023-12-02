@@ -6,7 +6,8 @@ Just another awesome magic.
 export default {
   mode: 'in',
   tunnel: {
-    authority: 'https://example.com',
+    host: 'any',
+    port: 8443,
     password: '',
   },
   proxy: {
@@ -34,8 +35,7 @@ export default {
     ],
   },
   tunnel: {
-    host: 'any',
-    port: 8443,
+    authority: 'https://example.com',
     password: '',
   },
 };
