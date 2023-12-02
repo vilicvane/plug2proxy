@@ -9,12 +9,12 @@ import ms from 'ms';
 import {request} from 'undici';
 import * as x from 'x-value';
 
-import type {LogContext} from '../../@log.js';
+import type {InGeoLite2LogContext} from '../../@log.js';
 import {Logs} from '../../@log.js';
 
 import type {RuleMatch} from './rule-match.js';
 
-const CONTEXT: LogContext = {type: 'in:geolite2'};
+const CONTEXT: InGeoLite2LogContext = {type: 'in:geolite2'};
 
 const MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL =
   'https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb';

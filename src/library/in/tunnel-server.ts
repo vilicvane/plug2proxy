@@ -11,7 +11,7 @@ import * as xn from 'x-value/node';
 import type {
   InTunnelConnectLogContext,
   InTunnelLogContext,
-  LogContext,
+  InTunnelServerLogContext,
 } from '../@log.js';
 import {Logs} from '../@log.js';
 import {setupSessionPing} from '../@utils/index.js';
@@ -31,7 +31,7 @@ import {ListeningHost, ListeningPort} from '../x.js';
 
 import type {Router} from './router/index.js';
 
-const CONTEXT: LogContext = {
+const CONTEXT: InTunnelServerLogContext = {
   type: 'in:tunnel-server',
 };
 
@@ -269,7 +269,7 @@ export class TunnelServer {
 }
 
 export type TunnelConnection = {
-  context: LogContext;
+  context: InTunnelConnectLogContext;
   stream: Duplexify;
 };
 

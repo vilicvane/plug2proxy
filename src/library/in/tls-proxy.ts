@@ -11,7 +11,7 @@ import Chalk from 'chalk';
 import {readTlsClientHello} from 'read-tls-client-hello';
 import type {Nominal} from 'x-value';
 
-import type {InConnectLogContext, LogContext} from '../@log.js';
+import type {InConnectLogContext} from '../@log.js';
 import {Logs} from '../@log.js';
 import {
   handleErrorWhile,
@@ -57,7 +57,7 @@ export class TLSProxy {
       port,
     };
 
-    Logs.info(context, `${Chalk.cyan('connect')} ${host}:${port}...`);
+    Logs.info(context, `${Chalk.cyan('connect')} ${host}:${port}`);
 
     let alpnProtocols: string[] | undefined;
     let serverName: string | undefined;
@@ -149,7 +149,7 @@ export class TLSProxy {
   ): Promise<void> {
     Logs.debug(context, 'performing optimistic connect...');
 
-    const optimisticRoute = await this.router.route(host);
+    const optimisticRoute = await this.router.routeHost(host);
 
     let outTLSSocket: TLS.TLSSocket;
 
@@ -207,7 +207,7 @@ export class TLSProxy {
     }
 
     if (referer !== undefined) {
-      const refererRoute = await this.router.routeReferer(referer);
+      const refererRoute = await this.router.routeURL(referer);
 
       if (refererRoute && optimisticRoute !== refererRoute) {
         Logs.info(
@@ -272,8 +272,8 @@ export class TLSProxy {
 
     const route =
       referer !== undefined
-        ? await this.router.routeReferer(referer)
-        : await this.router.route(host);
+        ? await this.router.routeURL(referer)
+        : await this.router.routeHost(host);
 
     let outTLSSocket: TLS.TLSSocket;
 
@@ -366,7 +366,7 @@ export class TLSProxy {
   }
 
   private async secureConnectIn(
-    context: LogContext,
+    context: InConnectLogContext,
     socket: Net.Socket,
     {cert, key}: P2PCertificate,
     alpnProtocol: string | false,
@@ -397,7 +397,7 @@ export class TLSProxy {
   }
 
   private async connectInOut(
-    context: LogContext,
+    context: InConnectLogContext,
     inTLSSocket: TLS.TLSSocket,
     outTLSSocket: TLS.TLSSocket,
   ): Promise<void> {
@@ -491,7 +491,7 @@ export class TLSProxy {
   }
 
   private requireP2PCertificateForKnownRemote(
-    context: LogContext,
+    context: InConnectLogContext,
     host: string,
     port: number,
     serverName: string | undefined,

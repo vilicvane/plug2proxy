@@ -1,4 +1,3 @@
-import Chalk from 'chalk';
 import type {Debugger} from 'debug';
 import Debug from 'debug';
 
@@ -10,6 +9,12 @@ export type InConnectLogContext = {
   id: ConnectionId;
   host: string;
   port: number;
+};
+
+export type InRequestLogContext = {
+  type: 'in:request';
+  id: ConnectionId;
+  url: string;
 };
 
 export type InTunnelConnectLogContext = {
@@ -24,6 +29,18 @@ export type InTunnelLogContext = {
   id: TunnelId;
 };
 
+export type InTunnelServerLogContext = {
+  type: 'in:tunnel-server';
+};
+
+export type InRouterLogContext = {
+  type: 'in:router';
+};
+
+export type InGeoLite2LogContext = {
+  type: 'in:geolite2';
+};
+
 export type OutTunnelLogContext = {
   type: 'out:tunnel';
   id: Out.TunnelId;
@@ -34,21 +51,16 @@ export type OutTunnelStreamLogContext = {
   stream: TunnelStreamId;
 };
 
-export type LogContext =
+type LogContext =
   | InConnectLogContext
+  | InRequestLogContext
   | InTunnelConnectLogContext
   | InTunnelLogContext
+  | InTunnelServerLogContext
+  | InRouterLogContext
+  | InGeoLite2LogContext
   | OutTunnelLogContext
-  | OutTunnelStreamLogContext
-  | {
-      type: 'in:tunnel-server';
-    }
-  | {
-      type: 'in:router';
-    }
-  | {
-      type: 'in:geolite2';
-    };
+  | OutTunnelStreamLogContext;
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 

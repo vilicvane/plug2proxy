@@ -6,6 +6,7 @@ import * as x from 'x-value';
 import type {ConnectionId} from '../common.js';
 import {ListeningHost, ListeningPort} from '../x.js';
 
+import type {RequestProxy} from './request-proxy.js';
 import type {TLSProxy} from './tls-proxy.js';
 import type {TunnelServer} from './tunnel-server.js';
 
@@ -24,6 +25,7 @@ export class HTTPProxy {
   constructor(
     readonly tunnelServer: TunnelServer,
     readonly tlsProxy: TLSProxy,
+    readonly netProxy: RequestProxy,
     {host, port}: HTTPProxyOptions,
   ) {
     this.server = HTTP.createServer()
@@ -34,18 +36,26 @@ export class HTTPProxy {
 
   private onHTTPServerConnect = (
     request: HTTP.IncomingMessage,
-    inSocket: Net.Socket,
+    socket: Net.Socket,
   ): void => {
     const [host, portString] = request.url!.split(':');
     const port = parseInt(portString) || 443;
 
-    inSocket.write('HTTP/1.1 200 OK\r\n\r\n');
+    socket.write('HTTP/1.1 200 OK\r\n\r\n');
 
-    void this.tlsProxy.connect(this.getNextContextId(), inSocket, host, port);
+    void this.tlsProxy.connect(this.getNextContextId(), socket, host, port);
   };
 
-  private onHTTPServerRequest = (request: HTTP.IncomingMessage): void => {
-    console.log(request.url);
+  private onHTTPServerRequest = (
+    request: HTTP.IncomingMessage,
+    response: HTTP.ServerResponse,
+  ): void => {
+    void this.netProxy.request(
+      this.getNextContextId(),
+      request,
+      response,
+      request.url!,
+    );
   };
 
   private getNextContextId(): ConnectionId {

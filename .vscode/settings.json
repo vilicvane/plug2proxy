@@ -29,6 +29,7 @@
     "maxmind",
     "mmdb",
     "nominalize",
+    "proxying",
     "SPDY"
   ]
 }

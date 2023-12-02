@@ -50,9 +50,12 @@ if (process.argv.includes('--in')) {
     },
   });
 
+  const netProxy = new In.RequestProxy(tunnelServer, router);
+
   const proxy = new In.HTTPProxy(
     tunnelServer,
     tlsProxy,
+    netProxy,
     In.HTTPProxyOptions.nominalize({
       host: '',
       port: 8888,

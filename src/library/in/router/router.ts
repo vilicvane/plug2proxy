@@ -2,6 +2,8 @@ import assert from 'assert';
 import * as DNS from 'dns';
 import * as Net from 'net';
 
+import type {InRouterLogContext} from '../../@log.js';
+import {Logs} from '../../@log.js';
 import type {TunnelId} from '../../common.js';
 import {
   ROUTE_MATCH_PRIORITY_DEFAULT,
@@ -16,6 +18,8 @@ import {
   createDomainRuleMatch,
   createIPRuleMatch,
 } from './rule-match.js';
+
+const CONTEXT: InRouterLogContext = {type: 'in:router'};
 
 export class Router {
   private candidateMap = new Map<TunnelId, RouteCandidate>();
@@ -47,7 +51,7 @@ export class Router {
       this.initializeRouteMatchOptions(routeMatchOptions);
   }
 
-  async route(host: string): Promise<TunnelId | undefined> {
+  async routeHost(host: string): Promise<TunnelId | undefined> {
     let domain: string | undefined;
     let ips: string[] | undefined;
 
@@ -59,10 +63,17 @@ export class Router {
 
     const resolve = (): Promise<string[]> | string[] =>
       ips ??
-      DNS.promises.resolve(domain!).then(resolvedIPs => {
-        ips = resolvedIPs;
-        return ips;
-      });
+      DNS.promises.resolve(domain!).then(
+        resolvedIPs => {
+          ips = resolvedIPs;
+          return ips;
+        },
+        error => {
+          Logs.warn(CONTEXT, `error resolving domain "${domain!}".`);
+          Logs.debug(CONTEXT, error);
+          return [];
+        },
+      );
 
     for (const [id, {routeMatchOptions}] of this.candidateMap) {
       const priority = await match(domain, resolve, routeMatchOptions);
@@ -75,9 +86,9 @@ export class Router {
     return undefined;
   }
 
-  routeReferer(referer: string): Promise<TunnelId | undefined> {
-    const host = new URL(referer).host;
-    return this.route(host);
+  routeURL(url: string): Promise<TunnelId | undefined> {
+    const host = new URL(url).host;
+    return this.routeHost(host);
   }
 
   private initializeRouteMatchOptions({
