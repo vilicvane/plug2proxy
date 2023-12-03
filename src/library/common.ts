@@ -2,6 +2,9 @@ import bytes from 'bytes';
 import type * as x from 'x-value';
 
 import type {RouteMatchOptions} from './router.js';
+import {Port} from './x.js';
+
+export const TUNNEL_PORT_DEFAULT = Port.nominalize(8443);
 
 export const CONNECTION_WINDOW_SIZE = bytes('128MB');
 export const STREAM_WINDOW_SIZE = bytes('32MB');

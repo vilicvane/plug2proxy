@@ -1,11 +1,10 @@
 import type * as HTTP from 'http';
 import * as Net from 'net';
 import type {Duplex} from 'stream';
-import {pipeline} from 'stream/promises';
 
 import type {InConnectLogContext, InRequestLogContext} from '../../@log.js';
 import {Logs} from '../../@log.js';
-import {getErrorCode, handleErrorWhile} from '../../@utils/index.js';
+import {handleErrorWhile, pipelines} from '../../@utils/index.js';
 import type {TunnelId} from '../../common.js';
 import type {Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
@@ -66,22 +65,15 @@ export class NetProxyBridge {
     }
 
     try {
-      await Promise.all([
-        pipeline(inSocket, outSocket),
-        pipeline(outSocket, inSocket),
+      await pipelines([
+        [inSocket, outSocket],
+        [outSocket, inSocket],
       ]);
 
       Logs.info(context, 'connect socket closed.');
     } catch (error) {
-      inSocket.destroy();
-      outSocket.destroy();
-
-      if (getErrorCode(error) === 'ERR_STREAM_PREMATURE_CLOSE') {
-        Logs.info(context, 'connect socket closed.');
-      } else {
-        Logs.error(context, 'an error occurred proxying connect.');
-        Logs.debug(context, error);
-      }
+      Logs.error(context, 'an error occurred proxying connect.');
+      Logs.debug(context, error);
     }
   }
 
@@ -138,22 +130,15 @@ export class NetProxyBridge {
     socket.write('\r\n');
 
     try {
-      await Promise.all([
-        pipeline(request, socket),
-        pipeline(socket, response.socket!),
+      await pipelines([
+        [request, socket],
+        [socket, response.socket!],
       ]);
 
       Logs.info(context, 'request socket closed.');
     } catch (error) {
-      request.destroy();
-      response.destroy();
-
-      if (getErrorCode(error) === 'ERR_STREAM_PREMATURE_CLOSE') {
-        Logs.info(context, 'request socket closed.');
-      } else {
-        Logs.error(context, 'an error occurred proxying request.');
-        Logs.debug(context, error);
-      }
+      Logs.error(context, 'an error occurred proxying request.');
+      Logs.debug(context, error);
     }
   }
 }

@@ -18,4 +18,8 @@ export const IPPattern = x.string.refined<'ip pattern'>(value => {
 
 export const ListeningHost = x.union([IPPattern, x.literal('')]);
 
-export const ListeningPort = x.integerRange<'port'>({min: 1, max: 65535});
+export type ListeningHost = x.TypeOf<typeof ListeningHost>;
+
+export const Port = x.integerRange<'port'>({min: 1, max: 65535});
+
+export type Port = x.TypeOf<typeof Port>;

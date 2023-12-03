@@ -2,7 +2,6 @@ import assert from 'assert';
 import * as HTTP2 from 'http2';
 import type {Duplex} from 'stream';
 
-import Chalk from 'chalk';
 import type {Duplexify} from 'duplexify';
 import duplexify from 'duplexify';
 import * as x from 'x-value';
@@ -26,8 +25,9 @@ import {
   CONNECTION_WINDOW_SIZE,
   STREAM_WINDOW_SIZE,
   TUNNEL_HEADER_NAME,
+  TUNNEL_PORT_DEFAULT,
 } from '../common.js';
-import {ListeningHost, ListeningPort} from '../x.js';
+import type {ListeningHost, Port} from '../x.js';
 
 import type {Router} from './router/index.js';
 
@@ -38,17 +38,14 @@ const CONTEXT: InTunnelServerLogContext = {
 const MAX_OUTSTANDING_PINGS = 5;
 
 const HOST_DEFAULT = '';
-const PORT_DEFAULT = ListeningPort.nominalize(8443);
 
-export const TunnelServerOptions = x.object({
-  host: ListeningHost.optional(),
-  port: ListeningPort.optional(),
-  cert: x.union([x.string, xn.Buffer]).optional(),
-  key: x.union([x.string, xn.Buffer]).optional(),
-  password: x.string.optional(),
-});
-
-export type TunnelServerOptions = x.TypeOf<typeof TunnelServerOptions>;
+export type TunnelServerOptions = {
+  host?: ListeningHost;
+  port?: Port;
+  cert: string | Buffer;
+  key: string | Buffer;
+  password?: string;
+};
 
 export class TunnelServer {
   readonly server: HTTP2.Http2SecureServer;
@@ -60,7 +57,7 @@ export class TunnelServer {
     readonly router: Router,
     {
       host = HOST_DEFAULT,
-      port = PORT_DEFAULT,
+      port = TUNNEL_PORT_DEFAULT,
       cert,
       key,
       password,

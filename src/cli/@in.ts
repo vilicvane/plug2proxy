@@ -1,23 +1,16 @@
-import {readFile} from 'fs/promises';
-
 import {In} from '../library/index.js';
 
 import {CA_CERT_PATH, CA_KEY_PATH} from './@constants.js';
 
 export async function setupIn({
-  tunnel: tunnelServerOptions,
-  proxy: httpProxyOptions,
+  tunnel: tunnelServerConfig = {},
+  proxy: httpProxyOptions = {},
   ca = In.CONFIG_CA_DEFAULT,
 }: In.Config): Promise<void> {
   let caOptions: In.TLSProxyBridgeCAOptions | false;
 
   if (ca) {
-    await In.ensureCA(CA_CERT_PATH, CA_KEY_PATH);
-
-    caOptions = {
-      cert: await readFile(CA_CERT_PATH, 'utf8'),
-      key: await readFile(CA_KEY_PATH, 'utf8'),
-    };
+    caOptions = await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH);
   } else {
     caOptions = false;
   }
@@ -27,8 +20,12 @@ export async function setupIn({
   const router = new In.Router(geolite2);
 
   const tunnelServer = new In.TunnelServer(router, {
-    cert: await readFile('172.19.32.1.pem', 'utf8'),
-    key: await readFile('172.19.32.1-key.pem', 'utf8'),
+    ...('cert' in tunnelServerConfig && 'key' in tunnelServerConfig
+      ? tunnelServerConfig
+      : {
+          ...tunnelServerConfig,
+          ...(await In.getSelfSignedCertificate('tunnel-server.plug2proxy')),
+        }),
   });
 
   const tlsProxyBridge = new In.TLSProxyBridge(tunnelServer, router, {
@@ -41,14 +38,11 @@ export async function setupIn({
     caCertPath: ca ? CA_CERT_PATH : undefined,
   });
 
-  const proxy = new In.HTTPProxy(
+  new In.HTTPProxy(
     tunnelServer,
     tlsProxyBridge,
     netProxyBridge,
     web,
-    In.HTTPProxyOptions.nominalize({
-      host: '',
-      port: 8888,
-    }),
+    httpProxyOptions,
   );
 }

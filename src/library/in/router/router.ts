@@ -1,4 +1,5 @@
 import assert from 'assert';
+import {randomInt} from 'crypto';
 import * as DNS from 'dns/promises';
 import * as Net from 'net';
 
@@ -20,8 +21,6 @@ import {
 } from './rule-match.js';
 
 const CONTEXT: InRouterLogContext = {type: 'in:router'};
-
-const LOCAL_DOMAIN_PATTERN = /^[^.]+(?:.local)?$/;
 
 export class Router {
   private candidateMap = new Map<TunnelId, RouteCandidate>();
@@ -77,15 +76,25 @@ export class Router {
         },
       );
 
+    let highestPriority = -Infinity;
+    let priorIds: TunnelId[] = [];
+
     for (const [id, {routeMatchOptions}] of this.candidateMap) {
       const priority = await match(domain, resolve, routeMatchOptions);
 
-      if (priority !== false) {
-        return id;
+      if (priority === false || priority < highestPriority) {
+        continue;
+      }
+
+      if (priority > highestPriority) {
+        highestPriority = priority;
+        priorIds = [id];
+      } else {
+        priorIds.push(id);
       }
     }
 
-    return undefined;
+    return priorIds[randomInt(priorIds.length)];
   }
 
   routeURL(url: string): Promise<TunnelId | undefined> {
@@ -118,6 +127,8 @@ export class Router {
 
   private createMatchFunction(match: RouteMatchRule): RuleMatch {
     switch (match.type) {
+      case 'all':
+        return () => true;
       case 'domain':
         return createDomainRuleMatch(match.match);
       case 'ip':
@@ -164,6 +175,8 @@ async function match(
     }
   }
 
+  let highestPriority: number | undefined;
+
   for (const {match, negate, priority = priorityDefault} of include) {
     let matched = await match(domain, resolve);
 
@@ -172,9 +185,12 @@ async function match(
     }
 
     if (matched) {
-      return priority;
+      highestPriority =
+        highestPriority !== undefined
+          ? Math.max(highestPriority, priority)
+          : priority;
     }
   }
 
-  return false;
+  return highestPriority ?? false;
 }

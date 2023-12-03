@@ -1,20 +1,20 @@
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
-import {pipeline} from 'stream/promises';
 
 import ms from 'ms';
-import * as x from 'x-value';
+import type * as x from 'x-value';
 
 import type {OutTunnelLogContext, OutTunnelStreamLogContext} from '../@log.js';
 import {Logs} from '../@log.js';
-import {getErrorCode, setupSessionPing} from '../@utils/index.js';
+import {pipelines, setupSessionPing} from '../@utils/index.js';
 import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
 import {
   CONNECTION_WINDOW_SIZE,
   STREAM_WINDOW_SIZE,
   TUNNEL_HEADER_NAME,
+  TUNNEL_PORT_DEFAULT,
 } from '../common.js';
-import {RouteMatchOptions} from '../router.js';
+import type {RouteMatchOptions} from '../router.js';
 
 const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
 
@@ -22,22 +22,16 @@ function RECONNECT_DELAY(attempts: number): number {
   return RECONNECT_DELAYS[Math.min(attempts, RECONNECT_DELAYS.length - 1)];
 }
 
-export const TunnelConfig = x.object({
-  routeMatchOptions: RouteMatchOptions,
-});
+const ROUTE_MATCH_OPTIONS_DEFAULT: RouteMatchOptions = {
+  include: [{type: 'all'}],
+};
 
-export type TunnelConfig = x.TypeOf<typeof TunnelConfig>;
-
-export const TunnelOptions = x.object({
-  /**
-   * 代理入口服务器，如 "https://example.com:8443"。
-   */
-  authority: x.string,
-  rejectUnauthorized: x.boolean.optional(),
-  config: TunnelConfig,
-});
-
-export type TunnelOptions = x.TypeOf<typeof TunnelOptions>;
+export type TunnelOptions = {
+  host: string;
+  port?: number;
+  rejectUnauthorized?: boolean;
+  match?: RouteMatchOptions;
+};
 
 export type TunnelId = x.Nominal<'tunnel id', number>;
 
@@ -48,7 +42,7 @@ export class Tunnel {
 
   readonly rejectUnauthorized: boolean;
 
-  config: TunnelConfig;
+  private routeMatchOptions: RouteMatchOptions;
 
   private session: HTTP2.ClientHttp2Session | undefined;
 
@@ -60,22 +54,27 @@ export class Tunnel {
 
   constructor(
     readonly id: TunnelId,
-    {authority, rejectUnauthorized = true, config}: TunnelOptions,
+    {
+      host,
+      port = TUNNEL_PORT_DEFAULT,
+      rejectUnauthorized = true,
+      match: routeMatchOptions = ROUTE_MATCH_OPTIONS_DEFAULT,
+    }: TunnelOptions,
   ) {
     this.context = {
       type: 'out:tunnel',
       id,
     };
 
-    this.authority = authority;
+    this.authority = `https://${host}:${port}`;
     this.rejectUnauthorized = rejectUnauthorized;
-    this.config = config;
+    this.routeMatchOptions = routeMatchOptions;
 
     this.connect();
   }
 
-  configure(config: TunnelConfig): void {
-    this.config = config;
+  configure(routeMatchOptions: RouteMatchOptions): void {
+    this.routeMatchOptions = routeMatchOptions;
     this._configure();
   }
 
@@ -140,7 +139,7 @@ export class Tunnel {
       return;
     }
 
-    const {config, sessionConfigured} = this;
+    const {routeMatchOptions, sessionConfigured} = this;
 
     if (!sessionConfigured) {
       this.sessionConfigured = true;
@@ -150,7 +149,7 @@ export class Tunnel {
       {
         [TUNNEL_HEADER_NAME]: JSON.stringify({
           type: 'tunnel',
-          ...config,
+          routeMatchOptions,
         } satisfies TunnelOutInHeaderData),
       },
       {endStream: true},
@@ -210,23 +209,15 @@ export class Tunnel {
     });
 
     try {
-      await Promise.all([
-        pipeline(inOutStream, proxyStream),
-        pipeline(proxyStream, outInStream),
+      await pipelines([
+        [inOutStream, proxyStream],
+        [proxyStream, outInStream],
       ]);
 
-      Logs.info(context, 'OUT-IN stream closed.');
+      Logs.info(context, 'connection closed.');
     } catch (error) {
-      inOutStream.destroy();
-      outInStream.destroy();
-      proxyStream.destroy();
-
-      if (getErrorCode(error) === 'ERR_STREAM_PREMATURE_CLOSE') {
-        Logs.info(context, 'OUT-IN stream closed.');
-      } else {
-        Logs.warn(context, 'OUT-IN stream error.');
-        Logs.debug(context, error);
-      }
+      Logs.error(context, 'an error occurred proxying IN/OUT.');
+      Logs.debug(context, error);
     }
   }
 }

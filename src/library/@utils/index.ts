@@ -3,3 +3,4 @@ export * from './fs.js';
 export * from './http.js';
 export * from './miscellaneous.js';
 export * from './session-ping.js';
+export * from './stream.js';

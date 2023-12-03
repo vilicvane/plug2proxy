@@ -46,6 +46,10 @@ export type InWebLogContext = {
   type: 'in:web';
 };
 
+export type InProxyLogContext = {
+  type: 'in:proxy';
+};
+
 export type OutTunnelLogContext = {
   type: 'out:tunnel';
   id: Out.TunnelId;
@@ -65,6 +69,7 @@ type LogContext =
   | InRouterLogContext
   | InGeoLite2LogContext
   | InWebLogContext
+  | InProxyLogContext
   | OutTunnelLogContext
   | OutTunnelStreamLogContext;
 

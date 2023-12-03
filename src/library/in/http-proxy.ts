@@ -3,22 +3,32 @@ import type * as Net from 'net';
 
 import * as x from 'x-value';
 
-import type {InConnectLogContext, InRequestLogContext} from '../@log.js';
+import type {
+  InConnectLogContext,
+  InProxyLogContext,
+  InRequestLogContext,
+} from '../@log.js';
 import {Logs} from '../@log.js';
 import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
 import type {ConnectionId} from '../common.js';
-import {ListeningHost, ListeningPort} from '../x.js';
+import type {ListeningHost} from '../x.js';
+import {Port} from '../x.js';
 
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
 import type {TunnelServer} from './tunnel-server.js';
 import {WEB_HOSTNAME, type Web} from './web.js';
 
-export const HTTPProxyOptions = x.object({
-  host: ListeningHost.optional(),
-  port: ListeningPort.optional(),
-});
+const CONTEXT: InProxyLogContext = {
+  type: 'in:proxy',
+};
 
-export type HTTPProxyOptions = x.TypeOf<typeof HTTPProxyOptions>;
+const HOST_DEFAULT = '';
+const PORT_DEFAULT = Port.nominalize(8000);
+
+export type HTTPProxyOptions = {
+  host?: ListeningHost;
+  port?: Port;
+};
 
 export class HTTPProxy {
   readonly server: HTTP.Server;
@@ -30,12 +40,14 @@ export class HTTPProxy {
     readonly tlsProxyBridge: TLSProxyBridge,
     readonly netProxyBridge: NetProxyBridge,
     readonly web: Web,
-    {host, port}: HTTPProxyOptions,
+    {host = HOST_DEFAULT, port = PORT_DEFAULT}: HTTPProxyOptions,
   ) {
     this.server = HTTP.createServer()
       .on('connect', this.onHTTPServerConnect)
       .on('request', this.onHTTPServerRequest)
-      .listen(port, host);
+      .listen(port, host, () => {
+        Logs.info(CONTEXT, `listening on ${host}:${port}...`);
+      });
   }
 
   private onHTTPServerConnect = (

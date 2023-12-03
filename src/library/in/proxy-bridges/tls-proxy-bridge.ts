@@ -3,7 +3,6 @@ import {once} from 'events';
 import * as Net from 'net';
 import type {Duplex} from 'stream';
 import {PassThrough} from 'stream';
-import {pipeline} from 'stream/promises';
 import * as TLS from 'tls';
 
 import Forge from '@vilic/node-forge';
@@ -14,11 +13,11 @@ import type {Nominal} from 'x-value';
 import type {InConnectLogContext} from '../../@log.js';
 import {Logs} from '../../@log.js';
 import {
-  getErrorCode,
   handleErrorWhile,
+  pipelines,
   readHTTPRequestStreamHeaders,
 } from '../../@utils/index.js';
-import type {ConnectionId, TunnelId} from '../../common.js';
+import type {TunnelId} from '../../common.js';
 import type {Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
@@ -78,41 +77,42 @@ export class TLSProxyBridge {
     let hello: TlsHelloData | undefined;
 
     // read client hello for ALPN
-    {
-      const through = new PassThrough();
+    const helloThrough = new PassThrough();
 
-      const helloChunks: Buffer[] = [];
+    const helloChunks: Buffer[] = [];
 
-      const onHelloData = (data: Buffer): void => {
-        helloChunks.push(data);
-        through.write(data);
-      };
+    const onHelloData = (data: Buffer): void => {
+      helloChunks.push(data);
+      helloThrough.write(data);
+    };
 
-      inSocket.on('data', onHelloData);
+    inSocket.on('data', onHelloData);
+    inSocket.resume();
 
-      try {
-        hello = await handleErrorWhile(readTlsClientHello(through), [inSocket]);
+    try {
+      hello = await handleErrorWhile(readTlsClientHello(helloThrough), [
+        inSocket,
+      ]);
 
-        if (hello.alpnProtocols) {
-          Logs.debug(
-            context,
-            'alpn protocols (IN):',
-            hello.alpnProtocols.join(', '),
-          );
-        }
-      } catch (error) {
-        Logs.warn(context, 'failed to read client hello.');
-        Logs.debug(context, error);
-
-        return;
+      if (hello.alpnProtocols) {
+        Logs.debug(
+          context,
+          'alpn protocols (IN):',
+          hello.alpnProtocols.join(', '),
+        );
       }
+    } catch (error) {
+      Logs.warn(context, 'failed to read client hello.');
+      Logs.debug(context, error);
 
-      inSocket.off('data', onHelloData);
-
-      inSocket.pause();
-
-      inSocket.unshift(Buffer.concat(helloChunks));
+      return;
     }
+
+    inSocket.off('data', onHelloData);
+
+    inSocket.pause();
+
+    inSocket.unshift(Buffer.concat(helloChunks));
 
     if (!hello) {
       return this.connectWithoutCA(context, inSocket, host, port);
@@ -190,22 +190,15 @@ export class TLSProxyBridge {
     }
 
     try {
-      await Promise.all([
-        pipeline(inSocket, outSocket),
-        pipeline(outSocket, inSocket),
+      await pipelines([
+        [inSocket, outSocket],
+        [outSocket, inSocket],
       ]);
 
       Logs.info(context, 'connect socket closed.');
     } catch (error) {
-      inSocket.destroy();
-      outSocket.destroy();
-
-      if (getErrorCode(error) === 'ERR_STREAM_PREMATURE_CLOSE') {
-        Logs.info(context, 'connect socket closed.');
-      } else {
-        Logs.error(context, 'an error occurred proxying connect.');
-        Logs.debug(context, error);
-      }
+      Logs.error(context, 'an error occurred proxying connect.');
+      Logs.debug(context, error);
     }
   }
 
@@ -506,22 +499,15 @@ export class TLSProxyBridge {
     outTLSSocket: TLS.TLSSocket,
   ): Promise<void> {
     try {
-      await Promise.all([
-        pipeline(inTLSSocket, outTLSSocket),
-        pipeline(outTLSSocket, inTLSSocket),
+      await pipelines([
+        [inTLSSocket, outTLSSocket],
+        [outTLSSocket, inTLSSocket],
       ]);
 
-      Logs.info(context, 'connection closed.');
+      Logs.info(context, 'tls socket closed.');
     } catch (error) {
-      inTLSSocket.destroy();
-      outTLSSocket.destroy();
-
-      if (getErrorCode(error) === 'ERR_STREAM_PREMATURE_CLOSE') {
-        Logs.info(context, 'connection closed.');
-      } else {
-        Logs.error(context, 'an error occurred proxying IN and OUT.');
-        Logs.debug(context, error);
-      }
+      Logs.error(context, 'an error occurred proxying tls connect.');
+      Logs.debug(context, error);
     }
   }
 
