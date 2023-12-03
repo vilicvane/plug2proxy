@@ -12,4 +12,5 @@ bld/
 *.bin
 test.*
 geolite2.mmdb
+plug2proxy/
 p2p.*.js

@@ -1,4 +1,4 @@
-import * as IPMatching from 'ip-matching';
+import IPMatching from 'ip-matching';
 import {minimatch} from 'minimatch';
 
 const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];

@@ -1,5 +1,5 @@
 import assert from 'assert';
-import * as DNS from 'dns';
+import * as DNS from 'dns/promises';
 import * as Net from 'net';
 
 import type {InRouterLogContext} from '../../@log.js';
@@ -20,6 +20,8 @@ import {
 } from './rule-match.js';
 
 const CONTEXT: InRouterLogContext = {type: 'in:router'};
+
+const LOCAL_DOMAIN_PATTERN = /^[^.]+(?:.local)?$/;
 
 export class Router {
   private candidateMap = new Map<TunnelId, RouteCandidate>();
@@ -63,7 +65,7 @@ export class Router {
 
     const resolve = (): Promise<string[]> | string[] =>
       ips ??
-      DNS.promises.resolve(domain!).then(
+      DNS.resolve(domain!).then(
         resolvedIPs => {
           ips = resolvedIPs;
           return ips;

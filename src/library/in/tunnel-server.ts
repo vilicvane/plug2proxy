@@ -121,9 +121,7 @@ export class TunnelServer {
 
     Logs.info(
       context,
-      `${Chalk.cyan('tunnel connect')} ${host}:${port} via ${Chalk.yellow(
-        tunnel.remoteAddress,
-      )}...`,
+      `tunnel connect ${host}:${port} via ${tunnel.remoteAddress}...`,
     );
 
     return new Promise((resolve, reject) => {
@@ -149,11 +147,6 @@ export class TunnelServer {
           tunnel.connectionMap.set(id, {
             context,
             stream,
-          });
-
-          stream.on('error', error => {
-            Logs.warn(context, 'error IN-OUT stream.');
-            Logs.debug(context, error);
           });
 
           stream.on('close', () => {

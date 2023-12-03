@@ -1,3 +1,4 @@
+import Chalk from 'chalk';
 import type {Debugger} from 'debug';
 import Debug from 'debug';
 
@@ -41,6 +42,10 @@ export type InGeoLite2LogContext = {
   type: 'in:geolite2';
 };
 
+export type InWebLogContext = {
+  type: 'in:web';
+};
+
 export type OutTunnelLogContext = {
   type: 'out:tunnel';
   id: Out.TunnelId;
@@ -59,10 +64,20 @@ type LogContext =
   | InTunnelServerLogContext
   | InRouterLogContext
   | InGeoLite2LogContext
+  | InWebLogContext
   | OutTunnelLogContext
   | OutTunnelStreamLogContext;
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const LEVEL_COLORS: Record<
+  Exclude<string, 'debug'>,
+  (text: string) => string
+> = {
+  info: text => text,
+  warn: Chalk.yellow,
+  error: Chalk.red,
+};
 
 export namespace Logs {
   export const debug = createLogger('debug');
@@ -97,7 +112,11 @@ function createLogger<TLevel extends LogLevel>(
         })()
       : (_type, args) =>
           // eslint-disable-next-line no-console
-          console[level](...args);
+          console[level](
+            ...args.map(arg =>
+              typeof arg === 'string' ? LEVEL_COLORS[level](arg) : arg,
+            ),
+          );
 
   return function log(context, ...args) {
     switch (context.type) {
@@ -124,7 +143,7 @@ function createLogger<TLevel extends LogLevel>(
         args = [`[${TUNNEL_STREAM(context.stream)}]`, ...args];
         break;
       default:
-        args = [`[${context.type}]`, ...args];
+        args = [`[${context.type.replace(/^(?:in|out):/, '')}]`, ...args];
         break;
     }
 
