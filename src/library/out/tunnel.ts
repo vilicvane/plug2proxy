@@ -23,7 +23,17 @@ function RECONNECT_DELAY(attempts: number): number {
 }
 
 const ROUTE_MATCH_OPTIONS_DEFAULT: RouteMatchOptions = {
-  include: [{type: 'all'}],
+  include: [
+    {
+      type: 'all',
+    },
+  ],
+  exclude: [
+    {
+      type: 'ip',
+      match: 'private',
+    },
+  ],
 };
 
 export type TunnelOptions = {
@@ -31,6 +41,7 @@ export type TunnelOptions = {
   port?: number;
   rejectUnauthorized?: boolean;
   match?: RouteMatchOptions;
+  alias?: string;
 };
 
 export type TunnelId = x.Nominal<'tunnel id', number>;
@@ -59,11 +70,13 @@ export class Tunnel {
       port = TUNNEL_PORT_DEFAULT,
       rejectUnauthorized = true,
       match: routeMatchOptions = ROUTE_MATCH_OPTIONS_DEFAULT,
+      alias,
     }: TunnelOptions,
   ) {
     this.context = {
       type: 'out:tunnel',
       id,
+      alias,
     };
 
     this.authority = `https://${host}:${port}`;

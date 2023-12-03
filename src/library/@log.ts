@@ -8,14 +8,11 @@ import type {Out} from './out/index.js';
 export type InConnectLogContext = {
   type: 'in:connect';
   id: ConnectionId;
-  host: string;
-  port: number;
 };
 
 export type InRequestLogContext = {
   type: 'in:request';
   id: ConnectionId;
-  url: string;
 };
 
 export type InTunnelConnectLogContext = {
@@ -53,6 +50,7 @@ export type InProxyLogContext = {
 export type OutTunnelLogContext = {
   type: 'out:tunnel';
   id: Out.TunnelId;
+  alias: string | undefined;
 };
 
 export type OutTunnelStreamLogContext = {
@@ -128,6 +126,9 @@ function createLogger<TLevel extends LogLevel>(
       case 'in:connect':
         args = [`[${CONNECTION(context.id)}]`, ...args];
         break;
+      case 'in:request':
+        args = [`[${CONNECTION(context.id)}]`, ...args];
+        break;
       case 'in:tunnel-connect':
         args = [
           `[${CONNECTION(context.connection)}${IN_TUNNEL(context.tunnel)}${
@@ -142,7 +143,12 @@ function createLogger<TLevel extends LogLevel>(
         args = [`[${IN_TUNNEL(context.id)}]`, ...args];
         break;
       case 'out:tunnel':
-        args = [`[${OUT_TUNNEL(context.id)}]`, ...args];
+        args = [
+          `[${OUT_TUNNEL(context.id)}${
+            context.alias ? ` ${context.alias}` : ''
+          }]`,
+          ...args,
+        ];
         break;
       case 'out:tunnel-stream':
         args = [`[${TUNNEL_STREAM(context.stream)}]`, ...args];

@@ -94,7 +94,9 @@ export class Router {
       }
     }
 
-    return priorIds[randomInt(priorIds.length)];
+    return priorIds.length > 0
+      ? priorIds[randomInt(priorIds.length)]
+      : undefined;
   }
 
   routeURL(url: string): Promise<TunnelId | undefined> {

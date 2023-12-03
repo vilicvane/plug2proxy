@@ -9,6 +9,8 @@ import type {TunnelId} from '../../common.js';
 import type {Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
+const someListener = () => {};
+
 export class NetProxyBridge {
   constructor(
     readonly tunnelServer: TunnelServer,
@@ -131,8 +133,8 @@ export class NetProxyBridge {
 
     try {
       await pipelines([
-        [request, socket],
-        [socket, response.socket!],
+        [request.socket, socket],
+        [socket, request.socket],
       ]);
 
       Logs.info(context, 'request socket closed.');

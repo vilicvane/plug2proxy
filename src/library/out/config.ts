@@ -8,6 +8,7 @@ const TunnelConfig = x.object({
   port: Port.optional(),
   rejectUnauthorized: x.boolean.optional(),
   match: RouteMatchOptions.optional(),
+  alias: x.string.optional(),
 });
 
 export const Config = x.object({

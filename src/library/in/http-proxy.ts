@@ -35,6 +35,11 @@ export class HTTPProxy {
 
   private lastContextIdNumber = 0;
 
+  /**
+   * Sockets kept alive.
+   */
+  private handledRequestSocketSet = new WeakSet<Net.Socket>();
+
   constructor(
     readonly tunnelServer: TunnelServer,
     readonly tlsProxyBridge: TLSProxyBridge,
@@ -62,8 +67,6 @@ export class HTTPProxy {
     const context: InConnectLogContext = {
       type: 'in:connect',
       id: this.getNextContextId(),
-      host,
-      port,
     };
 
     void readHTTPRequestStreamHeaders(socket).then(
@@ -108,10 +111,17 @@ export class HTTPProxy {
       return;
     }
 
+    const {handledRequestSocketSet} = this;
+
+    if (handledRequestSocketSet.has(request.socket)) {
+      return;
+    }
+
+    handledRequestSocketSet.add(request.socket);
+
     const context: InRequestLogContext = {
       type: 'in:request',
       id: this.getNextContextId(),
-      url: urlString,
     };
 
     void this.netProxyBridge.request(context, request, response);
