@@ -6,13 +6,14 @@ import {Port} from '../x.js';
 const TunnelConfig = x.object({
   host: x.string,
   port: Port.optional(),
+  password: x.string.optional(),
   rejectUnauthorized: x.boolean.optional(),
   match: RouteMatchOptions.optional(),
-  alias: x.string.optional(),
 });
 
 export const Config = x.object({
   mode: x.literal('out'),
+  alias: x.string.optional(),
   tunnels: x.array(TunnelConfig),
 });
 

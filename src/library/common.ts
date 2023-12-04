@@ -28,6 +28,7 @@ export type TunnelOutInHeaderData =
   | {
       type: 'tunnel';
       routeMatchOptions: RouteMatchOptions;
+      password?: string;
     }
   | {
       type: 'out-in-stream';

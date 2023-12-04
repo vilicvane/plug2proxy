@@ -1,8 +1,6 @@
 import * as HTTP from 'http';
 import type * as Net from 'net';
 
-import * as x from 'x-value';
-
 import type {
   InConnectLogContext,
   InProxyLogContext,

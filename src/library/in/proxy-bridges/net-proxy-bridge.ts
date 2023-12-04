@@ -9,8 +9,6 @@ import type {TunnelId} from '../../common.js';
 import type {Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
-const someListener = () => {};
-
 export class NetProxyBridge {
   constructor(
     readonly tunnelServer: TunnelServer,

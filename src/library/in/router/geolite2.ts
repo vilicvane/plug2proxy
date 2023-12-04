@@ -1,6 +1,4 @@
 import {readFile, stat, writeFile} from 'fs/promises';
-import type * as HTTP from 'http';
-import * as HTTPS from 'https';
 import {buffer} from 'stream/consumers';
 
 import type {CountryResponse} from 'maxmind';

@@ -4,8 +4,6 @@ import type {Duplex} from 'stream';
 
 import type {Duplexify} from 'duplexify';
 import duplexify from 'duplexify';
-import * as x from 'x-value';
-import * as xn from 'x-value/node';
 
 import type {
   InTunnelConnectLogContext,
@@ -50,6 +48,8 @@ export type TunnelServerOptions = {
 export class TunnelServer {
   readonly server: HTTP2.Http2SecureServer;
 
+  readonly password: string | undefined;
+
   private tunnelMap = new Map<TunnelId, Tunnel>();
   private sessionToTunnelIdMap = new Map<HTTP2.Http2Session, TunnelId>();
 
@@ -93,6 +93,8 @@ export class TunnelServer {
       .listen(port, host, () => {
         Logs.info(CONTEXT, `listening on ${host}:${port}...`);
       });
+
+    this.password = password;
   }
 
   async connect(
@@ -159,7 +161,7 @@ export class TunnelServer {
   }
 
   private handleTunnel(
-    {routeMatchOptions}: TunnelOutInHeaderData & {type: 'tunnel'},
+    {routeMatchOptions, password}: TunnelOutInHeaderData & {type: 'tunnel'},
     stream: HTTP2.ServerHttp2Stream,
   ): void {
     const session = stream.session;
@@ -169,6 +171,12 @@ export class TunnelServer {
     let id = this.sessionToTunnelIdMap.get(session);
 
     if (id === undefined) {
+      if (password !== this.password) {
+        stream.respond({':status': 401}, {endStream: true});
+        session.close();
+        return;
+      }
+
       id = this.getNextTunnelId();
 
       const context: InTunnelLogContext = {
@@ -234,11 +242,17 @@ export class TunnelServer {
     {id}: TunnelOutInHeaderData & {type: 'out-in-stream'},
     stream: HTTP2.ServerHttp2Stream,
   ): void {
-    assert(stream.session);
+    const {session} = stream;
 
-    const tunnelId = this.sessionToTunnelIdMap.get(stream.session);
+    assert(session);
 
-    assert(tunnelId);
+    const tunnelId = this.sessionToTunnelIdMap.get(session);
+
+    if (tunnelId === undefined) {
+      // Should not receive out-in-stream request for tunnel not configured.
+      session.close();
+      return;
+    }
 
     const connection = this.tunnelMap.get(tunnelId)?.connectionMap.get(id);
 

@@ -37,11 +37,12 @@ const ROUTE_MATCH_OPTIONS_DEFAULT: RouteMatchOptions = {
 };
 
 export type TunnelOptions = {
+  alias?: string;
   host: string;
   port?: number;
+  password?: string;
   rejectUnauthorized?: boolean;
   match?: RouteMatchOptions;
-  alias?: string;
 };
 
 export type TunnelId = x.Nominal<'tunnel id', number>;
@@ -50,6 +51,8 @@ export class Tunnel {
   readonly context: OutTunnelLogContext;
 
   readonly authority: string;
+
+  readonly password: string | undefined;
 
   readonly rejectUnauthorized: boolean;
 
@@ -68,6 +71,7 @@ export class Tunnel {
     {
       host,
       port = TUNNEL_PORT_DEFAULT,
+      password,
       rejectUnauthorized = true,
       match: routeMatchOptions = ROUTE_MATCH_OPTIONS_DEFAULT,
       alias,
@@ -80,7 +84,10 @@ export class Tunnel {
     };
 
     this.authority = `https://${host}:${port}`;
+    this.password = password;
+
     this.rejectUnauthorized = rejectUnauthorized;
+
     this.routeMatchOptions = routeMatchOptions;
 
     this.connect();
@@ -163,6 +170,7 @@ export class Tunnel {
         [TUNNEL_HEADER_NAME]: JSON.stringify({
           type: 'tunnel',
           routeMatchOptions,
+          password: sessionConfigured ? undefined : this.password,
         } satisfies TunnelOutInHeaderData),
       },
       {endStream: true},
@@ -174,8 +182,12 @@ export class Tunnel {
           return;
         }
 
-        if (headers[':status'] === 200) {
+        const status = headers[':status'];
+
+        if (status === 200) {
           this.continuousAttempts = 0;
+        } else {
+          Logs.error(this.context, `failed configure tunnel (${status}).`);
         }
       })
       .on('close', () => {
