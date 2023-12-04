@@ -1,12 +1,12 @@
 import * as HTTP from 'http';
 import type * as Net from 'net';
 
-import type {
-  InConnectLogContext,
-  InProxyLogContext,
-  InRequestLogContext,
-} from '../@log.js';
-import {Logs} from '../@log.js';
+import type {InLogContext} from '../@log/index.js';
+import {
+  IN_ERROR_DETECTING_CONNECT_TYPE,
+  IN_HTTP_PROXY_LISTENING_ON,
+  Logs,
+} from '../@log/index.js';
 import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
 import type {ConnectionId} from '../common.js';
 import type {ListeningHost} from '../x.js';
@@ -15,10 +15,6 @@ import {Port} from '../x.js';
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
 import type {TunnelServer} from './tunnel-server.js';
 import {WEB_HOSTNAME, type Web} from './web.js';
-
-const CONTEXT: InProxyLogContext = {
-  type: 'in:proxy',
-};
 
 const HOST_DEFAULT = '';
 const PORT_DEFAULT = Port.nominalize(8000);
@@ -49,42 +45,53 @@ export class HTTPProxy {
       .on('connect', this.onHTTPServerConnect)
       .on('request', this.onHTTPServerRequest)
       .listen(port, host, () => {
-        Logs.info(CONTEXT, `listening on ${host}:${port}...`);
+        Logs.info('proxy', IN_HTTP_PROXY_LISTENING_ON(host, port));
       });
   }
 
   private onHTTPServerConnect = (
     request: HTTP.IncomingMessage,
-    socket: Net.Socket,
+    connectSocket: Net.Socket,
   ): void => {
     const [host, portString] = request.url!.split(':');
     const port = parseInt(portString) || 443;
 
-    socket.write('HTTP/1.1 200 OK\r\n\r\n');
+    connectSocket.write('HTTP/1.1 200 OK\r\n\r\n');
 
-    const context: InConnectLogContext = {
-      type: 'in:connect',
-      id: this.getNextContextId(),
+    const connectionId = this.getNextConnectionId();
+
+    const context: InLogContext = {
+      type: 'in',
+      method: 'connect',
+      connection: connectionId,
+      hostname: `${host}:${port}`,
     };
 
-    void readHTTPRequestStreamHeaders(socket).then(
+    void readHTTPRequestStreamHeaders(connectSocket).then(
       headerMap => {
         if (headerMap) {
           void this.netProxyBridge.connect(
             context,
-            socket,
+            connectionId,
+            connectSocket,
             host,
             port,
             headerMap,
           );
         } else {
-          void this.tlsProxyBridge.connect(context, socket, host, port);
+          void this.tlsProxyBridge.connect(
+            context,
+            connectionId,
+            connectSocket,
+            host,
+            port,
+          );
         }
       },
       (error: unknown) => {
-        socket.destroy();
+        connectSocket.destroy();
 
-        Logs.error(context, 'error detecting socket type');
+        Logs.error(context, IN_ERROR_DETECTING_CONNECT_TYPE);
         Logs.debug(context, error);
       },
     );
@@ -117,15 +124,19 @@ export class HTTPProxy {
 
     handledRequestSocketSet.add(request.socket);
 
-    const context: InRequestLogContext = {
-      type: 'in:request',
-      id: this.getNextContextId(),
+    const connectionId = this.getNextConnectionId();
+
+    const context: InLogContext = {
+      type: 'in',
+      method: 'request',
+      connection: connectionId,
+      hostname: url.hostname,
     };
 
-    void this.netProxyBridge.request(context, request, response);
+    void this.netProxyBridge.request(context, connectionId, request);
   };
 
-  private getNextContextId(): ConnectionId {
+  private getNextConnectionId(): ConnectionId {
     return ++this.lastContextIdNumber as ConnectionId;
   }
 }

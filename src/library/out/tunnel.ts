@@ -1,11 +1,21 @@
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
 
-import ms from 'ms';
 import type * as x from 'x-value';
 
-import type {OutTunnelLogContext, OutTunnelStreamLogContext} from '../@log.js';
-import {Logs} from '../@log.js';
+import type {OutLogContext} from '../@log/index.js';
+import {
+  Logs,
+  OUT_ERROR_CONFIGURING_TUNNEL,
+  OUT_ERROR_PIPING_TUNNEL_STREAM_FROM_TO_PROXY_STREAM,
+  OUT_RECEIVED_IN_OUT_STREAM,
+  OUT_RECONNECT_IN,
+  OUT_TUNNEL_CLOSED,
+  OUT_TUNNEL_ERROR,
+  OUT_TUNNEL_ESTABLISHED,
+  OUT_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
+  OUT_TUNNEL_STREAM_CLOSED,
+} from '../@log/index.js';
 import {pipelines, setupSessionPing} from '../@utils/index.js';
 import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
 import {
@@ -48,7 +58,7 @@ export type TunnelOptions = {
 export type TunnelId = x.Nominal<'tunnel id', number>;
 
 export class Tunnel {
-  readonly context: OutTunnelLogContext;
+  readonly context: OutLogContext;
 
   readonly authority: string;
 
@@ -78,9 +88,8 @@ export class Tunnel {
     }: TunnelOptions,
   ) {
     this.context = {
-      type: 'out:tunnel',
-      id,
-      alias,
+      type: 'out',
+      tunnel: alias ?? id,
     };
 
     this.authority = `https://${host}:${port}`;
@@ -110,7 +119,7 @@ export class Tunnel {
       },
     })
       .on('connect', session => {
-        Logs.info(context, 'tunnel established.');
+        Logs.info(context, OUT_TUNNEL_ESTABLISHED);
 
         session.setLocalWindowSize(CONNECTION_WINDOW_SIZE);
 
@@ -130,11 +139,11 @@ export class Tunnel {
         }
       })
       .on('close', () => {
-        Logs.info(context, 'tunnel closed.');
+        Logs.info(context, OUT_TUNNEL_CLOSED);
         this.scheduleReconnect();
       })
       .on('error', error => {
-        Logs.error(context, 'tunnel error.');
+        Logs.error(context, OUT_TUNNEL_ERROR(error));
         Logs.debug(context, error);
       });
 
@@ -147,7 +156,7 @@ export class Tunnel {
 
     const delay = RECONNECT_DELAY(this.continuousAttempts);
 
-    Logs.info(this.context, `reconnect in ${ms(delay)}...`);
+    Logs.info(this.context, OUT_RECONNECT_IN(delay));
 
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
@@ -187,7 +196,7 @@ export class Tunnel {
         if (status === 200) {
           this.continuousAttempts = 0;
         } else {
-          Logs.error(this.context, `failed configure tunnel (${status}).`);
+          Logs.error(this.context, OUT_ERROR_CONFIGURING_TUNNEL(status));
         }
       })
       .on('close', () => {
@@ -208,12 +217,13 @@ export class Tunnel {
     inOutStream: HTTP2.ClientHttp2Stream,
     session: HTTP2.ClientHttp2Session,
   ): Promise<void> {
-    const context: OutTunnelStreamLogContext = {
-      type: 'out:tunnel-stream',
+    const context: OutLogContext = {
+      ...this.context,
       stream: id,
+      hostname: `${host}:${port}`,
     };
 
-    Logs.info(context, `received IN-OUT stream for ${host}:${port}.`);
+    Logs.info(context, OUT_RECEIVED_IN_OUT_STREAM(host, port));
 
     const proxyStream = Net.connect(port, host);
 
@@ -229,7 +239,7 @@ export class Tunnel {
 
     outInStream.on('response', headers => {
       if (headers[':status'] === 200) {
-        Logs.info(context, 'OUT-IN stream established.');
+        Logs.info(context, OUT_TUNNEL_OUT_IN_STREAM_ESTABLISHED);
       }
     });
 
@@ -239,9 +249,12 @@ export class Tunnel {
         [proxyStream, outInStream],
       ]);
 
-      Logs.info(context, 'connection closed.');
+      Logs.info(context, OUT_TUNNEL_STREAM_CLOSED);
     } catch (error) {
-      Logs.error(context, 'an error occurred proxying IN/OUT.');
+      Logs.error(
+        context,
+        OUT_ERROR_PIPING_TUNNEL_STREAM_FROM_TO_PROXY_STREAM(error),
+      );
       Logs.debug(context, error);
     }
   }

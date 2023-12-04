@@ -25,11 +25,14 @@
   ],
   "cSpell.words": [
     "duplexify",
+    "endregion",
     "geolite",
     "maxmind",
     "mmdb",
     "nominalize",
     "proxying",
-    "SPDY"
+    "Redirections",
+    "SPDY",
+    "undici"
   ]
 }

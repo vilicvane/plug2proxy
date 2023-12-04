@@ -5,15 +5,23 @@ import type {Duplex} from 'stream';
 import type {Duplexify} from 'duplexify';
 import duplexify from 'duplexify';
 
-import type {
-  InTunnelConnectLogContext,
-  InTunnelLogContext,
-  InTunnelServerLogContext,
-} from '../@log.js';
-import {Logs} from '../@log.js';
+import type {InLogContext} from '../@log/index.js';
+import {
+  IN_ROUTE_MATCH_OPTIONS,
+  IN_TUNNEL_CLOSED,
+  IN_TUNNEL_CONFIGURE_STREAM_ERROR,
+  IN_TUNNEL_CONFIGURE_UPDATE_STREAM_ERROR,
+  IN_TUNNEL_ESTABLISHED,
+  IN_TUNNEL_IN_OUT_STREAM_ESTABLISHED,
+  IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
+  IN_TUNNEL_SERVER_LISTENING_ON,
+  IN_TUNNEL_SERVER_TUNNELING,
+  IN_TUNNEL_STREAM_CLOSED,
+  IN_TUNNEL_UPDATED,
+  Logs,
+} from '../@log/index.js';
 import {setupSessionPing} from '../@utils/index.js';
 import type {
-  ConnectionId,
   TunnelId,
   TunnelInOutHeaderData,
   TunnelOutInHeaderData,
@@ -28,10 +36,6 @@ import {
 import type {ListeningHost, Port} from '../x.js';
 
 import type {Router} from './router/index.js';
-
-const CONTEXT: InTunnelServerLogContext = {
-  type: 'in:tunnel-server',
-};
 
 const MAX_OUTSTANDING_PINGS = 5;
 
@@ -91,14 +95,14 @@ export class TunnelServer {
         }
       })
       .listen(port, host, () => {
-        Logs.info(CONTEXT, `listening on ${host}:${port}...`);
+        Logs.info('tunnel-server', IN_TUNNEL_SERVER_LISTENING_ON(host, port));
       });
 
     this.password = password;
   }
 
   async connect(
-    connectionId: ConnectionId,
+    upperContext: InLogContext,
     tunnelId: TunnelId,
     host: string,
     port: number,
@@ -111,16 +115,15 @@ export class TunnelServer {
 
     const id = ++tunnel.lastStreamIdNumber as TunnelStreamId;
 
-    const context: InTunnelConnectLogContext = {
-      type: 'in:tunnel-connect',
-      connection: connectionId,
+    const context: InLogContext = {
+      ...upperContext,
       tunnel: tunnelId,
       stream: id,
     };
 
     Logs.info(
       context,
-      `tunnel connect ${host}:${port} via ${tunnel.remoteAddress}...`,
+      IN_TUNNEL_SERVER_TUNNELING(host, port, tunnel.remoteAddress),
     );
 
     return new Promise((resolve, reject) => {
@@ -139,7 +142,7 @@ export class TunnelServer {
             return;
           }
 
-          Logs.debug(context, 'established IN-OUT stream.');
+          Logs.debug(context, IN_TUNNEL_IN_OUT_STREAM_ESTABLISHED);
 
           const stream = duplexify(inOutStream);
 
@@ -149,8 +152,7 @@ export class TunnelServer {
           });
 
           stream.on('close', () => {
-            Logs.debug(context, 'closed IN-OUT stream.');
-
+            Logs.debug(context, IN_TUNNEL_STREAM_CLOSED);
             tunnel.connectionMap.delete(id);
           });
 
@@ -179,9 +181,9 @@ export class TunnelServer {
 
       id = this.getNextTunnelId();
 
-      const context: InTunnelLogContext = {
-        type: 'in:tunnel',
-        id,
+      const context: InLogContext = {
+        type: 'in',
+        tunnel: id,
       };
 
       this.tunnelMap.set(id, {
@@ -202,27 +204,27 @@ export class TunnelServer {
         routeMatchOptions,
       );
 
-      stream.on('error', error => {
-        Logs.warn(context, 'an error occurred with tunnel stream.');
-        Logs.debug(context, error);
-      });
+      stream
+        .on('close', () => {
+          this.tunnelMap.delete(id!);
+          this.sessionToTunnelIdMap.delete(session);
+          this.router.unregister(id!);
 
-      stream.on('close', () => {
-        this.tunnelMap.delete(id!);
-        this.sessionToTunnelIdMap.delete(session);
-        this.router.unregister(id!);
-
-        Logs.info(context, 'tunnel closed.');
-      });
+          Logs.info(context, IN_TUNNEL_CLOSED);
+        })
+        .on('error', error => {
+          Logs.error(context, IN_TUNNEL_CONFIGURE_STREAM_ERROR(error));
+          Logs.debug(context, error);
+        });
 
       stream.respond({':status': 200});
 
-      Logs.info(context, 'tunnel established.');
-      Logs.debug(context, 'route match options:', routeMatchOptions);
+      Logs.info(context, IN_TUNNEL_ESTABLISHED);
+      Logs.debug(context, IN_ROUTE_MATCH_OPTIONS, routeMatchOptions);
     } else {
-      const context: InTunnelLogContext = {
-        type: 'in:tunnel',
-        id,
+      const context: InLogContext = {
+        type: 'in',
+        tunnel: id,
       };
 
       const tunnel = this.tunnelMap.get(id);
@@ -231,10 +233,15 @@ export class TunnelServer {
 
       this.router.update(id, routeMatchOptions);
 
+      stream.on('error', error => {
+        Logs.error(context, IN_TUNNEL_CONFIGURE_UPDATE_STREAM_ERROR(error));
+        Logs.debug(context, error);
+      });
+
       stream.respond({':status': 200}, {endStream: true});
 
-      Logs.info(context, 'tunnel updated.');
-      Logs.debug(context, 'route match options:', routeMatchOptions);
+      Logs.info(context, IN_TUNNEL_UPDATED);
+      Logs.debug(context, IN_ROUTE_MATCH_OPTIONS, routeMatchOptions);
     }
   }
 
@@ -258,7 +265,7 @@ export class TunnelServer {
 
     assert(connection);
 
-    Logs.debug(connection.context, 'established OUT-IN stream.');
+    Logs.debug(connection.context, IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED);
 
     connection.stream.setReadable(stream);
 
@@ -273,7 +280,7 @@ export class TunnelServer {
 }
 
 export type TunnelConnection = {
-  context: InTunnelConnectLogContext;
+  context: InLogContext;
   stream: Duplexify;
 };
 

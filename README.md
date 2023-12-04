@@ -45,16 +45,10 @@ export default {
 export default 'https://gist.github.com/vilicvane/xxx';
 ```
 
-## HTTP2
+## Connections
 
-```mermaid
-sequenceDiagram
-  browser ->> in: CONNECT example.com:443 (proxy)
-  in ->> +out: detect ALPN protocols (h2, http/1.1)
-  out ->> -in: ALPN protocols: h2
-  browser ->> in: TLS ALPN (proxy)
-
-```
+- request/connect socket - proxy socket
+- request/connect socket - tunnel stream (IN-OUT/OUT-IN stream) - proxy socket
 
 ## License
 

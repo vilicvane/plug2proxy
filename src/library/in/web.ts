@@ -2,16 +2,11 @@ import Chalk from 'chalk';
 import Express from 'express';
 import * as x from 'x-value';
 
-import type {InWebLogContext} from '../@log.js';
-import {Logs} from '../@log.js';
+import {Logs} from '../@log/index.js';
 
 export const WEB_HOSTNAME = 'plug2proxy';
 
 const CA_FILENAME = 'ca.crt';
-
-const CONTEXT: InWebLogContext = {
-  type: 'in:web',
-};
 
 export const WebOptions = x.object({
   caCertPath: x.string.optional(),
@@ -26,7 +21,7 @@ export class Web {
     const app = Express();
 
     app.use((request, _response, next) => {
-      Logs.info(CONTEXT, request.method, request.url);
+      Logs.info('web', request.method, request.url);
 
       next();
     });

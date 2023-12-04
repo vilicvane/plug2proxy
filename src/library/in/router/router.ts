@@ -3,8 +3,7 @@ import {randomInt} from 'crypto';
 import * as DNS from 'dns/promises';
 import * as Net from 'net';
 
-import type {InRouterLogContext} from '../../@log.js';
-import {Logs} from '../../@log.js';
+import {IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN, Logs} from '../../@log/index.js';
 import type {TunnelId} from '../../common.js';
 import {
   ROUTE_MATCH_PRIORITY_DEFAULT,
@@ -19,8 +18,6 @@ import {
   createDomainRuleMatch,
   createIPRuleMatch,
 } from './rule-match.js';
-
-const CONTEXT: InRouterLogContext = {type: 'in:router'};
 
 export class Router {
   private candidateMap = new Map<TunnelId, RouteCandidate>();
@@ -52,6 +49,15 @@ export class Router {
       this.initializeRouteMatchOptions(routeMatchOptions);
   }
 
+  async route(
+    host: string,
+    referer: string | undefined,
+  ): Promise<TunnelId | undefined> {
+    return referer !== undefined
+      ? this.routeURL(referer)
+      : this.routeHost(host);
+  }
+
   async routeHost(host: string): Promise<TunnelId | undefined> {
     let domain: string | undefined;
     let ips: string[] | undefined;
@@ -70,8 +76,8 @@ export class Router {
           return ips;
         },
         error => {
-          Logs.warn(CONTEXT, `error resolving domain "${domain!}".`);
-          Logs.debug(CONTEXT, error);
+          Logs.warn('router', IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN(domain!));
+          Logs.debug('router', error);
           return [];
         },
       );

@@ -7,12 +7,14 @@ import ms from 'ms';
 import {request} from 'undici';
 import * as x from 'x-value';
 
-import type {InGeoLite2LogContext} from '../../@log.js';
-import {Logs} from '../../@log.js';
+import {
+  IN_GEOLITE2_DATABASE_UPDATED,
+  IN_GEOLITE2_DATABASE_UPDATE_FAILED,
+  IN_GEOLITE2_FAILED_TO_READ_DATABASE,
+  Logs,
+} from '../../@log/index.js';
 
 import type {RuleMatch} from './rule-match.js';
-
-const CONTEXT: InGeoLite2LogContext = {type: 'in:geolite2'};
 
 const MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL =
   'https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb';
@@ -79,7 +81,7 @@ export class GeoLite2 {
 
       this.readerResolver!(new Reader(data));
     } catch (error) {
-      Logs.error(CONTEXT, 'failed to read previously saved database.');
+      Logs.warn('geolite2', IN_GEOLITE2_FAILED_TO_READ_DATABASE);
     }
 
     setTimeout(
@@ -113,10 +115,10 @@ export class GeoLite2 {
         this.readerPromise = Promise.resolve(new Reader(data));
       }
 
-      Logs.info(CONTEXT, 'database updated.');
+      Logs.info('geolite2', IN_GEOLITE2_DATABASE_UPDATED);
     } catch (error) {
-      Logs.error(CONTEXT, 'failed to update database.');
-      Logs.debug(CONTEXT, error);
+      Logs.error('geolite2', IN_GEOLITE2_DATABASE_UPDATE_FAILED);
+      Logs.debug('geolite2', error);
     }
   }
 }

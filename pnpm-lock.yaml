@@ -29,6 +29,9 @@ dependencies:
   chalk:
     specifier: ^5.3.0
     version: 5.3.0
+  core-js:
+    specifier: ^3.33.3
+    version: 3.33.3
   cosmiconfig:
     specifier: ^9.0.0
     version: 9.0.0(typescript@5.3.2)
@@ -1643,6 +1646,11 @@ packages:
   /cookie@0.5.0:
     resolution: {integrity: sha512-YZ3GUyn/o8gfKJlnlX7g7xq4gyO6OSuhGPKaaGssGB2qgDUS0gPgtTvoyZLTt9Ab6dC4hfc9dV5arkvc/OCmrw==}
     engines: {node: '>= 0.6'}
+    dev: false
+
+  /core-js@3.33.3:
+    resolution: {integrity: sha512-lo0kOocUlLKmm6kv/FswQL8zbkH7mVsLJ/FULClOhv8WRVmKLVcs6XPNQAzstfeJTCHMyButEwG+z1kHxHoDZw==}
+    requiresBuild: true
     dev: false
 
   /core-util-is@1.0.3:
