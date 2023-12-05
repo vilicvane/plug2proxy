@@ -21,6 +21,7 @@ import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
 import {
   CONNECTION_WINDOW_SIZE,
   STREAM_WINDOW_SIZE,
+  TUNNEL_ERROR_HEADER_NAME,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
 } from '../common.js';
@@ -196,7 +197,13 @@ export class Tunnel {
         if (status === 200) {
           this.continuousAttempts = 0;
         } else {
-          Logs.error(this.context, OUT_ERROR_CONFIGURING_TUNNEL(status));
+          Logs.error(
+            this.context,
+            OUT_ERROR_CONFIGURING_TUNNEL(
+              status,
+              headers[TUNNEL_ERROR_HEADER_NAME] as string | undefined,
+            ),
+          );
         }
       })
       .on('close', () => {

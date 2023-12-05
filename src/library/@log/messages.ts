@@ -24,6 +24,12 @@ export const IN_OPTIMISTIC_CONNECT = 'optimistic connect...';
 
 export const IN_CONNECT_SOCKET_CLOSED = 'connect socket closed.';
 
+export const IN_ALPN_PROTOCOL_CANDIDATES = (protocols: string[]) =>
+  `alpn protocol candidates: ${protocols.join(', ')}`;
+
+export const IN_ALPN_KNOWN_PROTOCOL_SELECTION = (protocol: string | false) =>
+  `alpn known protocol selection: ${protocol || 'none'}`;
+
 export const IN_SWITCHING_RIGHT_SECURE_PROXY_SOCKET =
   'referer route is different from host route, switching right (to server) secure proxy socket...';
 
@@ -104,6 +110,9 @@ export const IN_TUNNEL_UPDATED = 'tunnel updated.';
 
 export const IN_ROUTE_MATCH_OPTIONS = 'route match options:';
 
+export const IN_TUNNEL_PASSWORD_MISMATCH = (remoteAddress: string) =>
+  `tunnel password mismatch (from ${remoteAddress}).`;
+
 // router
 
 export const IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN = (domain: string) =>
@@ -132,8 +141,10 @@ export const OUT_TUNNEL_ERROR = (error: unknown) =>
 export const OUT_RECONNECT_IN = (delay: number) =>
   `reconnect in ${ms(delay)}...`;
 
-export const OUT_ERROR_CONFIGURING_TUNNEL = (status: number | undefined) =>
-  `error configuring tunnel (status ${status}).`;
+export const OUT_ERROR_CONFIGURING_TUNNEL = (
+  status: number | undefined,
+  message: string | undefined,
+) => `error configuring tunnel (status ${status}): ${message}`;
 
 export const OUT_RECEIVED_IN_OUT_STREAM = (host: string, port: number) =>
   `received tunnel IN-OUT stream to ${host}:${port}.`;

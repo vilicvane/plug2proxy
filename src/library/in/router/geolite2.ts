@@ -35,10 +35,10 @@ export type GeoLite2Options = x.TypeOf<typeof GeoLite2Options>;
 export class GeoLite2 {
   readonly path: string;
 
-  private readerPromise: Promise<Reader<CountryResponse>>;
+  private readerPromise: Promise<Reader<CountryResponse> | false>;
 
   private readerResolver:
-    | ((reader: Reader<CountryResponse>) => void)
+    | ((reader: Reader<CountryResponse> | false) => void)
     | undefined;
 
   constructor({path = DATABASE_PATH_DEFAULT}: GeoLite2Options) {
@@ -56,6 +56,10 @@ export class GeoLite2 {
 
     const route = async (ips: string[]): Promise<boolean> => {
       const reader = await this.readerPromise;
+
+      if (!reader) {
+        throw new Error('No GeoLite2 database available.');
+      }
 
       return ips.some(ip => {
         const region = reader.get(ip)?.country?.iso_code;
@@ -80,6 +84,7 @@ export class GeoLite2 {
       const data = await readFile(this.path);
 
       this.readerResolver!(new Reader(data));
+      this.readerResolver = undefined;
     } catch (error) {
       Logs.warn('geolite2', IN_GEOLITE2_FAILED_TO_READ_DATABASE);
     }
@@ -97,6 +102,8 @@ export class GeoLite2 {
 
     this.updateTimer = setTimeout(() => void this.update(), UPDATE_INTERVAL);
 
+    let reader: Reader<CountryResponse> | undefined;
+
     try {
       const response = await request(MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL, {
         maxRedirections: 3,
@@ -104,21 +111,24 @@ export class GeoLite2 {
 
       const data = await buffer(response.body);
 
-      const reader = new Reader<CountryResponse>(data);
+      reader = new Reader<CountryResponse>(data);
 
       await writeFile(this.path, data);
-
-      if (this.readerResolver) {
-        this.readerResolver(reader);
-        this.readerResolver = undefined;
-      } else {
-        this.readerPromise = Promise.resolve(new Reader(data));
-      }
 
       Logs.info('geolite2', IN_GEOLITE2_DATABASE_UPDATED);
     } catch (error) {
       Logs.error('geolite2', IN_GEOLITE2_DATABASE_UPDATE_FAILED);
       Logs.debug('geolite2', error);
+    }
+
+    if (this.readerResolver) {
+      // Use false to mark database not available.
+      this.readerResolver(reader ?? false);
+      this.readerResolver = undefined;
+    } else {
+      if (reader) {
+        this.readerPromise = Promise.resolve(reader);
+      }
     }
   }
 }

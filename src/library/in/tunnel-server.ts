@@ -14,6 +14,7 @@ import {
   IN_TUNNEL_ESTABLISHED,
   IN_TUNNEL_IN_OUT_STREAM_ESTABLISHED,
   IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
+  IN_TUNNEL_PASSWORD_MISMATCH,
   IN_TUNNEL_SERVER_LISTENING_ON,
   IN_TUNNEL_SERVER_TUNNELING,
   IN_TUNNEL_STREAM_CLOSED,
@@ -30,6 +31,7 @@ import type {
 import {
   CONNECTION_WINDOW_SIZE,
   STREAM_WINDOW_SIZE,
+  TUNNEL_ERROR_HEADER_NAME,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
 } from '../common.js';
@@ -174,7 +176,15 @@ export class TunnelServer {
 
     if (id === undefined) {
       if (password !== this.password) {
-        stream.respond({':status': 401}, {endStream: true});
+        Logs.error(
+          'tunnel-server',
+          IN_TUNNEL_PASSWORD_MISMATCH(session.socket!.remoteAddress!),
+        );
+
+        stream.respond(
+          {':status': 401, [TUNNEL_ERROR_HEADER_NAME]: 'password mismatch.'},
+          {endStream: true},
+        );
         session.close();
         return;
       }

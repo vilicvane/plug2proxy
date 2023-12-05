@@ -163,7 +163,7 @@ export class NetProxyBridge {
 
       Logs.info(context, IN_REQUEST_SOCKET_CLOSED);
     } catch (error) {
-      Logs.error(context, IN_ERROR_PIPING_REQUEST_SOCKET_FROM_TO_TUNNEL);
+      Logs.error(context, IN_ERROR_PIPING_REQUEST_SOCKET_FROM_TO_TUNNEL(error));
       Logs.debug(context, error);
     }
   }

@@ -1,9 +1,9 @@
 import Chalk from 'chalk';
-import type {Debugger} from 'debug';
-import Debug from 'debug';
 
 import type {ConnectionId, TunnelId, TunnelStreamId} from '../common.js';
 import type {Out} from '../out/index.js';
+
+const DEBUG_ENABLED = process.env.DEBUG?.includes('plug2proxy');
 
 export type InLogContext = {
   type: 'in';
@@ -32,10 +32,8 @@ type LogContext =
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-const LEVEL_COLORS: Record<
-  Exclude<string, 'debug'>,
-  (text: string) => string
-> = {
+const LEVEL_COLORS: Record<LogLevel, (text: string) => string> = {
+  debug: Chalk.dim,
   info: text => text,
   warn: Chalk.yellow,
   error: Chalk.red,
@@ -54,31 +52,16 @@ export namespace Logs {
 function createLogger<TLevel extends LogLevel>(
   level: TLevel,
 ): (context: LogContext, ...args: unknown[]) => void {
-  const write: (type: string, args: unknown[]) => void =
-    level === 'debug'
-      ? (() => {
-          const debugMap = new Map<string, Debugger>();
-
-          return (type, args) => {
-            const namespace = `plug2proxy:${type}`;
-
-            let debug = debugMap.get(namespace);
-
-            if (!debug) {
-              debug = Debug(namespace);
-              debugMap.set(namespace, debug);
-            }
-
-            (debug as any)(...args);
-          };
-        })()
-      : (_type, args) =>
+  const write: (args: unknown[]) => void =
+    level !== 'debug' || DEBUG_ENABLED
+      ? args =>
           // eslint-disable-next-line no-console
           console[level](
             ...args.map(arg =>
               typeof arg === 'string' ? LEVEL_COLORS[level](arg) : arg,
             ),
-          );
+          )
+      : () => {};
 
   return function log(context, ...args) {
     let type: string;
@@ -101,6 +84,10 @@ function createLogger<TLevel extends LogLevel>(
             prefix += TUNNEL_STREAM(context.stream);
           }
 
+          if (context.hostname !== undefined) {
+            prefix += ` ${context.hostname}`;
+          }
+
           break;
         case 'out':
           if (context.tunnel !== undefined) {
@@ -111,22 +98,22 @@ function createLogger<TLevel extends LogLevel>(
             prefix += TUNNEL_STREAM(context.stream);
           }
 
+          if (context.hostname !== undefined) {
+            prefix += ` ${context.hostname}`;
+          }
+
           break;
       }
 
       if (prefix) {
         prefix = `[${prefix}]`;
       }
-
-      if (context.hostname !== undefined) {
-        prefix += `[${context.hostname}]`;
-      }
     } else {
       type = context;
       prefix = `[${type}]`;
     }
 
-    write(type, [prefix, ...args]);
+    write([prefix, ...args]);
   };
 }
 

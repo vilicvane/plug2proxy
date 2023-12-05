@@ -13,6 +13,8 @@ import type {Nominal} from 'x-value';
 import type {InLogContext} from '../../@log/index.js';
 import {
   ALPN_PROTOCOL_CHANGED,
+  IN_ALPN_KNOWN_PROTOCOL_SELECTION,
+  IN_ALPN_PROTOCOL_CANDIDATES,
   IN_CERTIFICATE_TRUSTED_STATUS_CHANGED,
   IN_CONNECT_SOCKET_CLOSED,
   IN_CONNECT_TLS,
@@ -114,7 +116,6 @@ export class TLSProxyBridge {
 
     let hello: TlsHelloData | undefined;
 
-    // read client hello for ALPN
     const helloThrough = new PassThrough();
 
     const helloChunks: Buffer[] = [];
@@ -135,11 +136,7 @@ export class TLSProxyBridge {
       );
 
       if (hello.alpnProtocols) {
-        Logs.debug(
-          context,
-          'alpn protocols (IN):',
-          hello.alpnProtocols.join(', '),
-        );
+        Logs.debug(context, IN_ALPN_PROTOCOL_CANDIDATES(hello.alpnProtocols));
       }
     } catch (error) {
       Logs.debug(context, error);
@@ -190,7 +187,7 @@ export class TLSProxyBridge {
         serverName,
       );
     } else {
-      Logs.debug(context, 'known alpn protocol:', knownALPNProtocol);
+      Logs.debug(context, IN_ALPN_KNOWN_PROTOCOL_SELECTION(knownALPNProtocol));
 
       return this.performHTTPConnectWithCA(
         context,

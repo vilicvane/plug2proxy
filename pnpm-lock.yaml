@@ -8,9 +8,6 @@ dependencies:
   '@types/bytes':
     specifier: ^3.1.4
     version: 3.1.4
-  '@types/debug':
-    specifier: ^4.1.12
-    version: 4.1.12
   '@types/duplexify':
     specifier: ^3.6.4
     version: 3.6.4
@@ -35,18 +32,12 @@ dependencies:
   cosmiconfig:
     specifier: ^9.0.0
     version: 9.0.0(typescript@5.3.2)
-  debug:
-    specifier: ^4.3.4
-    version: 4.3.4
   duplexify:
     specifier: ^4.1.2
     version: 4.1.2
   express:
     specifier: ^4.18.2
     version: 4.18.2
-  hpack.js:
-    specifier: ^2.1.6
-    version: 2.1.6
   http-parser-js:
     specifier: ^0.5.8
     version: 0.5.8
@@ -899,12 +890,6 @@ packages:
     resolution: {integrity: sha512-K6uROf1LD88uDQqJCktA4yzL1YYAK6NgfsI0v/mTgyPKWsX1CnJ0XPSDhViejru1GcRkLWb8RlzFYJRqGUbaug==}
     dependencies:
       '@types/node': 20.9.3
-    dev: false
-
-  /@types/debug@4.1.12:
-    resolution: {integrity: sha512-vIChWdVG3LG1SMxEvI/AK+FWJthlrqlTu7fbrlywTkkaONwk/UAGaULXRlf8vkzFBLVm0zkMdCquhL5aOjhXPQ==}
-    dependencies:
-      '@types/ms': 0.7.34
     dev: false
 
   /@types/duplexify@3.6.4:

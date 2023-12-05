@@ -1,3 +1,4 @@
+import assert from 'assert';
 import * as HTTP from 'http';
 import type * as Net from 'net';
 
@@ -54,7 +55,9 @@ export class HTTPProxy {
     connectSocket: Net.Socket,
   ): void => {
     const [host, portString] = request.url!.split(':');
-    const port = parseInt(portString) || 443;
+    const port = parseInt(portString);
+
+    assert(!isNaN(port));
 
     connectSocket.write('HTTP/1.1 200 OK\r\n\r\n');
 

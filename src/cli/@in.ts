@@ -5,9 +5,10 @@ import {CA_CERT_PATH, CA_KEY_PATH} from './@constants.js';
 export async function setupIn({
   tunnel: tunnelServerConfig = {},
   proxy: httpProxyOptions = {},
-  ca = In.CONFIG_CA_DEFAULT,
 }: In.Config): Promise<void> {
   let caOptions: In.TLSProxyBridgeCAOptions | false;
+
+  const {ca = In.CONFIG_PROXY_CA_DEFAULT} = httpProxyOptions;
 
   if (ca) {
     caOptions = await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH);

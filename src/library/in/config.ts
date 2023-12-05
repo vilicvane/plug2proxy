@@ -3,7 +3,7 @@ import * as xn from 'x-value/node';
 
 import {ListeningHost, Port} from '../x.js';
 
-export const CONFIG_CA_DEFAULT = false;
+export const CONFIG_PROXY_CA_DEFAULT = false;
 
 const TunnelServerConfig = x.intersection([
   x.object({
@@ -23,13 +23,13 @@ const TunnelServerConfig = x.intersection([
 const HTTPProxyConfig = x.object({
   host: ListeningHost.optional(),
   port: Port.optional(),
+  ca: x.boolean.optional(),
 });
 
 export const Config = x.object({
   mode: x.literal('in'),
   tunnel: TunnelServerConfig.optional(),
   proxy: HTTPProxyConfig.optional(),
-  ca: x.boolean.optional(),
 });
 
 export type Config = x.TypeOf<typeof Config>;
