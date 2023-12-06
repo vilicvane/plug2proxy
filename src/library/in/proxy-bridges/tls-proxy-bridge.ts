@@ -5,6 +5,7 @@ import type {Duplex} from 'stream';
 import * as TLS from 'tls';
 
 import Forge from '@vilic/node-forge';
+import {minimatch} from 'minimatch';
 import type {Nominal} from 'x-value';
 
 import type {InLogContext} from '../../@log/index.js';
@@ -40,6 +41,7 @@ import type {TunnelServer} from '../tunnel-server.js';
 export type TLSProxyBridgeCAOptions = {
   cert: string;
   key: string;
+  exclude?: string[];
 };
 
 export type TLSProxyBridgeOptions = {
@@ -54,6 +56,8 @@ export class TLSProxyBridge {
       }
     | undefined;
 
+  readonly caExclude: string[] | undefined;
+
   constructor(
     readonly tunnelServer: TunnelServer,
     readonly router: Router,
@@ -64,6 +68,8 @@ export class TLSProxyBridge {
         cert: Forge.pki.certificateFromPem(ca.cert),
         key: Forge.pki.privateKeyFromPem(ca.key),
       };
+
+      this.caExclude = ca.exclude;
     }
   }
 
@@ -79,7 +85,7 @@ export class TLSProxyBridge {
   ): Promise<void> {
     Logs.info(context, IN_CONNECT_TLS(host, port));
 
-    if (this.ca) {
+    if (this.shouldReplaceCertificate(host, readTLSResult.serverName)) {
       await this.connectWithCA(
         context,
         connectionId,
@@ -97,6 +103,33 @@ export class TLSProxyBridge {
         port,
       );
     }
+  }
+
+  private shouldReplaceCertificate(
+    host: string,
+    serverName: string | undefined,
+  ): boolean {
+    if (!this.ca) {
+      return false;
+    }
+
+    const {caExclude} = this;
+
+    if (!caExclude || caExclude.length === 0) {
+      return true;
+    }
+
+    if (caExclude.some(match => minimatch(host, match))) {
+      return false;
+    }
+
+    if (serverName !== undefined && serverName !== host) {
+      if (caExclude.some(match => minimatch(host, match))) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   private async connectWithCA(

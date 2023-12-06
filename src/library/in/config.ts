@@ -22,10 +22,14 @@ const TunnelServerConfig = x.intersection([
   ]),
 ]);
 
+const HTTPProxyCAConfig = x.object({
+  exclude: x.array(x.string).optional(),
+});
+
 const HTTPProxyConfig = x.object({
   host: ListeningHost.optional(),
   port: Port.optional(),
-  ca: x.boolean.optional(),
+  ca: x.union([HTTPProxyCAConfig, x.boolean]).optional(),
 });
 
 export const Config = x.object({

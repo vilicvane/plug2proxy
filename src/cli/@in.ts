@@ -13,7 +13,10 @@ export async function setupIn({
   const {ca = In.CONFIG_PROXY_CA_DEFAULT} = httpProxyOptions;
 
   if (ca) {
-    caOptions = await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH);
+    caOptions = {
+      ...(await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH)),
+      ...(typeof ca !== 'boolean' ? ca : undefined),
+    };
   } else {
     caOptions = false;
   }
