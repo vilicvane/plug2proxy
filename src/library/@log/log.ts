@@ -10,13 +10,15 @@ export type InLogContext = {
   method?: 'connect' | 'request';
   connection?: ConnectionId;
   tunnel?: TunnelId;
+  tunnelAlias?: string;
   stream?: TunnelStreamId;
   hostname?: string;
 };
 
 export type OutLogContext = {
   type: 'out';
-  tunnel?: Out.TunnelId | string;
+  tunnelAlias?: string;
+  tunnel?: Out.TunnelId;
   stream?: TunnelStreamId;
   hostname?: string;
 };
@@ -66,6 +68,7 @@ function createLogger<TLevel extends LogLevel>(
   return function log(context, ...args) {
     let type: string;
     let prefix = '';
+    const subPrefixes: string[] = [];
 
     if (typeof context === 'object') {
       type = context.type;
@@ -78,6 +81,10 @@ function createLogger<TLevel extends LogLevel>(
 
           if (context.tunnel !== undefined) {
             prefix += IN_TUNNEL(context.tunnel);
+
+            if (context.tunnelAlias !== undefined) {
+              subPrefixes.push(context.tunnelAlias);
+            }
           }
 
           if (context.stream !== undefined) {
@@ -92,6 +99,10 @@ function createLogger<TLevel extends LogLevel>(
         case 'out':
           if (context.tunnel !== undefined) {
             prefix += OUT_TUNNEL(context.tunnel);
+
+            if (context.tunnelAlias !== undefined) {
+              subPrefixes.push(context.tunnelAlias);
+            }
           }
 
           if (context.stream !== undefined) {
@@ -107,6 +118,10 @@ function createLogger<TLevel extends LogLevel>(
 
       if (prefix) {
         prefix = `[${prefix}]`;
+      }
+
+      if (subPrefixes.length > 0) {
+        prefix += subPrefixes.map(subPrefix => `[${subPrefix}]`).join('');
       }
     } else {
       type = context;
@@ -125,8 +140,8 @@ function IN_TUNNEL(id: TunnelId): string {
   return `>${id}`;
 }
 
-function OUT_TUNNEL(idOrAlias: Out.TunnelId | string): string {
-  return `<${idOrAlias}`;
+function OUT_TUNNEL(id: Out.TunnelId): string {
+  return `<${id}`;
 }
 
 function TUNNEL_STREAM(id: TunnelStreamId): string {

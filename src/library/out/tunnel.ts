@@ -18,12 +18,18 @@ import {
   OUT_TUNNEL_WINDOW_SIZE_UPDATED,
 } from '../@log/index.js';
 import {pipelines} from '../@utils/index.js';
-import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
+import type {
+  TunnelInOutHeaderData,
+  TunnelOutInErrorResponseHeaderData,
+  TunnelOutInHeaderData,
+  TunnelOutInTunnelResponseHeaderData,
+} from '../common.js';
 import {
   INITIAL_WINDOW_SIZE,
-  TUNNEL_ERROR_HEADER_NAME,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
+  decodeTunnelHeader,
+  encodeTunnelHeader,
 } from '../common.js';
 import type {RouteMatchOptions} from '../router.js';
 import {setupAutoWindowSize} from '../window-size.js';
@@ -62,6 +68,8 @@ export type TunnelId = x.Nominal<'tunnel id', number>;
 export class Tunnel {
   readonly context: OutLogContext;
 
+  readonly alias: string | undefined;
+
   readonly authority: string;
 
   readonly password: string | undefined;
@@ -91,8 +99,10 @@ export class Tunnel {
   ) {
     this.context = {
       type: 'out',
-      tunnel: alias ?? id,
+      tunnel: id,
     };
+
+    this.alias = alias;
 
     this.authority = `https://${host}:${port}`;
     this.password = password;
@@ -121,8 +131,6 @@ export class Tunnel {
       },
     })
       .on('connect', session => {
-        Logs.info(context, OUT_TUNNEL_ESTABLISHED);
-
         setupAutoWindowSize(session, INITIAL_WINDOW_SIZE, windowSize => {
           Logs.debug(this.context, OUT_TUNNEL_WINDOW_SIZE_UPDATED(windowSize));
         });
@@ -130,9 +138,9 @@ export class Tunnel {
         this._configure();
       })
       .on('stream', (stream, headers) => {
-        const data = JSON.parse(
+        const data = decodeTunnelHeader<TunnelInOutHeaderData>(
           headers[TUNNEL_HEADER_NAME] as string,
-        ) as TunnelInOutHeaderData;
+        );
 
         switch (data.type) {
           case 'in-out-stream':
@@ -178,11 +186,12 @@ export class Tunnel {
 
     const stream = session.request(
       {
-        [TUNNEL_HEADER_NAME]: JSON.stringify({
+        [TUNNEL_HEADER_NAME]: encodeTunnelHeader<TunnelOutInHeaderData>({
           type: 'tunnel',
+          alias: this.alias,
           routeMatchOptions,
           password: sessionConfigured ? undefined : this.password,
-        } satisfies TunnelOutInHeaderData),
+        }),
       },
       {endStream: true},
     );
@@ -194,17 +203,26 @@ export class Tunnel {
         }
 
         const status = headers[':status'];
+        const tunnelHeader = headers[TUNNEL_HEADER_NAME] as string;
 
         if (status === 200) {
           this.continuousAttempts = 0;
+
+          const {alias} =
+            decodeTunnelHeader<TunnelOutInTunnelResponseHeaderData>(
+              tunnelHeader,
+            );
+
+          this.context.tunnelAlias = alias;
+
+          Logs.info(this.context, OUT_TUNNEL_ESTABLISHED);
         } else {
-          Logs.error(
-            this.context,
-            OUT_ERROR_CONFIGURING_TUNNEL(
-              status,
-              headers[TUNNEL_ERROR_HEADER_NAME] as string | undefined,
-            ),
-          );
+          const {error} =
+            decodeTunnelHeader<TunnelOutInErrorResponseHeaderData>(
+              tunnelHeader,
+            );
+
+          Logs.error(this.context, OUT_ERROR_CONFIGURING_TUNNEL(status, error));
         }
       })
       .on('close', () => {
@@ -231,16 +249,18 @@ export class Tunnel {
       hostname: `${host}:${port}`,
     };
 
+    Object.setPrototypeOf(context, this.context);
+
     Logs.info(context, OUT_RECEIVED_IN_OUT_STREAM(host, port));
 
     const proxyStream = Net.connect(port, host);
 
     const outInStream = session.request(
       {
-        [TUNNEL_HEADER_NAME]: JSON.stringify({
+        [TUNNEL_HEADER_NAME]: encodeTunnelHeader<TunnelOutInHeaderData>({
           type: 'out-in-stream',
           id,
-        } satisfies TunnelOutInHeaderData),
+        }),
       },
       {endStream: false},
     );

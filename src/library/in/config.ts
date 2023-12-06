@@ -28,6 +28,7 @@ const HTTPProxyConfig = x.object({
 
 export const Config = x.object({
   mode: x.literal('in'),
+  alias: x.string.optional(),
   tunnel: TunnelServerConfig.optional(),
   proxy: HTTPProxyConfig.optional(),
 });

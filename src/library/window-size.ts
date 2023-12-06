@@ -49,7 +49,9 @@ export function setupAutoWindowSize(
 
     const {effectiveLocalWindowSize} = session.state;
 
-    assert(effectiveLocalWindowSize !== undefined);
+    if (effectiveLocalWindowSize === undefined) {
+      return;
+    }
 
     const bandwidth = receivedSinceLastCalculation / duration; // bytes/ms
 

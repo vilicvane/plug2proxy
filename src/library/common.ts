@@ -12,8 +12,6 @@ export type ConnectionId = x.Nominal<'connection id', number>;
 
 export const TUNNEL_HEADER_NAME = 'x-tunnel';
 
-export const TUNNEL_ERROR_HEADER_NAME = 'x-tunnel-error';
-
 export type TunnelId = x.Nominal<'tunnel id', number>;
 
 export type TunnelStreamId = x.Nominal<'tunnel stream id', number>;
@@ -28,6 +26,7 @@ export type TunnelInOutHeaderData = {
 export type TunnelOutInHeaderData =
   | {
       type: 'tunnel';
+      alias: string | undefined;
       routeMatchOptions: RouteMatchOptions;
       password?: string;
     }
@@ -35,3 +34,19 @@ export type TunnelOutInHeaderData =
       type: 'out-in-stream';
       id: TunnelStreamId;
     };
+
+export type TunnelOutInTunnelResponseHeaderData = {
+  alias: string | undefined;
+};
+
+export type TunnelOutInErrorResponseHeaderData = {
+  error: string;
+};
+
+export function encodeTunnelHeader<T>(data: T): string {
+  return Buffer.from(JSON.stringify(data), 'utf8').toString('base64');
+}
+
+export function decodeTunnelHeader<T>(header: string): T {
+  return JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+}

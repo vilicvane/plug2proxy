@@ -4,6 +4,7 @@ import {RouteMatchOptions} from '../router.js';
 import {Port} from '../x.js';
 
 const TunnelConfig = x.object({
+  alias: x.string.optional(),
   host: x.string,
   port: Port.optional(),
   password: x.string.optional(),

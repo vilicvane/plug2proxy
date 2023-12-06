@@ -3,6 +3,7 @@ import {In} from '../library/index.js';
 import {CA_CERT_PATH, CA_KEY_PATH} from './@constants.js';
 
 export async function setupIn({
+  alias,
   tunnel: tunnelServerConfig = {},
   proxy: httpProxyOptions = {},
 }: In.Config): Promise<void> {
@@ -21,6 +22,7 @@ export async function setupIn({
   const router = new In.Router(geolite2);
 
   const tunnelServer = new In.TunnelServer(router, {
+    alias,
     ...('cert' in tunnelServerConfig && 'key' in tunnelServerConfig
       ? tunnelServerConfig
       : {

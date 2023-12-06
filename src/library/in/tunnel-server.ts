@@ -25,14 +25,17 @@ import {
 import type {
   TunnelId,
   TunnelInOutHeaderData,
+  TunnelOutInErrorResponseHeaderData,
   TunnelOutInHeaderData,
+  TunnelOutInTunnelResponseHeaderData,
   TunnelStreamId,
 } from '../common.js';
 import {
   INITIAL_WINDOW_SIZE,
-  TUNNEL_ERROR_HEADER_NAME,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
+  decodeTunnelHeader,
+  encodeTunnelHeader,
 } from '../common.js';
 import {setupAutoWindowSize} from '../window-size.js';
 import type {ListeningHost, Port} from '../x.js';
@@ -44,6 +47,7 @@ const MAX_OUTSTANDING_PINGS = 5;
 const HOST_DEFAULT = '';
 
 export type TunnelServerOptions = {
+  alias?: string;
   host?: ListeningHost;
   port?: Port;
   cert: string | Buffer;
@@ -54,6 +58,8 @@ export type TunnelServerOptions = {
 export class TunnelServer {
   readonly server: HTTP2.Http2SecureServer;
 
+  readonly alias: string | undefined;
+
   readonly password: string | undefined;
 
   private tunnelMap = new Map<TunnelId, Tunnel>();
@@ -62,6 +68,7 @@ export class TunnelServer {
   constructor(
     readonly router: Router,
     {
+      alias,
       host = HOST_DEFAULT,
       port = TUNNEL_PORT_DEFAULT,
       cert,
@@ -95,9 +102,9 @@ export class TunnelServer {
         });
       })
       .on('stream', (stream, headers) => {
-        const data = JSON.parse(
+        const data = decodeTunnelHeader<TunnelOutInHeaderData>(
           headers[TUNNEL_HEADER_NAME] as string,
-        ) as TunnelOutInHeaderData;
+        );
 
         switch (data.type) {
           case 'tunnel':
@@ -112,6 +119,7 @@ export class TunnelServer {
         Logs.info('tunnel-server', IN_TUNNEL_SERVER_LISTENING_ON(host, port));
       });
 
+    this.alias = alias;
     this.password = password;
   }
 
@@ -131,7 +139,7 @@ export class TunnelServer {
 
     const context: InLogContext = {
       ...upperContext,
-      tunnel: tunnelId,
+      ...tunnel.context,
       stream: id,
     };
 
@@ -143,12 +151,12 @@ export class TunnelServer {
     return new Promise((resolve, reject) => {
       tunnelStream.pushStream(
         {
-          [TUNNEL_HEADER_NAME]: JSON.stringify({
+          [TUNNEL_HEADER_NAME]: encodeTunnelHeader<TunnelInOutHeaderData>({
             type: 'in-out-stream',
             id,
             host,
             port,
-          } satisfies TunnelInOutHeaderData),
+          }),
         },
         (error, inOutStream) => {
           if (error) {
@@ -177,7 +185,11 @@ export class TunnelServer {
   }
 
   private handleTunnel(
-    {routeMatchOptions, password}: TunnelOutInHeaderData & {type: 'tunnel'},
+    {
+      alias,
+      routeMatchOptions,
+      password,
+    }: TunnelOutInHeaderData & {type: 'tunnel'},
     stream: HTTP2.ServerHttp2Stream,
   ): void {
     const session = stream.session;
@@ -194,7 +206,13 @@ export class TunnelServer {
         );
 
         stream.respond(
-          {':status': 401, [TUNNEL_ERROR_HEADER_NAME]: 'password mismatch.'},
+          {
+            ':status': 401,
+            [TUNNEL_HEADER_NAME]:
+              encodeTunnelHeader<TunnelOutInErrorResponseHeaderData>({
+                error: 'password mismatch.',
+              }),
+          },
           {endStream: true},
         );
         session.close();
@@ -206,10 +224,12 @@ export class TunnelServer {
       const context: InLogContext = {
         type: 'in',
         tunnel: id,
+        tunnelAlias: alias,
       };
 
       this.tunnelMap.set(id, {
         id,
+        context,
         remoteAddress: session.socket!.remoteAddress!,
         tunnelStream: stream,
         connectionMap: new Map(),
@@ -239,19 +259,22 @@ export class TunnelServer {
           Logs.debug(context, error);
         });
 
-      stream.respond({':status': 200});
+      stream.respond({
+        ':status': 200,
+        [TUNNEL_HEADER_NAME]:
+          encodeTunnelHeader<TunnelOutInTunnelResponseHeaderData>({
+            alias: this.alias,
+          }),
+      });
 
       Logs.info(context, IN_TUNNEL_ESTABLISHED);
       Logs.debug(context, IN_ROUTE_MATCH_OPTIONS, routeMatchOptions);
     } else {
-      const context: InLogContext = {
-        type: 'in',
-        tunnel: id,
-      };
-
       const tunnel = this.tunnelMap.get(id);
 
       assert(tunnel);
+
+      const {context} = tunnel;
 
       this.router.update(id, routeMatchOptions);
 
@@ -308,6 +331,7 @@ export type TunnelConnection = {
 
 export type Tunnel = {
   id: TunnelId;
+  context: InLogContext;
   remoteAddress: string;
   tunnelStream: HTTP2.ServerHttp2Stream;
   connectionMap: Map<TunnelStreamId, TunnelConnection>;
