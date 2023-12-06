@@ -31,7 +31,11 @@ import {
   decodeTunnelHeader,
   encodeTunnelHeader,
 } from '../common.js';
-import type {RouteMatchOptions} from '../router.js';
+import type {
+  RouteMatchIncludeRule,
+  RouteMatchOptions,
+  RouteMatchRule,
+} from '../router.js';
 import {setupAutoWindowSize} from '../window-size.js';
 
 const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
@@ -40,19 +44,11 @@ function RECONNECT_DELAY(attempts: number): number {
   return RECONNECT_DELAYS[Math.min(attempts, RECONNECT_DELAYS.length - 1)];
 }
 
-const ROUTE_MATCH_OPTIONS_DEFAULT: RouteMatchOptions = {
-  include: [
-    {
-      type: 'all',
-    },
-  ],
-  exclude: [
-    {
-      type: 'ip',
-      match: 'private',
-    },
-  ],
-};
+const ROUTE_MATCH_INCLUDE_DEFAULT: RouteMatchIncludeRule[] = [{type: 'all'}];
+
+const ROUTE_MATCH_EXCLUDE_DEFAULT: RouteMatchRule[] = [
+  {type: 'ip', match: 'private'},
+];
 
 export type TunnelOptions = {
   alias?: string;
@@ -93,7 +89,7 @@ export class Tunnel {
       port = TUNNEL_PORT_DEFAULT,
       password,
       rejectUnauthorized = true,
-      match: routeMatchOptions = ROUTE_MATCH_OPTIONS_DEFAULT,
+      match: routeMatchOptions = {},
       alias,
     }: TunnelOptions,
   ) {
@@ -109,7 +105,11 @@ export class Tunnel {
 
     this.rejectUnauthorized = rejectUnauthorized;
 
-    this.routeMatchOptions = routeMatchOptions;
+    this.routeMatchOptions = {
+      include: ROUTE_MATCH_INCLUDE_DEFAULT,
+      exclude: ROUTE_MATCH_EXCLUDE_DEFAULT,
+      ...routeMatchOptions,
+    };
 
     this.connect();
   }
