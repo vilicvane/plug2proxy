@@ -8,11 +8,11 @@ import {
   IN_HTTP_PROXY_LISTENING_ON,
   Logs,
 } from '../@log/index.js';
-import {readHTTPRequestStreamHeaders} from '../@utils/index.js';
 import type {ConnectionId} from '../common.js';
 import type {ListeningHost} from '../x.js';
 import {Port} from '../x.js';
 
+import {readHTTPHeadersOrTLS} from './@sniffing.js';
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
 import type {TunnelServer} from './tunnel-server.js';
 import {WEB_HOSTNAME, type Web} from './web.js';
@@ -70,24 +70,24 @@ export class HTTPProxy {
       hostname: `${host}:${port}`,
     };
 
-    void readHTTPRequestStreamHeaders(connectSocket).then(
-      headerMap => {
-        if (headerMap) {
-          void this.netProxyBridge.connect(
-            context,
-            connectionId,
-            connectSocket,
-            host,
-            port,
-            headerMap,
-          );
-        } else {
+    void readHTTPHeadersOrTLS(connectSocket).then(
+      result => {
+        if (result && result.type === 'tls') {
           void this.tlsProxyBridge.connect(
             context,
             connectionId,
             connectSocket,
             host,
             port,
+            result,
+          );
+        } else {
+          void this.netProxyBridge.connect(
+            context,
+            connectSocket,
+            host,
+            port,
+            result?.headerMap,
           );
         }
       },

@@ -2,19 +2,15 @@ import assert from 'assert';
 import {once} from 'events';
 import * as Net from 'net';
 import type {Duplex} from 'stream';
-import {PassThrough} from 'stream';
 import * as TLS from 'tls';
 
 import Forge from '@vilic/node-forge';
-import type {TlsHelloData} from 'read-tls-client-hello';
-import {readTlsClientHello} from 'read-tls-client-hello';
 import type {Nominal} from 'x-value';
 
 import type {InLogContext} from '../../@log/index.js';
 import {
   ALPN_PROTOCOL_CHANGED,
   IN_ALPN_KNOWN_PROTOCOL_SELECTION,
-  IN_ALPN_PROTOCOL_CANDIDATES,
   IN_CERTIFICATE_TRUSTED_STATUS_CHANGED,
   IN_CONNECT_SOCKET_CLOSED,
   IN_CONNECT_TLS,
@@ -22,7 +18,6 @@ import {
   IN_ERROR_LEFT_SECURE_PROXY_SOCKET_ERROR,
   IN_ERROR_PIPING_CONNECT_SOCKET_FROM_TO_TUNNEL,
   IN_ERROR_READING_REQUEST_HEADERS,
-  IN_ERROR_READING_TLS_CLIENT_HELLO,
   IN_ERROR_RIGHT_SECURE_PROXY_SOCKET_ERROR,
   IN_ERROR_ROUTING_CONNECTION,
   IN_ERROR_SETTING_UP_LEFT_SECURE_PROXY_SOCKET,
@@ -35,10 +30,10 @@ import {
 import {
   errorWhile,
   pipelines,
-  readHTTPRequestStreamHeaders,
   streamErrorWhileEntry,
 } from '../../@utils/index.js';
 import type {ConnectionId, TunnelId} from '../../common.js';
+import {type ReadTLSResult, readHTTPHeaders} from '../@sniffing.js';
 import type {Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
@@ -80,6 +75,7 @@ export class TLSProxyBridge {
     connectSocket: Net.Socket,
     host: string,
     port: number,
+    readTLSResult: ReadTLSResult,
   ): Promise<void> {
     Logs.info(context, IN_CONNECT_TLS(host, port));
 
@@ -90,6 +86,7 @@ export class TLSProxyBridge {
         connectSocket,
         host,
         port,
+        readTLSResult,
       );
     } else {
       await this.connectWithoutCA(
@@ -108,58 +105,8 @@ export class TLSProxyBridge {
     connectSocket: Net.Socket,
     host: string,
     port: number,
+    {serverName, alpnProtocols}: ReadTLSResult,
   ): Promise<void> {
-    const connectSocketErrorWhile = streamErrorWhileEntry(
-      connectSocket,
-      error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
-    );
-
-    let hello: TlsHelloData | undefined;
-
-    const helloThrough = new PassThrough();
-
-    const helloChunks: Buffer[] = [];
-
-    const onHelloData = (data: Buffer): void => {
-      helloChunks.push(data);
-      helloThrough.write(data);
-    };
-
-    connectSocket.on('data', onHelloData);
-    connectSocket.resume();
-
-    try {
-      hello = await errorWhile(
-        readTlsClientHello(helloThrough),
-        () => Logs.error(context, IN_ERROR_READING_TLS_CLIENT_HELLO),
-        [connectSocketErrorWhile],
-      );
-
-      if (hello.alpnProtocols) {
-        Logs.debug(context, IN_ALPN_PROTOCOL_CANDIDATES(hello.alpnProtocols));
-      }
-    } catch (error) {
-      Logs.debug(context, error);
-    }
-
-    connectSocket.off('data', onHelloData);
-
-    connectSocket.pause();
-
-    connectSocket.unshift(Buffer.concat(helloChunks));
-
-    if (!hello) {
-      return this.connectWithoutCA(
-        context,
-        connectionId,
-        connectSocket,
-        host,
-        port,
-      );
-    }
-
-    const {alpnProtocols, serverName} = hello;
-
     // If we already know that a specific host with specific ALPN protocols
     // selects a specific protocol, we can wait locally for the request referer
     // to determine the route.
@@ -178,7 +125,6 @@ export class TLSProxyBridge {
     if (knownALPNProtocol === undefined) {
       return this.performOptimisticConnectWithCA(
         context,
-        connectionId,
         host,
         port,
         connectSocket,
@@ -258,7 +204,6 @@ export class TLSProxyBridge {
 
   private async performOptimisticConnectWithCA(
     context: InLogContext,
-    connectionId: ConnectionId,
     host: string,
     port: number,
     connectSocket: Net.Socket,
@@ -567,7 +512,11 @@ export class TLSProxyBridge {
     let headerMap: Map<string, string> | undefined;
 
     try {
-      headerMap = await readHTTPRequestStreamHeaders(leftSecureProxySocket);
+      const result = await readHTTPHeaders(leftSecureProxySocket);
+
+      if (result) {
+        headerMap = result.headerMap;
+      }
     } catch (error) {
       leftSecureProxySocket.destroy();
 

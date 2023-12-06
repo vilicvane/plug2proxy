@@ -14,3 +14,4 @@ test.*
 geolite2.mmdb
 plug2proxy/
 p2p.*.js
+p2p-debug.*.js

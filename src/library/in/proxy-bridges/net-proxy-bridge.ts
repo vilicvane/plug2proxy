@@ -32,11 +32,10 @@ export class NetProxyBridge {
 
   async connect(
     context: InLogContext,
-    connectionId: ConnectionId,
     connectSocket: Net.Socket,
     host: string,
     port: number,
-    headerMap: Map<string, string>,
+    headerMap: Map<string, string> | undefined,
   ): Promise<void> {
     Logs.info(context, IN_CONNECT_NET(host, port));
 
@@ -45,8 +44,8 @@ export class NetProxyBridge {
       error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
     );
 
-    const referer = headerMap.get('referer');
-    const hostInHeader = headerMap.get('host')?.replace(/:\d+$/, '');
+    const referer = headerMap?.get('referer');
+    const hostInHeader = headerMap?.get('host')?.replace(/:\d+$/, '');
 
     let route: TunnelId | undefined;
 

@@ -1,6 +1,7 @@
-import {type Readable} from 'stream';
+import {PassThrough, type Readable} from 'stream';
 
 import {HTTPParser} from 'http-parser-js';
+import {readTlsClientHello} from 'read-tls-client-hello';
 import SPDYTransport from 'spdy-transport';
 
 const REQUEST_LINE_PATTERN = /^([A-Z]+) (\S+) HTTP\/(1\.[01]|2\.0)\r\n/;
@@ -11,12 +12,14 @@ const NON_PRINTABLE_ASCII_PATTERN = /[^\x20-\x7F]/;
 
 export type HTTPType = 'http1' | 'http2';
 
-/**
- * It seems that if `.resume()` is needed for 'data' events after `.pause()`.
- */
-export async function readHTTPRequestStreamHeaders(
+export type ReadHTTPHeaderResult = {
+  type: HTTPType;
+  headerMap: Map<string, string>;
+};
+
+export async function readHTTPHeaders(
   stream: Readable,
-): Promise<Map<string, string> | undefined> {
+): Promise<ReadHTTPHeaderResult | undefined> {
   const type = await new Promise<HTTPType | undefined>((resolve, reject) => {
     const chunks: Buffer[] = [];
 
@@ -91,7 +94,10 @@ export async function readHTTPRequestStreamHeaders(
 
           stream.unshift(Buffer.concat(chunks));
 
-          resolve(headerMap);
+          resolve({
+            type: 'http1',
+            headerMap,
+          });
         };
 
         const onData = (data: Buffer): void => {
@@ -126,7 +132,10 @@ export async function readHTTPRequestStreamHeaders(
 
           stream.unshift(Buffer.concat(chunks));
 
-          resolve(new Map(Object.entries(data.headers)));
+          resolve({
+            type: 'http2',
+            headerMap: new Map(Object.entries(data.headers)),
+          });
         });
 
         const onData = (data: Buffer): void => {
@@ -142,5 +151,51 @@ export async function readHTTPRequestStreamHeaders(
 
     default:
       return undefined;
+  }
+}
+
+export type ReadTLSResult = {
+  type: 'tls';
+  serverName: string | undefined;
+  alpnProtocols: string[] | undefined;
+};
+
+export async function readHTTPHeadersOrTLS(
+  stream: Readable,
+): Promise<ReadHTTPHeaderResult | ReadTLSResult | undefined> {
+  const httpHeaderResult = await readHTTPHeaders(stream);
+
+  if (httpHeaderResult) {
+    return httpHeaderResult;
+  }
+
+  const helloThrough = new PassThrough();
+
+  const helloChunks: Buffer[] = [];
+
+  const onHelloData = (data: Buffer): void => {
+    helloChunks.push(data);
+    helloThrough.write(data);
+  };
+
+  stream.on('data', onHelloData);
+  stream.resume();
+
+  try {
+    const {serverName, alpnProtocols} = await readTlsClientHello(helloThrough);
+
+    return {
+      type: 'tls',
+      serverName,
+      alpnProtocols,
+    };
+  } catch (error) {
+    return undefined;
+  } finally {
+    stream.off('data', onHelloData);
+
+    stream.pause();
+
+    stream.unshift(Buffer.concat(helloChunks));
   }
 }
