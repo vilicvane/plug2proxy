@@ -24,14 +24,20 @@
     "typescriptreact"
   ],
   "cSpell.words": [
+    "alicloud",
+    "alidns",
+    "aliyuncs",
+    "DDNS",
     "duplexify",
     "endregion",
     "geolite",
+    "IDDNS",
     "maxmind",
     "mmdb",
     "nominalize",
     "proxying",
     "Redirections",
+    "shenzhen",
     "SPDY",
     "undici"
   ]

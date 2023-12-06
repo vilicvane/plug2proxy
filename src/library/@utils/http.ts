@@ -3,7 +3,7 @@ import {type Readable} from 'stream';
 import {HTTPParser} from 'http-parser-js';
 import SPDYTransport from 'spdy-transport';
 
-const REQUEST_LINE_PATTERN = /^([A-Z]+) (\S+) HTTP\/(?:1\.[01]|2\.0)\r\n/;
+const REQUEST_LINE_PATTERN = /^([A-Z]+) (\S+) HTTP\/(1\.[01]|2\.0)\r\n/;
 
 const REQUEST_METHOD_PATTERN = /^[A-Z]+ ?/;
 

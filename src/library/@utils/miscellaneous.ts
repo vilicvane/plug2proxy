@@ -6,24 +6,8 @@ export function getErrorCode(error: unknown): string {
     : String(error);
 }
 
-export function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export function disposable(dispose: () => void): Disposable {
-  return {
-    [Symbol.dispose]: dispose,
-  };
-}
-
-export type Destroyable = {
-  destroy(): void;
-};
-
-export function destroyable(object: Destroyable): Disposable {
-  return {
-    [Symbol.dispose]() {
-      object.destroy();
-    },
-  };
+export function generateRandomAuthoritySegment(): string {
+  return Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, '0');
 }

@@ -131,9 +131,17 @@ export const IN_GEOLITE2_DATABASE_UPDATED = 'database updated.';
 
 export const IN_GEOLITE2_DATABASE_UPDATE_FAILED = 'database update failed.';
 
+// ddns
+
+export const IN_DDNS_PUBLIC_IP = (ip: string, provider: string) =>
+  `public ip ${ip} (${provider}).`;
+
 // OUT
 
 // tunnel
+
+export const OUT_CONNECTING = (authority: string) =>
+  `connecting ${authority}...`;
 
 export const OUT_TUNNEL_ESTABLISHED = 'tunnel established.';
 

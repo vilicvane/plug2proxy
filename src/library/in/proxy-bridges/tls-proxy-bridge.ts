@@ -140,7 +140,6 @@ export class TLSProxyBridge {
       }
     } catch (error) {
       Logs.debug(context, error);
-      return;
     }
 
     connectSocket.off('data', onHelloData);

@@ -3,6 +3,8 @@ import * as xn from 'x-value/node';
 
 import {ListeningHost, Port} from '../x.js';
 
+import {DDNSOptions} from './ddns/index.js';
+
 export const CONFIG_PROXY_CA_DEFAULT = false;
 
 const TunnelServerConfig = x.intersection([
@@ -31,6 +33,7 @@ export const Config = x.object({
   alias: x.string.optional(),
   tunnel: TunnelServerConfig.optional(),
   proxy: HTTPProxyConfig.optional(),
+  ddns: DDNSOptions.optional(),
 });
 
 export type Config = x.TypeOf<typeof Config>;

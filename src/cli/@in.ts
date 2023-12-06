@@ -6,6 +6,7 @@ export async function setupIn({
   alias,
   tunnel: tunnelServerConfig = {},
   proxy: httpProxyOptions = {},
+  ddns: ddnsOptions,
 }: In.Config): Promise<void> {
   let caOptions: In.TLSProxyBridgeCAOptions | false;
 
@@ -48,4 +49,8 @@ export async function setupIn({
     web,
     httpProxyOptions,
   );
+
+  if (ddnsOptions) {
+    new In.DDNS(ddnsOptions);
+  }
 }

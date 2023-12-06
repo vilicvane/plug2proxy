@@ -6,6 +6,7 @@ import type * as x from 'x-value';
 import type {OutLogContext} from '../@log/index.js';
 import {
   Logs,
+  OUT_CONNECTING,
   OUT_ERROR_CONFIGURING_TUNNEL,
   OUT_ERROR_PIPING_TUNNEL_STREAM_FROM_TO_PROXY_STREAM,
   OUT_RECEIVED_IN_OUT_STREAM,
@@ -17,7 +18,7 @@ import {
   OUT_TUNNEL_STREAM_CLOSED,
   OUT_TUNNEL_WINDOW_SIZE_UPDATED,
 } from '../@log/index.js';
-import {pipelines} from '../@utils/index.js';
+import {generateRandomAuthoritySegment, pipelines} from '../@utils/index.js';
 import type {
   TunnelInOutHeaderData,
   TunnelOutInErrorResponseHeaderData,
@@ -100,7 +101,11 @@ export class Tunnel {
 
     this.alias = alias;
 
-    this.authority = `https://${host}:${port}`;
+    this.authority = `https://${host.replace(
+      '#',
+      generateRandomAuthoritySegment(),
+    )}:${port}`;
+
     this.password = password;
 
     this.rejectUnauthorized = rejectUnauthorized;
@@ -123,6 +128,8 @@ export class Tunnel {
     const {context} = this;
 
     this.continuousAttempts++;
+
+    Logs.info(context, OUT_CONNECTING(this.authority));
 
     const session = HTTP2.connect(this.authority, {
       rejectUnauthorized: this.rejectUnauthorized,

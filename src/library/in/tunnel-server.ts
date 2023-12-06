@@ -308,7 +308,9 @@ export class TunnelServer {
 
     const connection = this.tunnelMap.get(tunnelId)?.connectionMap.get(id);
 
-    assert(connection);
+    if (!connection) {
+      return;
+    }
 
     Logs.debug(connection.context, IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED);
 

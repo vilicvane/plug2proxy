@@ -30,7 +30,8 @@ type LogContext =
   | 'tunnel-server'
   | 'router'
   | 'geolite2'
-  | 'web';
+  | 'web'
+  | 'ddns';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
