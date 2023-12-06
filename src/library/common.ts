@@ -6,8 +6,7 @@ import {Port} from './x.js';
 
 export const TUNNEL_PORT_DEFAULT = Port.nominalize(8443);
 
-export const CONNECTION_WINDOW_SIZE = bytes('128MB');
-export const STREAM_WINDOW_SIZE = bytes('32MB');
+export const INITIAL_WINDOW_SIZE = bytes('4MB');
 
 export type ConnectionId = x.Nominal<'connection id', number>;
 

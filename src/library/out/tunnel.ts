@@ -15,17 +15,18 @@ import {
   OUT_TUNNEL_ESTABLISHED,
   OUT_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
   OUT_TUNNEL_STREAM_CLOSED,
+  OUT_TUNNEL_WINDOW_SIZE_UPDATED,
 } from '../@log/index.js';
-import {pipelines, setupSessionPing} from '../@utils/index.js';
+import {pipelines} from '../@utils/index.js';
 import type {TunnelInOutHeaderData, TunnelOutInHeaderData} from '../common.js';
 import {
-  CONNECTION_WINDOW_SIZE,
-  STREAM_WINDOW_SIZE,
+  INITIAL_WINDOW_SIZE,
   TUNNEL_ERROR_HEADER_NAME,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
 } from '../common.js';
 import type {RouteMatchOptions} from '../router.js';
+import {setupAutoWindowSize} from '../window-size.js';
 
 const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
 
@@ -116,15 +117,15 @@ export class Tunnel {
     const session = HTTP2.connect(this.authority, {
       rejectUnauthorized: this.rejectUnauthorized,
       settings: {
-        initialWindowSize: STREAM_WINDOW_SIZE,
+        initialWindowSize: INITIAL_WINDOW_SIZE,
       },
     })
       .on('connect', session => {
         Logs.info(context, OUT_TUNNEL_ESTABLISHED);
 
-        session.setLocalWindowSize(CONNECTION_WINDOW_SIZE);
-
-        setupSessionPing(session);
+        setupAutoWindowSize(session, INITIAL_WINDOW_SIZE, windowSize => {
+          Logs.debug(this.context, OUT_TUNNEL_WINDOW_SIZE_UPDATED(windowSize));
+        });
 
         this._configure();
       })

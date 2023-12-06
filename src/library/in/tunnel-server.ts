@@ -19,9 +19,9 @@ import {
   IN_TUNNEL_SERVER_TUNNELING,
   IN_TUNNEL_STREAM_CLOSED,
   IN_TUNNEL_UPDATED,
+  IN_TUNNEL_WINDOW_SIZE_UPDATED,
   Logs,
 } from '../@log/index.js';
-import {setupSessionPing} from '../@utils/index.js';
 import type {
   TunnelId,
   TunnelInOutHeaderData,
@@ -29,12 +29,12 @@ import type {
   TunnelStreamId,
 } from '../common.js';
 import {
-  CONNECTION_WINDOW_SIZE,
-  STREAM_WINDOW_SIZE,
+  INITIAL_WINDOW_SIZE,
   TUNNEL_ERROR_HEADER_NAME,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
 } from '../common.js';
+import {setupAutoWindowSize} from '../window-size.js';
 import type {ListeningHost, Port} from '../x.js';
 
 import type {Router} from './router/index.js';
@@ -71,16 +71,28 @@ export class TunnelServer {
   ) {
     this.server = HTTP2.createSecureServer({
       settings: {
-        initialWindowSize: STREAM_WINDOW_SIZE,
+        initialWindowSize: INITIAL_WINDOW_SIZE,
       },
       cert,
       key,
       maxOutstandingPings: MAX_OUTSTANDING_PINGS,
     })
       .on('session', session => {
-        session.setLocalWindowSize(CONNECTION_WINDOW_SIZE);
+        setupAutoWindowSize(session, INITIAL_WINDOW_SIZE, windowSize => {
+          const tunnelId = this.sessionToTunnelIdMap.get(session);
 
-        setupSessionPing(session);
+          if (tunnelId === undefined) {
+            return;
+          }
+
+          Logs.debug(
+            {
+              type: 'in',
+              tunnel: tunnelId,
+            },
+            IN_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
+          );
+        });
       })
       .on('stream', (stream, headers) => {
         const data = JSON.parse(

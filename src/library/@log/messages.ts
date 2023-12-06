@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 
+import bytes from 'bytes';
 import ms from 'ms';
 
 import {getErrorCode} from '../@utils/index.js';
@@ -113,6 +114,9 @@ export const IN_ROUTE_MATCH_OPTIONS = 'route match options:';
 export const IN_TUNNEL_PASSWORD_MISMATCH = (remoteAddress: string) =>
   `tunnel password mismatch (from ${remoteAddress}).`;
 
+export const IN_TUNNEL_WINDOW_SIZE_UPDATED = (windowSize: number) =>
+  `tunnel window size updated: ${bytes(windowSize)}`;
+
 // router
 
 export const IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN = (domain: string) =>
@@ -157,3 +161,6 @@ export const OUT_TUNNEL_STREAM_CLOSED = 'tunnel stream closed.';
 export const OUT_ERROR_PIPING_TUNNEL_STREAM_FROM_TO_PROXY_STREAM = (
   error: unknown,
 ) => `error piping tunnel stream from/to proxy stream: ${getErrorCode(error)}`;
+
+export const OUT_TUNNEL_WINDOW_SIZE_UPDATED = (windowSize: number) =>
+  `tunnel window size updated: ${bytes(windowSize)}`;
