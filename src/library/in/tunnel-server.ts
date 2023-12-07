@@ -40,7 +40,7 @@ import {
 import {setupAutoWindowSize} from '../window-size.js';
 import type {ListeningHost, Port} from '../x.js';
 
-import type {Router} from './router/index.js';
+import type {RouteCandidate, Router} from './router/index.js';
 
 const MAX_OUTSTANDING_PINGS = 5;
 
@@ -125,11 +125,11 @@ export class TunnelServer {
 
   async connect(
     upperContext: InLogContext,
-    tunnelId: TunnelId,
+    route: RouteCandidate,
     host: string,
     port: number,
   ): Promise<Duplex> {
-    const tunnel = this.tunnelMap.get(tunnelId);
+    const tunnel = this.tunnelMap.get(route.tunnel);
 
     assert(tunnel);
 

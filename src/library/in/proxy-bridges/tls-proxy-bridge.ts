@@ -32,9 +32,9 @@ import {
   pipelines,
   streamErrorWhileEntry,
 } from '../../@utils/index.js';
-import type {ConnectionId, TunnelId} from '../../common.js';
+import type {ConnectionId} from '../../common.js';
 import {type ReadTLSResult, readHTTPHeaders} from '../@sniffing.js';
-import type {Router} from '../router/index.js';
+import type {RouteCandidate, Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
 export type TLSProxyBridgeCAOptions = {
@@ -161,7 +161,7 @@ export class TLSProxyBridge {
       error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
     );
 
-    let route: TunnelId | undefined;
+    let route: RouteCandidate | undefined;
 
     try {
       route = await errorWhile(
@@ -176,7 +176,7 @@ export class TLSProxyBridge {
 
     let tunnel: Duplex;
 
-    if (route !== undefined) {
+    if (route) {
       try {
         tunnel = await errorWhile(
           this.tunnelServer.connect(context, route, host, port),
@@ -219,7 +219,7 @@ export class TLSProxyBridge {
       error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
     );
 
-    let optimisticRoute: TunnelId | undefined;
+    let optimisticRoute: RouteCandidate | undefined;
 
     try {
       optimisticRoute = await errorWhile(
@@ -305,7 +305,7 @@ export class TLSProxyBridge {
     );
 
     if (referer !== undefined) {
-      let refererRoute: TunnelId | undefined;
+      let refererRoute: RouteCandidate | undefined;
 
       try {
         refererRoute = await errorWhile(
@@ -318,7 +318,7 @@ export class TLSProxyBridge {
         return;
       }
 
-      if (refererRoute && optimisticRoute !== refererRoute) {
+      if (refererRoute && refererRoute.remote !== optimisticRoute?.remote) {
         Logs.info(context, IN_SWITCHING_RIGHT_SECURE_PROXY_SOCKET);
 
         rightSecureProxySocket.destroy();
@@ -395,7 +395,7 @@ export class TLSProxyBridge {
         Logs.error(context, IN_ERROR_LEFT_SECURE_PROXY_SOCKET_ERROR(error)),
     );
 
-    let route: TunnelId | undefined;
+    let route: RouteCandidate | undefined;
 
     try {
       route = await errorWhile(
@@ -466,7 +466,7 @@ export class TLSProxyBridge {
 
   private async setupRightSecureProxySocket(
     context: InLogContext,
-    tunnelId: TunnelId | undefined,
+    route: RouteCandidate | undefined,
     host: string,
     port: number,
     alpnProtocols: string[] | undefined,
@@ -474,9 +474,9 @@ export class TLSProxyBridge {
   ): Promise<TLS.TLSSocket> {
     let stream: Duplex;
 
-    if (tunnelId !== undefined) {
+    if (route) {
       try {
-        stream = await this.tunnelServer.connect(context, tunnelId, host, port);
+        stream = await this.tunnelServer.connect(context, route, host, port);
       } catch (error) {
         Logs.error(context, IN_ERROR_TUNNEL_CONNECTING(error));
         throw error;

@@ -20,8 +20,7 @@ import {
   pipelines,
   streamErrorWhileEntry,
 } from '../../@utils/index.js';
-import type {ConnectionId, TunnelId} from '../../common.js';
-import type {Router} from '../router/index.js';
+import type {RouteCandidate, Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
 export class NetProxyBridge {
@@ -47,7 +46,7 @@ export class NetProxyBridge {
     const referer = headerMap?.get('referer');
     const hostInHeader = headerMap?.get('host')?.replace(/:\d+$/, '');
 
-    let route: TunnelId | undefined;
+    let route: RouteCandidate | undefined;
 
     try {
       route = await errorWhile(
@@ -62,7 +61,7 @@ export class NetProxyBridge {
 
     let tunnel: Duplex;
 
-    if (route !== undefined) {
+    if (route) {
       try {
         tunnel = await errorWhile(
           this.tunnelServer.connect(context, route, host, port),
@@ -92,7 +91,6 @@ export class NetProxyBridge {
 
   async request(
     context: InLogContext,
-    connectionId: ConnectionId,
     request: HTTP.IncomingMessage,
   ): Promise<void> {
     const urlString = request.url!;
@@ -109,7 +107,7 @@ export class NetProxyBridge {
 
     const {referer} = request.headers;
 
-    let route: TunnelId | undefined;
+    let route: RouteCandidate | undefined;
 
     try {
       route = await errorWhile(
@@ -124,7 +122,7 @@ export class NetProxyBridge {
 
     let socket: Duplex;
 
-    if (route !== undefined) {
+    if (route) {
       try {
         socket = await errorWhile(
           this.tunnelServer.connect(context, route, host, port),

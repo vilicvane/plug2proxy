@@ -30,7 +30,7 @@ export class Router {
     routeMatchOptions: RouteMatchOptions,
   ): void {
     this.candidateMap.set(id, {
-      id,
+      tunnel: id,
       remote,
       routeMatchOptions: this.initializeRouteMatchOptions(routeMatchOptions),
     });
@@ -52,13 +52,13 @@ export class Router {
   async route(
     host: string,
     referer: string | undefined,
-  ): Promise<TunnelId | undefined> {
+  ): Promise<RouteCandidate | undefined> {
     return referer !== undefined
       ? this.routeURL(referer)
       : this.routeHost(host);
   }
 
-  async routeHost(host: string): Promise<TunnelId | undefined> {
+  async routeHost(host: string): Promise<RouteCandidate | undefined> {
     let domain: string | undefined;
     let ips: string[] | undefined;
 
@@ -83,10 +83,14 @@ export class Router {
       );
 
     let highestPriority = -Infinity;
-    let priorIds: TunnelId[] = [];
+    let priorCandidates: RouteCandidate[] = [];
 
-    for (const [id, {routeMatchOptions}] of this.candidateMap) {
-      const priority = await match(domain, resolve, routeMatchOptions);
+    for (const candidate of this.candidateMap.values()) {
+      const priority = await match(
+        domain,
+        resolve,
+        candidate.routeMatchOptions,
+      );
 
       if (priority === false || priority < highestPriority) {
         continue;
@@ -94,18 +98,18 @@ export class Router {
 
       if (priority > highestPriority) {
         highestPriority = priority;
-        priorIds = [id];
+        priorCandidates = [candidate];
       } else {
-        priorIds.push(id);
+        priorCandidates.push(candidate);
       }
     }
 
-    return priorIds.length > 0
-      ? priorIds[randomInt(priorIds.length)]
+    return priorCandidates.length > 0
+      ? priorCandidates[randomInt(priorCandidates.length)]
       : undefined;
   }
 
-  routeURL(url: string): Promise<TunnelId | undefined> {
+  routeURL(url: string): Promise<RouteCandidate | undefined> {
     const host = new URL(url).host;
     return this.routeHost(host);
   }
@@ -148,7 +152,7 @@ export class Router {
 }
 
 export type RouteCandidate = {
-  id: TunnelId;
+  tunnel: TunnelId;
   remote: string;
   routeMatchOptions: InitializedRouteMatchOptions;
 };

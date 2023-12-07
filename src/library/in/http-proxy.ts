@@ -204,7 +204,7 @@ export class HTTPProxy {
       hostname: url.hostname,
     };
 
-    void this.netProxyBridge.request(context, connectionId, request);
+    void this.netProxyBridge.request(context, request);
   };
 
   private getNextConnectionId(): ConnectionId {
