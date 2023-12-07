@@ -107,6 +107,8 @@ export class TLSProxyBridge {
     port: number,
     {serverName, alpnProtocols}: ReadTLSResult,
   ): Promise<void> {
+    context.decrypted = true;
+
     // If we already know that a specific host with specific ALPN protocols
     // selects a specific protocol, we can wait locally for the request referer
     // to determine the route.

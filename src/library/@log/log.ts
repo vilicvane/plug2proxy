@@ -13,6 +13,7 @@ export type InLogContext = {
   tunnelAlias?: string;
   stream?: TunnelStreamId;
   hostname?: string;
+  decrypted?: boolean;
 };
 
 export type OutLogContext = {
@@ -94,6 +95,10 @@ function createLogger<TLevel extends LogLevel>(
 
           if (context.hostname !== undefined) {
             prefix += ` ${context.hostname}`;
+          }
+
+          if (context.decrypted) {
+            subPrefixes.push('🔓');
           }
 
           break;
