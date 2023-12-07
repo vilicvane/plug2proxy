@@ -77,6 +77,10 @@ function createLogger<TLevel extends LogLevel>(
 
       switch (context.type) {
         case 'in':
+          if (context.decrypted) {
+            subPrefixes.push('🔓');
+          }
+
           if (context.connection !== undefined) {
             prefix += CONNECTION(context.connection);
           }
@@ -95,10 +99,6 @@ function createLogger<TLevel extends LogLevel>(
 
           if (context.hostname !== undefined) {
             prefix += ` ${context.hostname}`;
-          }
-
-          if (context.decrypted) {
-            subPrefixes.push('🔓');
           }
 
           break;
