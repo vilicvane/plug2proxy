@@ -1,9 +1,8 @@
 import assert from 'assert';
 import * as HTTP2 from 'http2';
-import type {Duplex} from 'stream';
+import type {Duplex, Readable} from 'stream';
 
-import type {Duplexify} from 'duplexify';
-import duplexify from 'duplexify';
+import duplexer3 from 'duplexer3';
 
 import type {InLogContext} from '../@log/index.js';
 import {
@@ -12,12 +11,15 @@ import {
   IN_TUNNEL_CONFIGURE_STREAM_ERROR,
   IN_TUNNEL_CONFIGURE_UPDATE_STREAM_ERROR,
   IN_TUNNEL_ESTABLISHED,
+  IN_TUNNEL_IN_OUT_STREAM_CLOSED,
+  IN_TUNNEL_IN_OUT_STREAM_ERROR,
   IN_TUNNEL_IN_OUT_STREAM_ESTABLISHED,
+  IN_TUNNEL_OUT_IN_STREAM_CLOSED,
+  IN_TUNNEL_OUT_IN_STREAM_ERROR,
   IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
   IN_TUNNEL_PASSWORD_MISMATCH,
   IN_TUNNEL_SERVER_LISTENING_ON,
   IN_TUNNEL_SERVER_TUNNELING,
-  IN_TUNNEL_STREAM_CLOSED,
   IN_TUNNEL_UPDATED,
   IN_TUNNEL_WINDOW_SIZE_UPDATED,
   Logs,
@@ -166,19 +168,43 @@ export class TunnelServer {
 
           Logs.debug(context, IN_TUNNEL_IN_OUT_STREAM_ESTABLISHED);
 
-          const stream = duplexify(inOutStream);
+          inOutStream
+            .on('close', () => {
+              Logs.debug(context, IN_TUNNEL_IN_OUT_STREAM_CLOSED);
+              tunnel.connectionMap.delete(id);
+            })
+            .on('error', error => {
+              Logs.error(context, IN_TUNNEL_IN_OUT_STREAM_ERROR(error));
+              Logs.debug(context, error);
+            });
 
           tunnel.connectionMap.set(id, {
             context,
-            stream,
-          });
+            resolve(outInStream) {
+              if (!tunnel.connectionMap.has(id)) {
+                outInStream.destroy();
+                return;
+              }
 
-          stream.on('close', () => {
-            Logs.debug(context, IN_TUNNEL_STREAM_CLOSED);
-            tunnel.connectionMap.delete(id);
-          });
+              outInStream
+                .on('close', () => {
+                  Logs.debug(context, IN_TUNNEL_OUT_IN_STREAM_CLOSED);
+                  tunnel.connectionMap.delete(id);
+                })
+                .on('error', error => {
+                  Logs.error(context, IN_TUNNEL_OUT_IN_STREAM_ERROR(error));
+                  Logs.debug(context, error);
+                });
 
-          resolve(stream);
+              const stream = duplexer3(
+                {bubbleErrors: false},
+                inOutStream,
+                outInStream,
+              );
+
+              resolve(stream);
+            },
+          });
         },
       );
     });
@@ -314,7 +340,7 @@ export class TunnelServer {
 
     Logs.debug(connection.context, IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED);
 
-    connection.stream.setReadable(stream);
+    connection.resolve(stream);
 
     stream.respond({':status': 200});
   }
@@ -328,7 +354,7 @@ export class TunnelServer {
 
 export type TunnelConnection = {
   context: InLogContext;
-  stream: Duplexify;
+  resolve(outInStream: Readable): void;
 };
 
 export type Tunnel = {

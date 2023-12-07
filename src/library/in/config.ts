@@ -6,8 +6,6 @@ import {ListeningHost, Port} from '../x.js';
 import {DDNSOptions} from './ddns/index.js';
 import {HTTPProxyRefererSniffingOptions} from './http-proxy.js';
 
-export const CONFIG_PROXY_REFERER_SNIFFING_DEFAULT = false;
-
 const TunnelServerConfig = x.intersection([
   x.object({
     host: ListeningHost.optional(),
@@ -26,7 +24,9 @@ const TunnelServerConfig = x.intersection([
 const HTTPProxyConfig = x.object({
   host: ListeningHost.optional(),
   port: Port.optional(),
-  refererSniffing: HTTPProxyRefererSniffingOptions.optional(),
+  refererSniffing: x
+    .union([HTTPProxyRefererSniffingOptions, x.boolean])
+    .optional(),
 });
 
 export const Config = x.object({

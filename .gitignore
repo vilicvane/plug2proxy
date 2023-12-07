@@ -10,6 +10,7 @@ bld/
 *.crt
 *.key
 *.bin
+*.log
 test.*
 geolite2.mmdb
 plug2proxy/

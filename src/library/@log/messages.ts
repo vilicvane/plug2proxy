@@ -97,7 +97,15 @@ export const IN_TUNNEL_IN_OUT_STREAM_ESTABLISHED =
 export const IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED =
   'tunnel OUT-IN stream established.';
 
-export const IN_TUNNEL_STREAM_CLOSED = 'tunnel stream closed.';
+export const IN_TUNNEL_IN_OUT_STREAM_CLOSED = 'tunnel IN-OUT stream closed.';
+
+export const IN_TUNNEL_OUT_IN_STREAM_CLOSED = 'tunnel OUT-IN stream closed.';
+
+export const IN_TUNNEL_IN_OUT_STREAM_ERROR = (error: unknown) =>
+  `tunnel IN-OUT stream error: ${getErrorCode(error)}`;
+
+export const IN_TUNNEL_OUT_IN_STREAM_ERROR = (error: unknown) =>
+  `tunnel OUT-IN stream error: ${getErrorCode(error)}`;
 
 export const IN_TUNNEL_CONFIGURE_STREAM_ERROR = (error: unknown) =>
   `tunnel configure stream error: ${getErrorCode(error)}`;

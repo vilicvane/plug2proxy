@@ -10,10 +10,10 @@ export async function setupIn({
 }: In.Config): Promise<void> {
   let caOptions: In.TLSProxyBridgeCAOptions | false;
 
-  const {refererSniffing = In.CONFIG_PROXY_REFERER_SNIFFING_DEFAULT} =
-    httpProxyOptions;
-
-  if (refererSniffing) {
+  if (
+    httpProxyOptions.refererSniffing ??
+    In.HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT
+  ) {
     caOptions = await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH);
   } else {
     caOptions = false;

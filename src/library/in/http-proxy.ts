@@ -12,6 +12,7 @@ import type {ConnectionId} from '../common.js';
 import type {ListeningHost} from '../x.js';
 import {Port} from '../x.js';
 
+import type {ReadHTTPHeadersOrTLSResult} from './@sniffing.js';
 import {readHTTPHeadersOrTLS} from './@sniffing.js';
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
 import type {TunnelServer} from './tunnel-server.js';
@@ -19,6 +20,8 @@ import {WEB_HOSTNAME, type Web} from './web.js';
 
 const HOST_DEFAULT = '';
 const PORT_DEFAULT = Port.nominalize(8000);
+
+export const HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT = false;
 
 export const HTTPProxyRefererSniffingOptions = x.object({
   include: x
@@ -42,7 +45,7 @@ export type HTTPProxyRefererSniffingOptions = x.TypeOf<
 export type HTTPProxyOptions = {
   host?: ListeningHost;
   port?: Port;
-  refererSniffing?: HTTPProxyRefererSniffingOptions;
+  refererSniffing?: HTTPProxyRefererSniffingOptions | boolean;
 };
 
 export class HTTPProxy {
@@ -55,7 +58,9 @@ export class HTTPProxy {
    */
   private handledRequestSocketSet = new WeakSet<Net.Socket>();
 
-  private refererSniffingOptions: Required<HTTPProxyRefererSniffingOptions>;
+  private refererSniffingOptions:
+    | Required<HTTPProxyRefererSniffingOptions>
+    | undefined;
 
   constructor(
     readonly tunnelServer: TunnelServer,
@@ -65,16 +70,20 @@ export class HTTPProxy {
     {
       host = HOST_DEFAULT,
       port = PORT_DEFAULT,
-      refererSniffing: {
-        include: refererSniffingInclude = {},
-        exclude: refererSniffingExclude = {},
-      } = {},
+      refererSniffing:
+        refererSniffingOptions = HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT,
     }: HTTPProxyOptions,
   ) {
-    this.refererSniffingOptions = {
-      include: refererSniffingInclude,
-      exclude: refererSniffingExclude,
-    };
+    if (refererSniffingOptions === true) {
+      refererSniffingOptions = {};
+    }
+
+    if (refererSniffingOptions) {
+      this.refererSniffingOptions = {
+        include: refererSniffingOptions.include ?? {},
+        exclude: refererSniffingOptions.exclude ?? {},
+      };
+    }
 
     this.server = HTTP.createServer()
       .on('connect', this.onHTTPServerConnect)
@@ -107,52 +116,56 @@ export class HTTPProxy {
     };
 
     void (async () => {
-      const {
-        refererSniffingOptions: {include, exclude},
-      } = this;
+      const {refererSniffingOptions} = this;
 
-      const browserName = ua.browser.name;
+      let peekingResult: ReadHTTPHeadersOrTLSResult | undefined;
 
-      const matchingBrowser =
-        browserName !== undefined &&
-        (include.browsers?.some(pattern => minimatch(browserName, pattern)) ??
-          true) &&
-        !(exclude.browsers ?? []).some(pattern =>
-          minimatch(browserName, pattern),
-        );
+      if (refererSniffingOptions) {
+        const {include, exclude} = refererSniffingOptions;
 
-      const peekingResult = matchingBrowser
-        ? await readHTTPHeadersOrTLS(connectSocket)
-        : undefined;
+        const browserName = ua.browser.name;
 
-      if (peekingResult && peekingResult.type === 'tls') {
-        const {serverName} = peekingResult;
-
-        const matchingHost =
-          (include.hosts
-            ? include.hosts.some(pattern => minimatch(host, pattern)) ||
-              (serverName !== undefined &&
-                serverName !== host &&
-                include.hosts.some(pattern => minimatch(serverName, pattern)))
-            : true) &&
-          !(exclude.hosts
-            ? exclude.hosts.some(pattern => minimatch(host, pattern)) ||
-              (serverName !== undefined &&
-                serverName !== host &&
-                exclude.hosts.some(pattern => minimatch(serverName, pattern)))
-            : false);
-
-        if (matchingHost) {
-          await this.tlsProxyBridge.connect(
-            context,
-            connectionId,
-            connectSocket,
-            host,
-            port,
-            peekingResult,
+        const matchingBrowser =
+          browserName !== undefined &&
+          (include.browsers?.some(pattern => minimatch(browserName, pattern)) ??
+            true) &&
+          !(exclude.browsers ?? []).some(pattern =>
+            minimatch(browserName, pattern),
           );
 
-          return;
+        peekingResult = matchingBrowser
+          ? await readHTTPHeadersOrTLS(connectSocket)
+          : undefined;
+
+        if (peekingResult && peekingResult.type === 'tls') {
+          const {serverName} = peekingResult;
+
+          const matchingHost =
+            (include.hosts
+              ? include.hosts.some(pattern => minimatch(host, pattern)) ||
+                (serverName !== undefined &&
+                  serverName !== host &&
+                  include.hosts.some(pattern => minimatch(serverName, pattern)))
+              : true) &&
+            !(exclude.hosts
+              ? exclude.hosts.some(pattern => minimatch(host, pattern)) ||
+                (serverName !== undefined &&
+                  serverName !== host &&
+                  exclude.hosts.some(pattern => minimatch(serverName, pattern)))
+              : false);
+
+          if (matchingHost) {
+            await this.tlsProxyBridge.connect(
+              context,
+              connectionId,
+              connectSocket,
+              host,
+              port,
+              peekingResult,
+            );
+
+            return;
+          }
         }
       }
 
