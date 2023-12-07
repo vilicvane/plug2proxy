@@ -160,10 +160,18 @@ export type ReadTLSResult = {
   alpnProtocols: string[] | undefined;
 };
 
+export type ReadHTTPHeadersOrTLSResult = ReadHTTPHeaderResult | ReadTLSResult;
+
 export async function readHTTPHeadersOrTLS(
   stream: Readable,
-): Promise<ReadHTTPHeaderResult | ReadTLSResult | undefined> {
-  const httpHeaderResult = await readHTTPHeaders(stream);
+): Promise<ReadHTTPHeadersOrTLSResult | undefined> {
+  let httpHeaderResult: ReadHTTPHeaderResult | undefined;
+
+  try {
+    httpHeaderResult = await readHTTPHeaders(stream);
+  } catch (error) {
+    return undefined;
+  }
 
   if (httpHeaderResult) {
     return httpHeaderResult;

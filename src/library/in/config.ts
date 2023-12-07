@@ -4,8 +4,9 @@ import * as xn from 'x-value/node';
 import {ListeningHost, Port} from '../x.js';
 
 import {DDNSOptions} from './ddns/index.js';
+import {HTTPProxyRefererSniffingOptions} from './http-proxy.js';
 
-export const CONFIG_PROXY_CA_DEFAULT = false;
+export const CONFIG_PROXY_REFERER_SNIFFING_DEFAULT = false;
 
 const TunnelServerConfig = x.intersection([
   x.object({
@@ -22,14 +23,10 @@ const TunnelServerConfig = x.intersection([
   ]),
 ]);
 
-const HTTPProxyCAConfig = x.object({
-  exclude: x.array(x.string).optional(),
-});
-
 const HTTPProxyConfig = x.object({
   host: ListeningHost.optional(),
   port: Port.optional(),
-  ca: x.union([HTTPProxyCAConfig, x.boolean]).optional(),
+  refererSniffing: HTTPProxyRefererSniffingOptions.optional(),
 });
 
 export const Config = x.object({

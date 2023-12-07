@@ -10,13 +10,11 @@ export async function setupIn({
 }: In.Config): Promise<void> {
   let caOptions: In.TLSProxyBridgeCAOptions | false;
 
-  const {ca = In.CONFIG_PROXY_CA_DEFAULT} = httpProxyOptions;
+  const {refererSniffing = In.CONFIG_PROXY_REFERER_SNIFFING_DEFAULT} =
+    httpProxyOptions;
 
-  if (ca) {
-    caOptions = {
-      ...(await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH)),
-      ...(typeof ca !== 'boolean' ? ca : undefined),
-    };
+  if (refererSniffing) {
+    caOptions = await In.ensureCACertificate(CA_CERT_PATH, CA_KEY_PATH);
   } else {
     caOptions = false;
   }
@@ -42,7 +40,7 @@ export async function setupIn({
   const netProxyBridge = new In.NetProxyBridge(tunnelServer, router);
 
   const web = new In.Web({
-    caCertPath: ca ? CA_CERT_PATH : undefined,
+    caCertPath: caOptions ? CA_CERT_PATH : undefined,
   });
 
   new In.HTTPProxy(
