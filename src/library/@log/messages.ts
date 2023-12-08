@@ -12,9 +12,6 @@ import {getErrorCode} from '../@utils/index.js';
 export const IN_HTTP_PROXY_LISTENING_ON = (host: string, port: number) =>
   `listening on ${host}:${port}...`;
 
-export const IN_ERROR_DETECTING_CONNECT_TYPE =
-  'error detecting connect type (http/tls).';
-
 export const IN_CONNECT_NET = (host: string, port: number) =>
   `connect ${host}:${port} (net)`;
 
@@ -50,9 +47,6 @@ export const IN_ERROR_RIGHT_SECURE_PROXY_SOCKET_ERROR = (error: unknown) =>
 
 export const IN_ERROR_PIPING_CONNECT_SOCKET_FROM_TO_TUNNEL = (error: unknown) =>
   `error piping connect socket from/to tunnel: ${getErrorCode(error)}`;
-
-export const IN_ERROR_READING_TLS_CLIENT_HELLO =
-  'error reading tls client hello.';
 
 export const IN_ERROR_SETTING_UP_LEFT_SECURE_PROXY_SOCKET =
   'error setting up left (from client) secure proxy socket.';
@@ -143,6 +137,9 @@ export const IN_GEOLITE2_DATABASE_UPDATE_FAILED = 'database update failed.';
 
 export const IN_DDNS_PUBLIC_IP = (ip: string, provider: string) =>
   `public ip ${ip} (${provider}).`;
+
+export const IN_DDNS_ERROR_CHECKING_AND_UPDATING = (error: unknown) =>
+  `error checking and updating: ${getErrorCode(error)}`;
 
 // OUT
 

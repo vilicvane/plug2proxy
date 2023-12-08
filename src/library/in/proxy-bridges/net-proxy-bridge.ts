@@ -12,6 +12,7 @@ import {
   IN_ERROR_REQUEST_SOCKET_ERROR,
   IN_ERROR_ROUTING_CONNECTION,
   IN_ERROR_TUNNEL_CONNECTING,
+  IN_REQUEST_NET,
   IN_REQUEST_SOCKET_CLOSED,
   Logs,
 } from '../../@log/index.js';
@@ -95,7 +96,7 @@ export class NetProxyBridge {
   ): Promise<void> {
     const urlString = request.url!;
 
-    Logs.info(context, `request ${urlString}`);
+    Logs.info(context, IN_REQUEST_NET(urlString));
 
     const requestSocketErrorWhile = streamErrorWhileEntry(
       request.socket,

@@ -2,7 +2,11 @@ import ms from 'ms';
 import {publicIpv4, publicIpv6} from 'public-ip';
 import * as x from 'x-value';
 
-import {IN_DDNS_PUBLIC_IP, Logs} from '../../@log/index.js';
+import {
+  IN_DDNS_ERROR_CHECKING_AND_UPDATING,
+  IN_DDNS_PUBLIC_IP,
+  Logs,
+} from '../../@log/index.js';
 
 import type {IDDNSProvider} from './ddns-provider.js';
 import {IPType} from './ddns-provider.js';
@@ -54,7 +58,10 @@ export class DDNS {
         ),
       ),
     ])
-      .catch(console.error)
+      .catch(error => {
+        Logs.error('ddns', IN_DDNS_ERROR_CHECKING_AND_UPDATING(error));
+        Logs.debug('ddns', error);
+      })
       .finally(() =>
         setTimeout(() => this.checkAndUpdate(), this.checkInterval),
       );
