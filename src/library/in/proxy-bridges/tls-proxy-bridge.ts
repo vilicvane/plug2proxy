@@ -11,6 +11,7 @@ import type {InLogContext} from '../../@log/index.js';
 import {
   ALPN_PROTOCOL_CHANGED,
   IN_ALPN_KNOWN_PROTOCOL_SELECTION,
+  IN_ALPN_PROTOCOL_CANDIDATES,
   IN_CERTIFICATE_TRUSTED_STATUS_CHANGED,
   IN_CONNECT_SOCKET_CLOSED,
   IN_CONNECT_TLS,
@@ -108,6 +109,10 @@ export class TLSProxyBridge {
     {serverName, alpnProtocols}: ReadTLSResult,
   ): Promise<void> {
     context.decrypted = true;
+
+    if (alpnProtocols) {
+      Logs.debug(context, IN_ALPN_PROTOCOL_CANDIDATES(alpnProtocols));
+    }
 
     // If we already know that a specific host with specific ALPN protocols
     // selects a specific protocol, we can wait locally for the request referer
@@ -472,25 +477,33 @@ export class TLSProxyBridge {
     alpnProtocols: string[] | undefined,
     serverName: string | undefined,
   ): Promise<TLS.TLSSocket> {
-    let stream: Duplex;
+    let rightSecureProxySocket: TLS.TLSSocket;
 
     if (route) {
+      let stream: Duplex;
+
       try {
         stream = await this.tunnelServer.connect(context, route, host, port);
       } catch (error) {
         Logs.error(context, IN_ERROR_TUNNEL_CONNECTING(error));
         throw error;
       }
-    } else {
-      stream = Net.connect(port, host);
-    }
 
-    const rightSecureProxySocket = TLS.connect({
-      socket: stream,
-      servername: serverName,
-      ALPNProtocols: alpnProtocols,
-      rejectUnauthorized: false,
-    });
+      rightSecureProxySocket = TLS.connect({
+        socket: stream,
+        servername: serverName,
+        ALPNProtocols: alpnProtocols,
+        rejectUnauthorized: false,
+      });
+    } else {
+      rightSecureProxySocket = TLS.connect({
+        host,
+        port,
+        servername: serverName,
+        ALPNProtocols: alpnProtocols,
+        rejectUnauthorized: false,
+      });
+    }
 
     await once(rightSecureProxySocket, 'secureConnect');
 
