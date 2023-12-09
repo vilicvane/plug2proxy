@@ -33,7 +33,6 @@ import {
   pipelines,
   streamErrorWhileEntry,
 } from '../../@utils/index.js';
-import type {ConnectionId} from '../../common.js';
 import {type ReadTLSResult, readHTTPHeaders} from '../@sniffing.js';
 import type {RouteCandidate, Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
@@ -55,6 +54,8 @@ export class TLSProxyBridge {
       }
     | undefined;
 
+  private certKeyPair = Forge.pki.rsa.generateKeyPair(2048);
+
   constructor(
     readonly tunnelServer: TunnelServer,
     readonly router: Router,
@@ -72,7 +73,6 @@ export class TLSProxyBridge {
 
   async connect(
     context: InLogContext,
-    connectionId: ConnectionId,
     connectSocket: Net.Socket,
     host: string,
     port: number,
@@ -83,26 +83,18 @@ export class TLSProxyBridge {
     if (this.ca) {
       await this.connectWithCA(
         context,
-        connectionId,
         connectSocket,
         host,
         port,
         readTLSResult,
       );
     } else {
-      await this.connectWithoutCA(
-        context,
-        connectionId,
-        connectSocket,
-        host,
-        port,
-      );
+      await this.connectWithoutCA(context, connectSocket, host, port);
     }
   }
 
   private async connectWithCA(
     context: InLogContext,
-    connectionId: ConnectionId,
     connectSocket: Net.Socket,
     host: string,
     port: number,
@@ -143,7 +135,6 @@ export class TLSProxyBridge {
 
       return this.performHTTPConnectWithCA(
         context,
-        connectionId,
         host,
         port,
         connectSocket,
@@ -156,7 +147,6 @@ export class TLSProxyBridge {
 
   private async connectWithoutCA(
     context: InLogContext,
-    connectionId: ConnectionId,
     connectSocket: Net.Socket,
     host: string,
     port: number,
@@ -364,7 +354,6 @@ export class TLSProxyBridge {
 
   private async performHTTPConnectWithCA(
     context: InLogContext,
-    connectionId: ConnectionId,
     host: string,
     port: number,
     connectSocket: Net.Socket,
@@ -602,7 +591,7 @@ export class TLSProxyBridge {
       Forge.util.createBuffer(certificate.raw),
     );
 
-    const {publicKey, privateKey} = Forge.pki.rsa.generateKeyPair(2048);
+    const {publicKey, privateKey} = this.certKeyPair;
 
     const cert = Forge.pki.certificateFromAsn1(asn1Cert);
 

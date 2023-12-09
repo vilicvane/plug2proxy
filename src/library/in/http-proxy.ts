@@ -157,7 +157,6 @@ export class HTTPProxy {
           if (matchingHost) {
             await this.tlsProxyBridge.connect(
               context,
-              connectionId,
               connectSocket,
               host,
               port,
