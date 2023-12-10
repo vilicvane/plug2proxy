@@ -54,11 +54,15 @@ export class GeoLite2 {
   createGeoIPRuleMatch(match: string | string[]): RuleMatch {
     const matches = Array.isArray(match) ? match : [match];
 
-    const route = async (ips: string[]): Promise<boolean> => {
+    const route = async (ips: string[]): Promise<boolean | undefined> => {
       const reader = await this.readerPromise;
 
       if (!reader) {
         throw new Error('No GeoLite2 database available.');
+      }
+
+      if (ips.length === 0) {
+        return undefined;
       }
 
       return ips.some(ip => {

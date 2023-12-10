@@ -178,6 +178,10 @@ async function match(
   for (const {match, negate} of exclude) {
     let matched = await match(domain, resolve);
 
+    if (matched === undefined) {
+      continue;
+    }
+
     if (negate) {
       matched = !matched;
     }
@@ -191,6 +195,10 @@ async function match(
 
   for (const {match, negate, priority = priorityDefault} of include) {
     let matched = await match(domain, resolve);
+
+    if (matched === undefined) {
+      continue;
+    }
 
     if (negate) {
       matched = !matched;
