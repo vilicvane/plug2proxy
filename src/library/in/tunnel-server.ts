@@ -294,7 +294,11 @@ export class TunnelServer {
       });
 
       Logs.info(context, IN_TUNNEL_ESTABLISHED);
-      Logs.debug(context, IN_ROUTE_MATCH_OPTIONS, routeMatchOptions);
+      Logs.debug(
+        context,
+        IN_ROUTE_MATCH_OPTIONS,
+        JSON.stringify(routeMatchOptions, undefined, 2),
+      );
     } else {
       const tunnel = this.tunnelMap.get(id);
 
@@ -312,7 +316,11 @@ export class TunnelServer {
       stream.respond({':status': 200}, {endStream: true});
 
       Logs.info(context, IN_TUNNEL_UPDATED);
-      Logs.debug(context, IN_ROUTE_MATCH_OPTIONS, routeMatchOptions);
+      Logs.debug(
+        context,
+        IN_ROUTE_MATCH_OPTIONS,
+        JSON.stringify(routeMatchOptions, undefined, 2),
+      );
     }
   }
 
