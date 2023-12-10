@@ -1,5 +1,6 @@
 import IPMatching from 'ip-matching';
-import {minimatch} from 'minimatch';
+
+import {matchHost} from '../../@utils/index.js';
 
 const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];
 
@@ -44,16 +45,5 @@ export function createDomainRuleMatch(match: string | string[]): RuleMatch {
   const matches = Array.isArray(match) ? match : [match];
 
   return domain =>
-    domain !== undefined &&
-    matches.some(match => {
-      if (minimatch(domain, match)) {
-        return true;
-      }
-
-      if (match.startsWith('*.') && minimatch(domain, match.slice(2))) {
-        return true;
-      }
-
-      return false;
-    });
+    domain !== undefined && matches.some(match => matchHost(domain, match));
 }
