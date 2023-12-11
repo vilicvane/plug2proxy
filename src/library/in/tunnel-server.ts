@@ -170,8 +170,9 @@ export class TunnelServer {
 
           inOutStream
             .on('close', () => {
-              Logs.debug(context, IN_TUNNEL_IN_OUT_STREAM_CLOSED);
               tunnel.connectionMap.delete(id);
+
+              Logs.debug(context, IN_TUNNEL_IN_OUT_STREAM_CLOSED);
             })
             .on('error', error => {
               Logs.error(context, IN_TUNNEL_IN_OUT_STREAM_ERROR(error));
@@ -188,8 +189,11 @@ export class TunnelServer {
 
               outInStream
                 .on('close', () => {
-                  Logs.debug(context, IN_TUNNEL_OUT_IN_STREAM_CLOSED);
+                  // Possibly redundant as pipelines() would close other
+                  // pipelines if any from stream closes.
                   tunnel.connectionMap.delete(id);
+
+                  Logs.debug(context, IN_TUNNEL_OUT_IN_STREAM_CLOSED);
                 })
                 .on('error', error => {
                   Logs.error(context, IN_TUNNEL_OUT_IN_STREAM_ERROR(error));

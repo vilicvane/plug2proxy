@@ -3,6 +3,7 @@ import * as HTTP from 'http';
 import type * as Net from 'net';
 
 import {minimatch} from 'minimatch';
+import ms from 'ms';
 import {UAParser} from 'ua-parser-js';
 import * as x from 'x-value';
 
@@ -18,6 +19,8 @@ import {readHTTPHeadersOrTLS} from './@sniffing.js';
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
 import type {TunnelServer} from './tunnel-server.js';
 import {WEB_HOSTNAME, type Web} from './web.js';
+
+const CONNECT_SOCKET_TIMEOUT = ms('30s');
 
 const HOST_DEFAULT = '';
 const PORT_DEFAULT = Port.nominalize(8000);
@@ -98,6 +101,10 @@ export class HTTPProxy {
     request: HTTP.IncomingMessage,
     connectSocket: Net.Socket,
   ): void => {
+    connectSocket
+      .setTimeout(CONNECT_SOCKET_TIMEOUT)
+      .on('timeout', () => connectSocket.destroy());
+
     const ua = new UAParser(request.headers['user-agent']).getResult();
 
     const [host, portString] = request.url!.split(':');
@@ -174,7 +181,8 @@ export class HTTPProxy {
         connectSocket,
         host,
         port,
-        peekingResult && peekingResult.type !== 'tls'
+        peekingResult &&
+          (peekingResult.type === 'http1' || peekingResult.type === 'http2')
           ? peekingResult.headerMap
           : undefined,
       );
