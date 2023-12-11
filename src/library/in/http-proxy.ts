@@ -216,6 +216,8 @@ export class HTTPProxy {
 
     handledRequestSocketSet.add(request.socket);
 
+    request.socket.setMaxListeners(20);
+
     const connectionId = this.getNextConnectionId();
 
     const context: InLogContext = {
