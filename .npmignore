@@ -3,4 +3,5 @@
 !/bld/library/**
 !/src/cli/**/*.{ts,tsx}
 !/bld/cli/**
+!/bin/**
 *.tsbuildinfo

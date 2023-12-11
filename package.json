@@ -9,8 +9,8 @@
     "default": "./bld/library/index.js"
   },
   "bin": {
-    "plug2proxy": "./bld/cli/main.js",
-    "p2p": "./bld/cli/main.js"
+    "plug2proxy": "./bld/run",
+    "p2p": "./bld/run"
   },
   "scripts": {
     "3": "pnpm install && pnpm dedupe && pnpm install",

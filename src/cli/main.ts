@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import {cosmiconfig} from 'cosmiconfig';
 import * as x from 'x-value';
 
