@@ -8,6 +8,10 @@
     "types": "./bld/library/index.d.ts",
     "default": "./bld/library/index.js"
   },
+  "bin": {
+    "plug2proxy": "./bld/cli/main.js",
+    "p2p": "./bld/cli/main.js"
+  },
   "scripts": {
     "3": "pnpm install && pnpm dedupe && pnpm install",
     "build": "rimraf ./bld && tsc --build",

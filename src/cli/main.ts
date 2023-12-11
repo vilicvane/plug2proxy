@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import {cosmiconfig} from 'cosmiconfig';
 import SegfaultHandler from 'segfault-handler';
 import * as x from 'x-value';
@@ -6,8 +8,7 @@ SegfaultHandler.registerHandler('plug2proxy-crash.log');
 
 import {In, Out} from '../library/index.js';
 
-import {setupIn} from './@in.js';
-import {setupOut} from './@out.js';
+import {CA_CERT_PATH, CA_KEY_PATH} from './@constants.js';
 
 process.on('warning', warning => console.warn(warning.stack));
 
@@ -32,9 +33,12 @@ const config = x
 
 switch (config.mode) {
   case 'in':
-    await setupIn(config);
+    await In.setup(config, {
+      caCertPath: CA_CERT_PATH,
+      caKeyPath: CA_KEY_PATH,
+    });
     break;
   case 'out':
-    setupOut(config);
+    Out.setup(config);
     break;
 }

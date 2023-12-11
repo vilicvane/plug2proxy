@@ -5,7 +5,6 @@ import type {CountryResponse} from 'maxmind';
 import {Reader} from 'maxmind';
 import ms from 'ms';
 import {request} from 'undici';
-import * as x from 'x-value';
 
 import {
   IN_GEOLITE2_DATABASE_UPDATED,
@@ -23,14 +22,9 @@ const UPDATE_INTERVAL = ms('24h');
 
 const DATABASE_PATH_DEFAULT = 'geolite2.mmdb';
 
-export const GeoLite2Options = x.object({
-  /**
-   * mmdb 文件保存地址。
-   */
-  path: x.string.optional(),
-});
-
-export type GeoLite2Options = x.TypeOf<typeof GeoLite2Options>;
+export type GeoLite2Options = {
+  path?: string;
+};
 
 export class GeoLite2 {
   readonly path: string;
@@ -41,7 +35,7 @@ export class GeoLite2 {
     | ((reader: Reader<CountryResponse> | false) => void)
     | undefined;
 
-  constructor({path = DATABASE_PATH_DEFAULT}: GeoLite2Options) {
+  constructor({path = DATABASE_PATH_DEFAULT}: GeoLite2Options = {}) {
     this.path = path;
 
     this.readerPromise = new Promise(resolve => {
