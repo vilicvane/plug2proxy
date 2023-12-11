@@ -1,6 +1,7 @@
 import * as HTTP2 from 'http2';
 import * as Net from 'net';
 
+import {setupAutoWindowSize} from 'http2-auto-window-size';
 import type * as x from 'x-value';
 
 import type {OutLogContext} from '../@log/index.js';
@@ -37,7 +38,6 @@ import type {
   RouteMatchOptions,
   RouteMatchRule,
 } from '../router.js';
-import {setupAutoWindowSize} from '../window-size.js';
 
 const RECONNECT_DELAYS = [1000, 1000, 1000, 5000, 10_000, 30_000, 60_000];
 
@@ -138,8 +138,14 @@ export class Tunnel {
       },
     })
       .on('connect', session => {
-        setupAutoWindowSize(session, INITIAL_WINDOW_SIZE, windowSize => {
-          Logs.debug(this.context, OUT_TUNNEL_WINDOW_SIZE_UPDATED(windowSize));
+        setupAutoWindowSize(session, {
+          initialWindowSize: INITIAL_WINDOW_SIZE,
+          onSetLocalWindowSize: windowSize => {
+            Logs.debug(
+              this.context,
+              OUT_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
+            );
+          },
         });
 
         this._configure();

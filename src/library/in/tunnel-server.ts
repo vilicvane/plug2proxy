@@ -3,6 +3,7 @@ import * as HTTP2 from 'http2';
 import type {Duplex, Readable} from 'stream';
 
 import duplexer3 from 'duplexer3';
+import {setupAutoWindowSize} from 'http2-auto-window-size';
 
 import type {InLogContext} from '../@log/index.js';
 import {
@@ -39,7 +40,6 @@ import {
   decodeTunnelHeader,
   encodeTunnelHeader,
 } from '../common.js';
-import {setupAutoWindowSize} from '../window-size.js';
 import type {ListeningHost, Port} from '../x.js';
 
 import type {RouteCandidate, Router} from './router/index.js';
@@ -87,20 +87,23 @@ export class TunnelServer {
       maxOutstandingPings: MAX_OUTSTANDING_PINGS,
     })
       .on('session', session => {
-        setupAutoWindowSize(session, INITIAL_WINDOW_SIZE, windowSize => {
-          const tunnelId = this.sessionToTunnelIdMap.get(session);
+        setupAutoWindowSize(session, {
+          initialWindowSize: INITIAL_WINDOW_SIZE,
+          onSetLocalWindowSize: windowSize => {
+            const tunnelId = this.sessionToTunnelIdMap.get(session);
 
-          if (tunnelId === undefined) {
-            return;
-          }
+            if (tunnelId === undefined) {
+              return;
+            }
 
-          Logs.debug(
-            {
-              type: 'in',
-              tunnel: tunnelId,
-            },
-            IN_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
-          );
+            Logs.debug(
+              {
+                type: 'in',
+                tunnel: tunnelId,
+              },
+              IN_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
+            );
+          },
         });
       })
       .on('stream', (stream, headers) => {
