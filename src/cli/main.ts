@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 
 import {cosmiconfig} from 'cosmiconfig';
-import SegfaultHandler from 'segfault-handler';
 import * as x from 'x-value';
-
-SegfaultHandler.registerHandler('plug2proxy-crash.log');
 
 import {In, Out} from '../library/index.js';
 
