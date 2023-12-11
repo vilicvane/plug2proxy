@@ -1,4 +1,5 @@
 import assert from 'assert';
+import {randomInt} from 'crypto';
 import * as HTTP2 from 'http2';
 import type {Duplex, Readable} from 'stream';
 
@@ -130,13 +131,17 @@ export class TunnelServer {
 
   async connect(
     upperContext: InLogContext,
-    route: RouteCandidate,
+    route: RouteCandidate | undefined,
     host: string,
     port: number,
   ): Promise<Duplex> {
-    const tunnel = this.tunnelMap.get(route.tunnel);
+    let tunnel: Tunnel;
 
-    assert(tunnel);
+    if (route) {
+      tunnel = this.tunnelMap.get(route.tunnel)!;
+    } else {
+      tunnel = [...this.tunnelMap.values()][randomInt(this.tunnelMap.size)];
+    }
 
     const {tunnelStream} = tunnel;
 

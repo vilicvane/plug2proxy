@@ -5,7 +5,7 @@ import * as x from 'x-value';
 
 import {In, Out} from '../library/index.js';
 
-import {CA_CERT_PATH, CA_KEY_PATH} from './@constants.js';
+import {CA_CERT_PATH, CA_KEY_PATH, GEOLITE2_PATH} from './@constants.js';
 
 process.on('warning', warning => console.warn(warning.stack));
 
@@ -33,6 +33,7 @@ switch (config.mode) {
     await In.setup(config, {
       caCertPath: CA_CERT_PATH,
       caKeyPath: CA_KEY_PATH,
+      geolite2Path: GEOLITE2_PATH,
     });
     break;
   case 'out':

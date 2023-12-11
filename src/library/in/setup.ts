@@ -19,6 +19,7 @@ const SELF_SIGNED_CERTIFICATE_COMMON_NAME = 'tunnel-server.plug2proxy';
 export type SetupOptions = {
   caCertPath: string;
   caKeyPath: string;
+  geolite2Path: string;
 };
 
 export async function setup(
@@ -28,7 +29,7 @@ export async function setup(
     proxy: httpProxyOptions = {},
     ddns: ddnsOptions,
   }: Config,
-  {caCertPath, caKeyPath}: SetupOptions,
+  {caCertPath, caKeyPath, geolite2Path}: SetupOptions,
 ): Promise<void> {
   let caOptions: TLSProxyBridgeCAOptions | false;
 
@@ -41,7 +42,7 @@ export async function setup(
     caOptions = false;
   }
 
-  const geolite2 = new GeoLite2();
+  const geolite2 = new GeoLite2({path: geolite2Path});
 
   const router = new Router(geolite2);
 
@@ -56,6 +57,8 @@ export async function setup(
           )),
         }),
   });
+
+  geolite2.tunnelServer = tunnelServer;
 
   const tlsProxyBridge = new TLSProxyBridge(tunnelServer, router, {
     ca: caOptions,

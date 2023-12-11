@@ -47,7 +47,6 @@
     "spdy-transport": "^3.0.0",
     "tslib": "^2.6.2",
     "ua-parser-js": "^1.0.37",
-    "undici": "^5.28.1",
     "x-value": "^0.2.1"
   },
   "devDependencies": {
