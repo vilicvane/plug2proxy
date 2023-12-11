@@ -50,7 +50,11 @@ export class Web {
   <h1>Plug2Proxy</h1>
   <p>Plug2Proxy is running.</p>
   <ul>
-    <li><a href="/${CA_FILENAME}">Download CA certificate</a></li>
+    ${
+      caCertPath !== undefined
+        ? `<li><a href="/${CA_FILENAME}">Download CA certificate</a></li>`
+        : ''
+    }
   </ul>
 </body>
 `);
