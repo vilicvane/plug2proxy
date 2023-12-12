@@ -20,7 +20,7 @@ p2p [config file]
 
 ### 流量入口
 
-**p2p.config.js**
+**p2p.config.mjs**
 
 ```js
 export default {
@@ -54,7 +54,7 @@ export default {
 
 ### 流量出口
 
-**p2p.config.js**
+**p2p.config.mjs**
 
 ```js
 export default {
