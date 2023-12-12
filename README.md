@@ -13,6 +13,12 @@
 - 由流量出口服务器配置希望代理的请求，支持优先级。
 - 支持浏览器请求 referer 嗅探匹配规则（需要信任本地生成的 Plug2Proxy CA）。
 
+## 安装
+
+```bash
+npm install --global plug2proxy
+```
+
 ## 使用
 
 ```bash
