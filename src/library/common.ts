@@ -47,6 +47,10 @@ export function encodeTunnelHeader<T>(data: T): string {
   return Buffer.from(JSON.stringify(data), 'utf8').toString('base64');
 }
 
-export function decodeTunnelHeader<T>(header: string): T {
-  return JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+export function decodeTunnelHeader<T>(header: string): T | undefined {
+  try {
+    return JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+  } catch (error) {
+    return undefined;
+  }
 }

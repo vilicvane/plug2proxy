@@ -153,7 +153,7 @@ export class Tunnel {
       .on('stream', (stream, headers) => {
         const data = decodeTunnelHeader<TunnelInOutHeaderData>(
           headers[TUNNEL_HEADER_NAME] as string,
-        );
+        )!;
 
         switch (data.type) {
           case 'in-out-stream':
@@ -224,7 +224,7 @@ export class Tunnel {
           const {alias} =
             decodeTunnelHeader<TunnelOutInTunnelResponseHeaderData>(
               tunnelHeader,
-            );
+            )!;
 
           this.context.tunnelAlias = alias;
 
@@ -233,7 +233,7 @@ export class Tunnel {
           const {error} =
             decodeTunnelHeader<TunnelOutInErrorResponseHeaderData>(
               tunnelHeader,
-            );
+            )!;
 
           Logs.error(this.context, OUT_ERROR_CONFIGURING_TUNNEL(status, error));
         }

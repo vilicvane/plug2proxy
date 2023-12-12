@@ -24,6 +24,7 @@ import {
   IN_TUNNEL_SERVER_TUNNELING,
   IN_TUNNEL_UPDATED,
   IN_TUNNEL_WINDOW_SIZE_UPDATED,
+  IN_UNEXPECTED_TUNNEL_HEADER,
   Logs,
 } from '../@log/index.js';
 import type {
@@ -111,6 +112,19 @@ export class TunnelServer {
         const data = decodeTunnelHeader<TunnelOutInHeaderData>(
           headers[TUNNEL_HEADER_NAME] as string,
         );
+
+        if (!data) {
+          const session = stream.session!;
+
+          Logs.error(
+            'tunnel-server',
+            IN_UNEXPECTED_TUNNEL_HEADER(session.socket!.remoteAddress!),
+          );
+
+          session.close();
+
+          return;
+        }
 
         switch (data.type) {
           case 'tunnel':

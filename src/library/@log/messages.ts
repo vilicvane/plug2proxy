@@ -75,6 +75,9 @@ export const IN_ERROR_TUNNEL_CONNECTING = (error: unknown) =>
 
 export const IN_ERROR_ROUTING_CONNECTION = 'error routing connection.';
 
+export const IN_UNEXPECTED_TUNNEL_HEADER = (remoteAddress: string) =>
+  `unexpected tunnel header (from ${remoteAddress}).`;
+
 // tunnel server
 
 export const IN_TUNNEL_SERVER_LISTENING_ON = (host: string, port: number) =>
