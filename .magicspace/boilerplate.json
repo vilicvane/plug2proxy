@@ -5,6 +5,13 @@
     "name": "plug2proxy",
     "license": "MIT",
     "author": "vilicvane",
+    "repository": "https://github.com/vilicvane/plug2proxy.git",
+    "badges": {
+      "npm": true,
+      "repo": true,
+      "license": true,
+      "discord": "https://discord.gg/wEVn2qcf8h"
+    },
     "defaultBranch": "master",
     "packageManager": "pnpm",
     "type": "module",
