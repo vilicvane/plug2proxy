@@ -28,6 +28,9 @@ export const IN_ALPN_PROTOCOL_CANDIDATES = (protocols: string[]) =>
 export const IN_ALPN_KNOWN_PROTOCOL_SELECTION = (protocol: string | false) =>
   `alpn known protocol selection: ${protocol || 'none'}`;
 
+export const IN_ALPN_PROTOCOL_SELECTION = (protocol: string | false) =>
+  `alpn protocol selection: ${protocol || 'none'}`;
+
 export const IN_SWITCHING_RIGHT_SECURE_PROXY_SOCKET =
   'referer route is different from host route, switching right (to server) secure proxy socket...';
 

@@ -12,6 +12,7 @@ import {
   ALPN_PROTOCOL_CHANGED,
   IN_ALPN_KNOWN_PROTOCOL_SELECTION,
   IN_ALPN_PROTOCOL_CANDIDATES,
+  IN_ALPN_PROTOCOL_SELECTION,
   IN_CERTIFICATE_TRUSTED_STATUS_CHANGED,
   IN_CONNECT_SOCKET_CLOSED,
   IN_CONNECT_TLS,
@@ -256,7 +257,7 @@ export class TLSProxyBridge {
 
     const alpnProtocol = rightSecureProxySocket.alpnProtocol!;
 
-    Logs.debug(context, 'alpn protocol (OUT):', alpnProtocol || 'none');
+    Logs.debug(context, IN_ALPN_PROTOCOL_SELECTION(alpnProtocol));
 
     const certificate = this.getP2PCertificate(
       host,
