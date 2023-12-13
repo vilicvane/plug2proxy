@@ -12,7 +12,7 @@ export type InLogContext = {
   tunnel?: TunnelId;
   tunnelAlias?: string;
   stream?: TunnelStreamId;
-  hostname?: string;
+  host?: string;
   decrypted?: boolean;
 };
 
@@ -21,7 +21,7 @@ export type OutLogContext = {
   tunnelAlias?: string;
   tunnel?: Out.TunnelId;
   stream?: TunnelStreamId;
-  hostname?: string;
+  host?: string;
 };
 
 type LogContext =
@@ -97,8 +97,8 @@ function createLogger<TLevel extends LogLevel>(
             prefix += TUNNEL_STREAM(context.stream);
           }
 
-          if (context.hostname !== undefined) {
-            prefix += ` ${context.hostname}`;
+          if (context.host !== undefined) {
+            prefix += ` ${context.host}`;
           }
 
           break;
@@ -115,8 +115,8 @@ function createLogger<TLevel extends LogLevel>(
             prefix += TUNNEL_STREAM(context.stream);
           }
 
-          if (context.hostname !== undefined) {
-            prefix += ` ${context.hostname}`;
+          if (context.host !== undefined) {
+            prefix += ` ${context.host}`;
           }
 
           break;

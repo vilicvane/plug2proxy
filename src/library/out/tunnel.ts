@@ -259,7 +259,7 @@ export class Tunnel {
     const context: OutLogContext = {
       ...this.context,
       stream: id,
-      hostname: `${host}:${port}`,
+      host: `${host}:${port}`,
     };
 
     Object.setPrototypeOf(context, this.context);

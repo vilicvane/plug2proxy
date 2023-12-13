@@ -120,7 +120,7 @@ export class HTTPProxy {
       type: 'in',
       method: 'connect',
       connection: connectionId,
-      hostname: `${host}:${port}`,
+      host: `${host}:${port}`,
     };
 
     void (async () => {
@@ -203,7 +203,7 @@ export class HTTPProxy {
       // ignore
     }
 
-    if (url === undefined || url.hostname === WEB_HOSTNAME) {
+    if (url === undefined || url.host === WEB_HOSTNAME) {
       this.web.app(request, response);
       return;
     }
@@ -224,7 +224,7 @@ export class HTTPProxy {
       type: 'in',
       method: 'request',
       connection: connectionId,
-      hostname: url.hostname,
+      host: url.host,
     };
 
     void this.netProxyBridge.request(context, request);

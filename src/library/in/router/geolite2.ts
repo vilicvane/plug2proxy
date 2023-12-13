@@ -150,7 +150,7 @@ export class GeoLite2 {
     url: string,
     redirectionsLeft = 3,
   ): Promise<HTTP.IncomingMessage> {
-    const {protocol, host, port: portString} = new URL(url);
+    const {protocol, hostname: host, port: portString} = new URL(url);
 
     const port = parseInt(portString) || (protocol === 'https:' ? 443 : 80);
 

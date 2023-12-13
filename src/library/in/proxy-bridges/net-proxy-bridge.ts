@@ -103,7 +103,13 @@ export class NetProxyBridge {
       error => Logs.error(context, IN_ERROR_REQUEST_SOCKET_ERROR(error)),
     );
 
-    const {host, port: portString, pathname, search, hash} = new URL(urlString);
+    const {
+      hostname: host,
+      port: portString,
+      pathname,
+      search,
+      hash,
+    } = new URL(urlString);
     const port = parseInt(portString) || 80;
 
     const {referer} = request.headers;

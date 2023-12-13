@@ -110,7 +110,7 @@ export class Router {
   }
 
   routeURL(url: string): Promise<RouteCandidate | undefined> {
-    const host = new URL(url).host;
+    const {hostname: host} = new URL(url);
     return this.routeHost(host);
   }
 
