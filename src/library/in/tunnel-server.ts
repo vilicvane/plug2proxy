@@ -198,7 +198,6 @@ export class TunnelServer {
             })
             .on('error', error => {
               Logs.error(context, IN_TUNNEL_IN_OUT_STREAM_ERROR(error));
-              Logs.debug(context, error);
             });
 
           tunnel.connectionMap.set(id, {
@@ -209,24 +208,24 @@ export class TunnelServer {
                 return;
               }
 
+              const stream = duplexer3(inOutStream, outInStream);
+
+              stream.on('close', () => {
+                inOutStream.destroy();
+                outInStream.destroy();
+              });
+
+              inOutStream.on('close', () => outInStream.destroy());
+
               outInStream
                 .on('close', () => {
-                  // Possibly redundant as pipelines() would close other
-                  // pipelines if any from stream closes.
-                  tunnel.connectionMap.delete(id);
+                  inOutStream.destroy();
 
                   Logs.debug(context, IN_TUNNEL_OUT_IN_STREAM_CLOSED);
                 })
                 .on('error', error => {
                   Logs.error(context, IN_TUNNEL_OUT_IN_STREAM_ERROR(error));
-                  Logs.debug(context, error);
                 });
-
-              const stream = duplexer3(
-                {bubbleErrors: false},
-                inOutStream,
-                outInStream,
-              );
 
               resolve(stream);
             },
