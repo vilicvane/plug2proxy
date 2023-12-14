@@ -21,6 +21,7 @@ import {
   IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
   IN_TUNNEL_PASSWORD_MISMATCH,
   IN_TUNNEL_SERVER_LISTENING_ON,
+  IN_TUNNEL_SERVER_SESSION_ERROR,
   IN_TUNNEL_SERVER_TUNNELING,
   IN_TUNNEL_UPDATED,
   IN_TUNNEL_WINDOW_SIZE_UPDATED,
@@ -89,10 +90,12 @@ export class TunnelServer {
       maxOutstandingPings: MAX_OUTSTANDING_PINGS,
     })
       .on('session', session => {
+        const {sessionToTunnelIdMap, tunnelMap} = this;
+
         setupAutoWindowSize(session, {
           initialWindowSize: INITIAL_WINDOW_SIZE,
           onSetLocalWindowSize: windowSize => {
-            const tunnelId = this.sessionToTunnelIdMap.get(session);
+            const tunnelId = sessionToTunnelIdMap.get(session);
 
             if (tunnelId === undefined) {
               return;
@@ -106,6 +109,31 @@ export class TunnelServer {
               IN_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
             );
           },
+        });
+
+        session.on('error', error => {
+          const tunnelId = sessionToTunnelIdMap.get(session);
+
+          let context: InLogContext | undefined;
+
+          if (tunnelId !== undefined) {
+            sessionToTunnelIdMap.delete(session);
+
+            const tunnel = tunnelMap.get(tunnelId);
+
+            if (tunnel) {
+              context = tunnel.context;
+              tunnelMap.delete(tunnelId);
+            }
+          }
+
+          Logs.error(
+            context ?? {
+              type: 'in',
+              tunnel: tunnelId,
+            },
+            IN_TUNNEL_SERVER_SESSION_ERROR(error),
+          );
         });
       })
       .on('stream', (stream, headers) => {

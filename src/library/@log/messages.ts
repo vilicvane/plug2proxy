@@ -80,6 +80,9 @@ export const IN_UNEXPECTED_TUNNEL_HEADER = (remoteAddress: string) =>
 
 // tunnel server
 
+export const IN_TUNNEL_SERVER_SESSION_ERROR = (error: unknown) =>
+  `tunnel server session error: ${getErrorCode(error)}`;
+
 export const IN_TUNNEL_SERVER_LISTENING_ON = (host: string, port: number) =>
   `listening on ${host}:${port}...`;
 
