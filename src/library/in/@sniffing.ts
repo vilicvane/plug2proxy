@@ -1,4 +1,4 @@
-import {PassThrough, type Readable} from 'stream';
+import {type Readable} from 'stream';
 
 import {HTTPParser} from 'http-parser-js';
 import {readTlsClientHello} from 'read-tls-client-hello';
@@ -177,20 +177,8 @@ export async function readHTTPHeadersOrTLS(
     return httpHeaderResult;
   }
 
-  const helloThrough = new PassThrough();
-
-  const helloChunks: Buffer[] = [];
-
-  const onHelloData = (data: Buffer): void => {
-    helloChunks.push(data);
-    helloThrough.write(data);
-  };
-
-  stream.on('data', onHelloData);
-  stream.resume();
-
   try {
-    const {serverName, alpnProtocols} = await readTlsClientHello(helloThrough);
+    const {serverName, alpnProtocols} = await readTlsClientHello(stream);
 
     return {
       type: 'tls',
@@ -199,11 +187,5 @@ export async function readHTTPHeadersOrTLS(
     };
   } catch (error) {
     return undefined;
-  } finally {
-    stream.off('data', onHelloData);
-
-    stream.pause();
-
-    stream.unshift(Buffer.concat(helloChunks));
   }
 }
