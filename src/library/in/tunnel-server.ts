@@ -102,10 +102,7 @@ export class TunnelServer {
             }
 
             Logs.debug(
-              {
-                type: 'in',
-                tunnel: tunnelId,
-              },
+              this.getContext(tunnelId),
               IN_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
             );
           },
@@ -114,26 +111,15 @@ export class TunnelServer {
         session.on('error', error => {
           const tunnelId = sessionToTunnelIdMap.get(session);
 
-          let context: InLogContext | undefined;
-
           if (tunnelId !== undefined) {
             sessionToTunnelIdMap.delete(session);
-
-            const tunnel = tunnelMap.get(tunnelId);
-
-            if (tunnel) {
-              context = tunnel.context;
-              tunnelMap.delete(tunnelId);
-            }
+            tunnelMap.delete(tunnelId);
           }
 
-          Logs.error(
-            context ?? {
-              type: 'in',
-              tunnel: tunnelId,
-            },
-            IN_TUNNEL_SERVER_SESSION_ERROR(error),
-          );
+          const context = this.getContext(tunnelId);
+
+          Logs.error(context, IN_TUNNEL_SERVER_SESSION_ERROR(error));
+          Logs.debug(context, error);
         });
       })
       .on('stream', (stream, headers) => {
@@ -410,6 +396,16 @@ export class TunnelServer {
 
   private getNextTunnelId(): TunnelId {
     return ++this.lastTunnelIdNumber as TunnelId;
+  }
+
+  private getContext(tunnelId: TunnelId | undefined): InLogContext {
+    if (tunnelId === undefined) {
+      return {type: 'in'};
+    }
+
+    const tunnel = this.tunnelMap.get(tunnelId);
+
+    return tunnel?.context ?? {type: 'in', tunnel: tunnelId};
   }
 }
 
