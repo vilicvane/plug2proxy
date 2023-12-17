@@ -1,7 +1,7 @@
 import assert from 'assert';
 import {once} from 'events';
 import * as Net from 'net';
-import type {Duplex} from 'stream';
+import {Duplex, PassThrough} from 'stream';
 import * as TLS from 'tls';
 
 import Forge from '@vilic/node-forge';
@@ -30,6 +30,7 @@ import {
   Logs,
 } from '../../@log/index.js';
 import {
+  duplexify,
   errorWhile,
   pipelines,
   streamErrorWhileEntry,
@@ -37,6 +38,8 @@ import {
 import {type ReadTLSResult, readHTTPHeaders} from '../@sniffing.js';
 import type {RouteCandidate, Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
+import duplexer3 from 'duplexer3';
+import {readTlsClientHello} from '@vilic/read-tls-client-hello';
 
 export type TLSProxyBridgeCAOptions = {
   cert: string;
@@ -99,9 +102,11 @@ export class TLSProxyBridge {
     connectSocket: Net.Socket,
     host: string,
     port: number,
-    {serverName, alpnProtocols}: ReadTLSResult,
+    tlsHelloData: ReadTLSResult,
   ): Promise<void> {
     context.decrypted = true;
+
+    const {serverName, alpnProtocols} = tlsHelloData;
 
     if (alpnProtocols) {
       Logs.debug(context, IN_ALPN_PROTOCOL_CANDIDATES(alpnProtocols));
@@ -128,8 +133,7 @@ export class TLSProxyBridge {
         host,
         port,
         connectSocket,
-        alpnProtocols,
-        serverName,
+        tlsHelloData,
       );
     } else {
       Logs.debug(context, IN_ALPN_KNOWN_PROTOCOL_SELECTION(knownALPNProtocol));
@@ -139,9 +143,8 @@ export class TLSProxyBridge {
         host,
         port,
         connectSocket,
-        alpnProtocols,
         knownALPNProtocol,
-        serverName,
+        tlsHelloData,
       );
     }
   }
@@ -205,9 +208,10 @@ export class TLSProxyBridge {
     host: string,
     port: number,
     connectSocket: Net.Socket,
-    alpnProtocols: string[] | undefined,
-    serverName: string | undefined,
+    tlsHelloData: ReadTLSResult,
   ): Promise<void> {
+    const {serverName, alpnProtocols} = tlsHelloData;
+
     Logs.debug(context, IN_OPTIMISTIC_CONNECT);
 
     const connectSocketErrorWhile = streamErrorWhileEntry(
@@ -237,8 +241,7 @@ export class TLSProxyBridge {
           optimisticRoute,
           host,
           port,
-          alpnProtocols,
-          serverName,
+          tlsHelloData,
         ),
         () =>
           Logs.error(context, IN_ERROR_SETTING_UP_RIGHT_SECURE_PROXY_SOCKET),
@@ -326,8 +329,7 @@ export class TLSProxyBridge {
               refererRoute,
               host,
               port,
-              alpnProtocols,
-              serverName,
+              tlsHelloData,
             ),
             () =>
               Logs.error(
@@ -358,10 +360,11 @@ export class TLSProxyBridge {
     host: string,
     port: number,
     connectSocket: Net.Socket,
-    alpnProtocols: string[] | undefined,
     alpnProtocol: string | false,
-    serverName: string | undefined,
+    tlsHelloData: ReadTLSResult,
   ): Promise<void> {
+    const {serverName, alpnProtocols} = tlsHelloData;
+
     const {certificate, trusted} = this.requireP2PCertificateForKnownRemote(
       host,
       port,
@@ -412,8 +415,7 @@ export class TLSProxyBridge {
           route,
           host,
           port,
-          alpnProtocols,
-          serverName,
+          tlsHelloData,
         ),
         () =>
           Logs.error(context, IN_ERROR_SETTING_UP_RIGHT_SECURE_PROXY_SOCKET),
@@ -464,36 +466,100 @@ export class TLSProxyBridge {
     route: RouteCandidate | undefined,
     host: string,
     port: number,
-    alpnProtocols: string[] | undefined,
-    serverName: string | undefined,
+    tlsHelloData: ReadTLSResult,
   ): Promise<TLS.TLSSocket> {
+    const {serverName, alpnProtocols, raw} = tlsHelloData;
+
     let rightSecureProxySocket: TLS.TLSSocket;
 
-    if (route) {
-      let stream: Duplex;
+    let netStream: Duplex;
 
+    if (route) {
       try {
-        stream = await this.tunnelServer.connect(context, route, host, port);
+        netStream = await this.tunnelServer.connect(context, route, host, port);
       } catch (error) {
         Logs.error(context, IN_ERROR_TUNNEL_CONNECTING(error));
         throw error;
       }
-
-      rightSecureProxySocket = TLS.connect({
-        socket: stream,
-        servername: serverName,
-        ALPNProtocols: alpnProtocols,
-        rejectUnauthorized: false,
-      });
     } else {
-      rightSecureProxySocket = TLS.connect({
-        host,
-        port,
-        servername: serverName,
-        ALPNProtocols: alpnProtocols,
-        rejectUnauthorized: false,
-      });
+      netStream = Net.connect(port, host);
     }
+
+    const netWritable = new PassThrough();
+    const netReadable = new PassThrough();
+
+    const clientHelloPromise = readTlsClientHello(netWritable, {
+      consume: true,
+    });
+
+    const netDuplex = duplexify(netWritable, netReadable);
+
+    rightSecureProxySocket = TLS.connect({
+      socket: netDuplex,
+      servername: serverName,
+      ALPNProtocols: alpnProtocols,
+      rejectUnauthorized: false,
+    });
+
+    rightSecureProxySocket.on('keylog', console.log);
+
+    const {raw: nodeRaw} = await clientHelloPromise;
+
+    // bytes
+    // 5 record prefix
+    // 1 hello type
+    // 3 hello length
+    // 2 version
+    // 32 client random
+
+    const clientRandomStart = 5 + 1 + 3 + 2;
+
+    const nodeClientRandom = nodeRaw.subarray(
+      clientRandomStart,
+      clientRandomStart + 32,
+    );
+
+    // 1 session id length
+
+    const sessionStart = clientRandomStart + 32;
+    const sessionLength = raw.readUInt8(sessionStart);
+
+    const nodeSessionLength = nodeRaw.readUInt8(sessionStart);
+    const nodeSessionId = nodeRaw.subarray(
+      sessionStart,
+      sessionStart + 1 + nodeSessionLength,
+    );
+
+    const helloChunks: Buffer[] = [
+      raw.subarray(0, clientRandomStart),
+      nodeClientRandom,
+      nodeSessionId,
+      raw.subarray(sessionStart + 1 + sessionLength),
+    ];
+
+    const hello = Buffer.concat(helloChunks);
+
+    hello.writeUint16BE(hello.length - 5, 3); // record length
+    hello.writeIntBE(hello.length - 5 - 4, 5 + 1, 3); // hello length
+
+    const p = new PassThrough();
+
+    setTimeout(() => {
+      p.write(hello);
+    }, 0);
+
+    const x = await readTlsClientHello(p);
+
+    console.log(x);
+
+    netStream.write(hello);
+
+    // netReadable.on('data', console.log);
+
+    pipelines([
+      [netWritable, netStream],
+      [netStream, netReadable],
+    ]).catch(error => rightSecureProxySocket.emit('error', error));
 
     await once(rightSecureProxySocket, 'secureConnect');
 

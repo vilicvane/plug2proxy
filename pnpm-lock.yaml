@@ -32,6 +32,9 @@ dependencies:
   '@vilic/node-forge':
     specifier: 1.3.2-5
     version: 1.3.2-5
+  '@vilic/read-tls-client-hello':
+    specifier: ^1.0.2-0
+    version: 1.0.2-0
   bytes:
     specifier: ^3.1.2
     version: 3.1.2
@@ -71,9 +74,6 @@ dependencies:
   public-ip:
     specifier: ^6.0.1
     version: 6.0.1
-  read-tls-client-hello:
-    specifier: ^1.0.1
-    version: 1.0.1
   spdy-transport:
     specifier: ^3.0.0
     version: 3.0.0
@@ -1320,6 +1320,13 @@ packages:
   /@vilic/node-forge@1.3.2-5:
     resolution: {integrity: sha512-8GVr3S/nmLKL7QI7RYhVIcz3PuT/fxfkQLuh/F1CaT+/3QgI14RqiJkcKIni7h9u4ySbQGiGvm4XbNxRBJin4g==}
     engines: {node: '>= 6.13.0'}
+    dev: false
+
+  /@vilic/read-tls-client-hello@1.0.2-0:
+    resolution: {integrity: sha512-9HaPYFTIBwug0hbIZbBLRw6pRQGLRtpDAvrblXnC0Syl6iX8fTAv1K8CyGQNv2nR7ErniFvLsX8t9BsZVgzvdw==}
+    engines: {node: '>=12.0.0'}
+    dependencies:
+      '@types/node': 20.9.3
     dev: false
 
   /accepts@1.3.8:
@@ -4407,13 +4414,6 @@ packages:
   /react-is@18.2.0:
     resolution: {integrity: sha512-xWGDIW6x921xtzPkhiULtthJHoJvBbF3q26fzloPCK0hsvxtPVelvftw3zjbHWSkR2km9Z+4uxbDDK/6Zw9B8w==}
     dev: true
-
-  /read-tls-client-hello@1.0.1:
-    resolution: {integrity: sha512-OvSzfVv6Y656ekUxB7aDhWkLW7y1ck16ChfLFNJhKNADFNweH2fvyiEZkGmmdtXbOtlNuH2zVXZoFCW349M+GA==}
-    engines: {node: '>=12.0.0'}
-    dependencies:
-      '@types/node': 20.9.3
-    dev: false
 
   /readable-stream@2.3.8:
     resolution: {integrity: sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA==}

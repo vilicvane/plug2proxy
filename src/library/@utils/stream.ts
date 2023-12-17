@@ -2,6 +2,7 @@ import type {Readable, Writable} from 'stream';
 import {pipeline} from 'stream/promises';
 
 import {getErrorCode} from './miscellaneous.js';
+import duplexer3 from 'duplexer3';
 
 export async function pipelines(
   pipelines: [from: Readable, to: Writable][],
@@ -40,4 +41,18 @@ export async function pipelines(
       from.off('close', onFromClose);
     }
   }
+}
+
+export function duplexify(writable: Writable, readable: Readable) {
+  const duplex = duplexer3(writable, readable);
+
+  duplex.on('close', () => {
+    writable.destroy();
+    readable.destroy();
+  });
+
+  writable.on('close', () => readable.destroy());
+  readable.on('close', () => writable.destroy());
+
+  return duplex;
 }

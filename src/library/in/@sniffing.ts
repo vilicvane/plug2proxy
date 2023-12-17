@@ -1,7 +1,7 @@
 import {type Readable} from 'stream';
 
 import {HTTPParser} from 'http-parser-js';
-import {readTlsClientHello} from 'read-tls-client-hello';
+import {readTlsClientHello} from '@vilic/read-tls-client-hello';
 import SPDYTransport from 'spdy-transport';
 
 const REQUEST_LINE_PATTERN = /^([A-Z]+) (\S+) HTTP\/(1\.[01]|2\.0)\r\n/;
@@ -158,6 +158,7 @@ export type ReadTLSResult = {
   type: 'tls';
   serverName: string | undefined;
   alpnProtocols: string[] | undefined;
+  raw: Buffer;
 };
 
 export type ReadHTTPHeadersOrTLSResult = ReadHTTPHeaderResult | ReadTLSResult;
@@ -178,12 +179,13 @@ export async function readHTTPHeadersOrTLS(
   }
 
   try {
-    const {serverName, alpnProtocols} = await readTlsClientHello(stream);
+    const {serverName, alpnProtocols, raw} = await readTlsClientHello(stream);
 
     return {
       type: 'tls',
       serverName,
       alpnProtocols,
+      raw,
     };
   } catch (error) {
     return undefined;

@@ -46,6 +46,7 @@ import {
 import type {ListeningHost, Port} from '../x.js';
 
 import type {RouteCandidate, Router} from './router/index.js';
+import {duplexify} from '../@utils/stream.js';
 
 const MAX_OUTSTANDING_PINGS = 5;
 
@@ -222,19 +223,10 @@ export class TunnelServer {
                 return;
               }
 
-              const stream = duplexer3(inOutStream, outInStream);
-
-              stream.on('close', () => {
-                inOutStream.destroy();
-                outInStream.destroy();
-              });
-
-              inOutStream.on('close', () => outInStream.destroy());
+              const stream = duplexify(inOutStream, outInStream);
 
               outInStream
                 .on('close', () => {
-                  inOutStream.destroy();
-
                   Logs.debug(context, IN_TUNNEL_OUT_IN_STREAM_CLOSED);
                 })
                 .on('error', error => {
