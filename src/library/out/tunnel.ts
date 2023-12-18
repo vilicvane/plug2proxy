@@ -28,6 +28,7 @@ import type {
 } from '../common.js';
 import {
   INITIAL_WINDOW_SIZE,
+  MAX_OUTSTANDING_PINGS,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
   decodeTunnelHeader,
@@ -133,6 +134,7 @@ export class Tunnel {
 
     const session = HTTP2.connect(this.authority, {
       rejectUnauthorized: this.rejectUnauthorized,
+      maxOutstandingPings: MAX_OUTSTANDING_PINGS,
       settings: {
         initialWindowSize: INITIAL_WINDOW_SIZE,
       },

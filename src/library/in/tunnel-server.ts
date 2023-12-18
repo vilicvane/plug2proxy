@@ -38,6 +38,7 @@ import type {
 } from '../common.js';
 import {
   INITIAL_WINDOW_SIZE,
+  MAX_OUTSTANDING_PINGS,
   TUNNEL_HEADER_NAME,
   TUNNEL_PORT_DEFAULT,
   decodeTunnelHeader,
@@ -46,8 +47,6 @@ import {
 import type {ListeningHost, Port} from '../x.js';
 
 import type {RouteCandidate, Router} from './router/index.js';
-
-const MAX_OUTSTANDING_PINGS = 5;
 
 const HOST_DEFAULT = '';
 
@@ -82,12 +81,12 @@ export class TunnelServer {
     }: TunnelServerOptions,
   ) {
     this.server = HTTP2.createSecureServer({
-      settings: {
-        initialWindowSize: INITIAL_WINDOW_SIZE,
-      },
       cert,
       key,
       maxOutstandingPings: MAX_OUTSTANDING_PINGS,
+      settings: {
+        initialWindowSize: INITIAL_WINDOW_SIZE,
+      },
     })
       .on('session', session => {
         const {sessionToTunnelIdMap, tunnelMap} = this;

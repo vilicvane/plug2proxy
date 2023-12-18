@@ -8,6 +8,8 @@ export const TUNNEL_PORT_DEFAULT = Port.nominalize(8443);
 
 export const INITIAL_WINDOW_SIZE = bytes('4MB');
 
+export const MAX_OUTSTANDING_PINGS = 5;
+
 export type ConnectionId = x.Nominal<'connection id', number>;
 
 export const TUNNEL_HEADER_NAME = 'x-tunnel';
