@@ -83,6 +83,7 @@ export class TunnelServer {
     this.server = HTTP2.createSecureServer({
       cert,
       key,
+      peerMaxConcurrentStreams: Infinity,
       maxOutstandingPings: MAX_OUTSTANDING_PINGS,
       settings: {
         initialWindowSize: INITIAL_WINDOW_SIZE,
