@@ -54,8 +54,8 @@ dependencies:
     specifier: ^0.5.8
     version: 0.5.8
   http2-auto-window-size:
-    specifier: ^0.1.0
-    version: 0.1.0
+    specifier: ^0.1.2
+    version: 0.1.2
   ip-matching:
     specifier: ^2.1.2
     version: 2.1.2
@@ -2933,8 +2933,8 @@ packages:
     resolution: {integrity: sha512-SGeBX54F94Wgu5RH3X5jsDtf4eHyRogWX1XGT3b4HuW3tQPM4AaBzoUji/4AAJNXCEOWZ5O0DgZmJw1947gD5Q==}
     dev: false
 
-  /http2-auto-window-size@0.1.0:
-    resolution: {integrity: sha512-/qhb8rL/bOAMpoO+QolnlmGb/2Sei7l2rbUBymeeBVzxOATWLA1jqiY9gmrAPSlvATInVSj8THm/gRgTeVRyMQ==}
+  /http2-auto-window-size@0.1.2:
+    resolution: {integrity: sha512-mR5LbEaSo/nscWLquA8eWu7UiEFhFJub/Z4prcqHzWyVA/GyKPCfnF2WGUYYB6uF7zyBBKzSfNQISp6Zm6/jjQ==}
     dependencies:
       tslib: 2.6.2
     dev: false
