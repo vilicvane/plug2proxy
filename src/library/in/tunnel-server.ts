@@ -263,6 +263,11 @@ export class TunnelServer {
     let id = this.sessionToTunnelIdMap.get(session);
 
     if (id === undefined) {
+      stream.on('error', error => {
+        Logs.error(context, IN_TUNNEL_CONFIGURE_STREAM_ERROR(error));
+        Logs.debug(context, error);
+      });
+
       if (password !== this.password) {
         Logs.error(
           'tunnel-server',
@@ -279,7 +284,9 @@ export class TunnelServer {
           },
           {endStream: true},
         );
+
         session.close();
+
         return;
       }
 
@@ -310,18 +317,13 @@ export class TunnelServer {
         routeMatchOptions,
       );
 
-      stream
-        .on('close', () => {
-          this.tunnelMap.delete(id!);
-          this.sessionToTunnelIdMap.delete(session);
-          this.router.unregister(id!);
+      stream.on('close', () => {
+        this.tunnelMap.delete(id!);
+        this.sessionToTunnelIdMap.delete(session);
+        this.router.unregister(id!);
 
-          Logs.info(context, IN_TUNNEL_CLOSED);
-        })
-        .on('error', error => {
-          Logs.error(context, IN_TUNNEL_CONFIGURE_STREAM_ERROR(error));
-          Logs.debug(context, error);
-        });
+        Logs.info(context, IN_TUNNEL_CLOSED);
+      });
 
       stream.respond({
         ':status': 200,
