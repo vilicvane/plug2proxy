@@ -60,27 +60,20 @@ export class Router {
 
   async routeHost(host: string): Promise<RouteCandidate | undefined> {
     let domain: string | undefined;
-    let ips: string[] | undefined;
+    let resolvedIPsPromise: Promise<string[] | undefined> | undefined;
 
     if (Net.isIP(host)) {
-      ips = [host];
+      resolvedIPsPromise = Promise.resolve([host]);
     } else {
       domain = host;
     }
 
-    const resolve = (): Promise<string[]> | string[] =>
-      ips ??
-      DNS.resolve(domain!).then(
-        resolvedIPs => {
-          ips = resolvedIPs;
-          return ips;
-        },
-        error => {
-          Logs.warn('router', IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN(domain!));
-          Logs.debug('router', error);
-          return [];
-        },
-      );
+    const resolve = (): Promise<string[] | undefined> =>
+      resolvedIPsPromise ??
+      (resolvedIPsPromise = DNS.resolve(domain!).catch(() => {
+        Logs.warn('router', IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN(domain!));
+        return undefined;
+      }));
 
     let highestPriority = -Infinity;
     let priorCandidates: RouteCandidate[] = [];
@@ -172,7 +165,7 @@ type InitializedRouteMatchOptions = {
 
 async function match(
   domain: string | undefined,
-  resolve: () => Promise<string[]> | string[],
+  resolve: () => Promise<string[] | undefined>,
   {include, exclude, priority: priorityDefault}: InitializedRouteMatchOptions,
 ): Promise<number | false> {
   for (const {match, negate} of exclude) {

@@ -64,19 +64,15 @@ export class GeoLite2 {
         throw new Error('No GeoLite2 database available.');
       }
 
-      if (ips.length === 0) {
-        return undefined;
-      }
-
       return ips.some(ip => {
         const region = reader.get(ip)?.country?.iso_code;
         return region ? matches.includes(region) : false;
       });
     };
 
-    return (_domain, resolve) => {
-      const ips = resolve();
-      return Array.isArray(ips) ? route(ips) : ips.then(route);
+    return async (_domain, resolve) => {
+      const ips = await resolve();
+      return ips && route(ips);
     };
   }
 

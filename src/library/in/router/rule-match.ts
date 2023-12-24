@@ -13,7 +13,7 @@ const PRIVATE_NETWORK_MATCHES = [
 
 export type RuleMatch = (
   domain: string | undefined,
-  resolve: () => Promise<string[]> | string[],
+  resolve: () => Promise<string[] | undefined>,
 ) => Promise<boolean | undefined> | boolean | undefined;
 
 export function createIPRuleMatch(match: string | string[]): RuleMatch {
@@ -37,7 +37,7 @@ export function createIPRuleMatch(match: string | string[]): RuleMatch {
 
   return async (_domain, resolve) => {
     const ips = await resolve();
-    return ips.length > 0 ? route(ips) : undefined;
+    return ips && route(ips);
   };
 }
 
