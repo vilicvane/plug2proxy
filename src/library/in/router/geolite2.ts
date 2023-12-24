@@ -55,7 +55,7 @@ export class GeoLite2 {
   createGeoIPRuleMatch(match: string | string[]): RuleMatch {
     const matches = Array.isArray(match) ? match : [match];
 
-    const route = async (ips: string[]): Promise<boolean | undefined> => {
+    const route = async (ip: string): Promise<boolean | undefined> => {
       await this.initialize();
 
       const reader = await this.readerPromise;
@@ -64,15 +64,13 @@ export class GeoLite2 {
         throw new Error('No GeoLite2 database available.');
       }
 
-      return ips.some(ip => {
-        const region = reader.get(ip)?.country?.iso_code;
-        return region ? matches.includes(region) : false;
-      });
+      const region = reader.get(ip)?.country?.iso_code;
+      return region !== undefined ? matches.includes(region) : false;
     };
 
     return async (_domain, resolve) => {
-      const ips = await resolve();
-      return ips && route(ips);
+      const ip = await resolve();
+      return ip !== undefined ? route(ip) : undefined;
     };
   }
 

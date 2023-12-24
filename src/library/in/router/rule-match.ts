@@ -9,11 +9,13 @@ const PRIVATE_NETWORK_MATCHES = [
   '10.0.0.0/8',
   '172.16.0.0/12',
   '192.168.0.0/16',
+  'fc00::/7',
+  'fe80::/10',
 ];
 
 export type RuleMatch = (
   domain: string | undefined,
-  resolve: () => Promise<string[] | undefined>,
+  resolve: () => Promise<string | undefined>,
 ) => Promise<boolean | undefined> | boolean | undefined;
 
 export function createIPRuleMatch(match: string | string[]): RuleMatch {
@@ -32,12 +34,12 @@ export function createIPRuleMatch(match: string | string[]): RuleMatch {
     }, [] as string[])
     .map(match => IPMatching.getMatch(match));
 
-  const route = (ips: string[]): boolean =>
-    ipMatchings.some(ipMatching => ips.some(ip => ipMatching.matches(ip)));
+  const route = (ip: string): boolean =>
+    ipMatchings.some(ipMatching => ipMatching.matches(ip));
 
   return async (_domain, resolve) => {
-    const ips = await resolve();
-    return ips && route(ips);
+    const ip = await resolve();
+    return ip !== undefined ? route(ip) : undefined;
   };
 }
 
