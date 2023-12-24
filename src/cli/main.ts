@@ -1,11 +1,12 @@
 import {cosmiconfig} from 'cosmiconfig';
 import * as x from 'x-value';
 
-import {In, Out} from '../library/index.js';
+import {In, Out, setup} from '../library/index.js';
 
 import {CA_CERT_PATH, CA_KEY_PATH, GEOLITE2_PATH} from './@constants.js';
 import {setupDebug} from './@debug.js';
 
+setup();
 setupDebug();
 
 const configExplorer = cosmiconfig('p2p');
