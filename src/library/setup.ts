@@ -1,5 +1,7 @@
 import * as Net from 'net';
 
 export function setup(): void {
-  Net.setDefaultAutoSelectFamilyAttemptTimeout(1000);
+  if (Net.setDefaultAutoSelectFamilyAttemptTimeout) {
+    Net.setDefaultAutoSelectFamilyAttemptTimeout(1000);
+  }
 }
