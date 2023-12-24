@@ -79,7 +79,10 @@ export class TLSProxyBridge {
     port: number,
     readTLSResult: ReadTLSResult,
   ): Promise<void> {
-    Logs.info(context, IN_CONNECT_TLS(host, port));
+    Logs.info(
+      context,
+      IN_CONNECT_TLS(host, port, connectSocket.remoteAddress!),
+    );
 
     if (this.ca) {
       await this.connectWithCA(

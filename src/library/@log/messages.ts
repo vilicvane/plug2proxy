@@ -12,11 +12,17 @@ import {getErrorCode} from '../@utils/index.js';
 export const IN_HTTP_PROXY_LISTENING_ON = (host: string, port: number) =>
   `listening on ${host}:${port}...`;
 
-export const IN_CONNECT_NET = (host: string, port: number) =>
-  `connect ${host}:${port} (net)`;
+export const IN_CONNECT_NET = (
+  host: string,
+  port: number,
+  clientAddress: string,
+) => `net connect ${host}:${port} from ${clientAddress}.`;
 
-export const IN_CONNECT_TLS = (host: string, port: number) =>
-  `connect ${host}:${port} (tls)`;
+export const IN_CONNECT_TLS = (
+  host: string,
+  port: number,
+  clientAddress: string,
+) => `tls connect ${host}:${port} from ${clientAddress}.`;
 
 export const IN_OPTIMISTIC_CONNECT = 'optimistic connect...';
 
@@ -60,7 +66,8 @@ export const IN_ERROR_SETTING_UP_RIGHT_SECURE_PROXY_SOCKET =
 export const IN_ERROR_READING_REQUEST_HEADERS =
   'error reading request headers.';
 
-export const IN_REQUEST_NET = (url: string) => `request ${url}`;
+export const IN_REQUEST_NET = (url: string, clientAddress: string) =>
+  `request ${url} from ${clientAddress}.`;
 
 export const IN_ERROR_REQUEST_SOCKET_ERROR = (error: unknown) =>
   `request socket error: ${getErrorCode(error)}`;
@@ -90,7 +97,7 @@ export const IN_TUNNEL_SERVER_TUNNELING = (
   host: string,
   port: number,
   remoteAddress: string,
-) => `tunneling ${host}:${port} (via ${remoteAddress})...`;
+) => `tunneling ${host}:${port} via ${remoteAddress}...`;
 
 export const IN_TUNNEL_CLOSED = 'tunnel closed.';
 

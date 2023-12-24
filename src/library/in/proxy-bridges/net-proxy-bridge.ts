@@ -37,7 +37,10 @@ export class NetProxyBridge {
     port: number,
     headerMap: Map<string, string> | undefined,
   ): Promise<void> {
-    Logs.info(context, IN_CONNECT_NET(host, port));
+    Logs.info(
+      context,
+      IN_CONNECT_NET(host, port, connectSocket.remoteAddress!),
+    );
 
     const connectSocketErrorWhile = streamErrorWhileEntry(
       connectSocket,
@@ -96,10 +99,12 @@ export class NetProxyBridge {
   ): Promise<void> {
     const urlString = request.url!;
 
-    Logs.info(context, IN_REQUEST_NET(urlString));
+    const requestSocket = request.socket;
+
+    Logs.info(context, IN_REQUEST_NET(urlString, requestSocket.remoteAddress!));
 
     const requestSocketErrorWhile = streamErrorWhileEntry(
-      request.socket,
+      requestSocket,
       error => Logs.error(context, IN_ERROR_REQUEST_SOCKET_ERROR(error)),
     );
 
@@ -161,8 +166,8 @@ export class NetProxyBridge {
 
     try {
       await pipelines([
-        [request.socket, socket],
-        [socket, request.socket],
+        [requestSocket, socket],
+        [socket, requestSocket],
       ]);
 
       Logs.info(context, IN_REQUEST_SOCKET_CLOSED);
