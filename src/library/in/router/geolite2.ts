@@ -52,8 +52,8 @@ export class GeoLite2 {
     });
   }
 
-  createGeoIPRuleMatch(match: string | string[]): RuleMatch {
-    const matches = Array.isArray(match) ? match : [match];
+  createGeoIPRuleMatch(pattern: string | string[]): RuleMatch {
+    const matches = Array.isArray(pattern) ? pattern : [pattern];
 
     const route = async (ip: string): Promise<boolean | undefined> => {
       await this.initialize();

@@ -14,7 +14,24 @@ export function generateRandomAuthoritySegment(): string {
     .padStart(8, '0');
 }
 
-export function matchHost(host: string, pattern: string): boolean {
+export function matchHost(host: string, patterns: string[]): boolean {
+  return patterns.some(pattern => matchHostWithPattern(host, pattern));
+}
+
+export function matchAnyHost(
+  hosts: (string | undefined)[],
+  patterns: string[],
+): boolean {
+  return Array.from(
+    new Set(
+      hosts.filter(
+        (host): host is Exclude<typeof host, undefined> => host !== undefined,
+      ),
+    ),
+  ).some(host => patterns.some(pattern => matchHostWithPattern(host, pattern)));
+}
+
+function matchHostWithPattern(host: string, pattern: string): boolean {
   if (minimatch(host, pattern)) {
     return true;
   }

@@ -18,21 +18,21 @@ export type RuleMatch = (
   resolve: () => Promise<string | undefined>,
 ) => Promise<boolean | undefined> | boolean | undefined;
 
-export function createIPRuleMatch(match: string | string[]): RuleMatch {
-  const matches = Array.isArray(match) ? match : [match];
+export function createIPRuleMatch(pattern: string | string[]): RuleMatch {
+  const patterns = Array.isArray(pattern) ? pattern : [pattern];
 
-  const ipMatchings = matches
-    .reduce((matches, match) => {
-      switch (match) {
+  const ipMatchings = patterns
+    .reduce((patterns, pattern) => {
+      switch (pattern) {
         case 'private':
-          return [...matches, ...PRIVATE_NETWORK_MATCHES];
+          return [...patterns, ...PRIVATE_NETWORK_MATCHES];
         case 'loopback':
-          return [...matches, ...LOOPBACK_MATCHES];
+          return [...patterns, ...LOOPBACK_MATCHES];
         default:
-          return [...matches, match];
+          return [...patterns, pattern];
       }
     }, [] as string[])
-    .map(match => IPMatching.getMatch(match));
+    .map(pattern => IPMatching.getMatch(pattern));
 
   const route = (ip: string): boolean =>
     ipMatchings.some(ipMatching => ipMatching.matches(ip));
@@ -43,9 +43,8 @@ export function createIPRuleMatch(match: string | string[]): RuleMatch {
   };
 }
 
-export function createDomainRuleMatch(match: string | string[]): RuleMatch {
-  const matches = Array.isArray(match) ? match : [match];
+export function createDomainRuleMatch(pattern: string | string[]): RuleMatch {
+  const patterns = Array.isArray(pattern) ? pattern : [pattern];
 
-  return domain =>
-    domain !== undefined && matches.some(match => matchHost(domain, match));
+  return domain => domain !== undefined && matchHost(domain, patterns);
 }

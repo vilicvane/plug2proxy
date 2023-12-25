@@ -9,7 +9,7 @@ import * as x from 'x-value';
 
 import type {InLogContext} from '../@log/index.js';
 import {IN_HTTP_PROXY_LISTENING_ON, Logs} from '../@log/index.js';
-import {matchHost} from '../@utils/index.js';
+import {matchAnyHost} from '../@utils/index.js';
 import type {ConnectionId} from '../common.js';
 import type {ListeningHost} from '../x.js';
 import {Port} from '../x.js';
@@ -150,16 +150,10 @@ export class HTTPProxy {
 
           const matchingHost =
             (include.hosts
-              ? include.hosts.some(pattern => matchHost(host, pattern)) ||
-                (serverName !== undefined &&
-                  serverName !== host &&
-                  include.hosts.some(pattern => matchHost(serverName, pattern)))
+              ? matchAnyHost([host, serverName], include.hosts)
               : true) &&
             !(exclude.hosts
-              ? exclude.hosts.some(pattern => matchHost(host, pattern)) ||
-                (serverName !== undefined &&
-                  serverName !== host &&
-                  exclude.hosts.some(pattern => matchHost(serverName, pattern)))
+              ? matchAnyHost([host, serverName], exclude.hosts)
               : false);
 
           if (matchingHost) {
