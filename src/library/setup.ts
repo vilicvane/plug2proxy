@@ -3,7 +3,7 @@ import * as Net from 'net';
 
 export function setup(): void {
   if (Net.setDefaultAutoSelectFamilyAttemptTimeout) {
-    Net.setDefaultAutoSelectFamilyAttemptTimeout(1000);
+    Net.setDefaultAutoSelectFamilyAttemptTimeout(30_000);
   }
 
   setMaxListeners(20);
