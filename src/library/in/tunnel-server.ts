@@ -163,12 +163,18 @@ export class TunnelServer {
     host: string,
     port: number,
   ): Promise<Duplex> {
+    const {tunnelMap} = this;
+
     let tunnel: Tunnel;
 
     if (route) {
-      tunnel = this.tunnelMap.get(route.tunnel)!;
+      tunnel = tunnelMap.get(route.tunnel)!;
     } else {
-      tunnel = [...this.tunnelMap.values()][randomInt(this.tunnelMap.size)];
+      tunnel = Array.from(tunnelMap.values())[randomInt(tunnelMap.size)];
+    }
+
+    if (!tunnel) {
+      throw new Error('Tunnel not available.');
     }
 
     const {tunnelStream} = tunnel;

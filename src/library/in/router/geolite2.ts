@@ -25,8 +25,6 @@ const MAXMIND_GEO_LITE_2_COUNTRY_DATABASE_URL =
 
 const UPDATE_INTERVAL = ms('24h');
 
-const UPDATE_RETRY_INTERVAL = ms('30s');
-
 export type GeoLite2Options = {
   path: string;
 };
@@ -36,10 +34,12 @@ export class GeoLite2 {
 
   tunnelServer!: TunnelServer;
 
-  private initializeCalled = false;
-
   private readerPromise: Promise<Reader<CountryResponse> | false>;
 
+  /**
+   * Will be set to `undefined` after the first successful loading (from either
+   * saved file or update).
+   */
   private readerResolver:
     | ((reader: Reader<CountryResponse> | false) => void)
     | undefined;
@@ -56,7 +56,7 @@ export class GeoLite2 {
     const matches = Array.isArray(pattern) ? pattern : [pattern];
 
     const route = async (ip: string): Promise<boolean | undefined> => {
-      await this.initialize();
+      void this.initializeOrUpdate();
 
       const reader = await this.readerPromise;
 
@@ -65,6 +65,7 @@ export class GeoLite2 {
       }
 
       const region = reader.get(ip)?.country?.iso_code;
+
       return region !== undefined ? matches.includes(region) : false;
     };
 
@@ -74,39 +75,58 @@ export class GeoLite2 {
     };
   }
 
-  private async initialize(): Promise<void> {
-    if (this.initializeCalled) {
+  private updating = false;
+
+  private updatedAt = 0;
+
+  private get outdated(): boolean {
+    return this.updatedAt + UPDATE_INTERVAL < Date.now();
+  }
+
+  private initializeCalled = false;
+
+  private async initializeOrUpdate(): Promise<void> {
+    if (this.updating) {
       return;
     }
 
-    this.initializeCalled = true;
+    try {
+      this.updating = true;
 
-    let updatedAt: number | undefined;
+      if (this.initializeCalled) {
+        if (this.outdated) {
+          await this.update();
+        }
+      } else {
+        this.initializeCalled = true;
 
+        await this.initialize();
+      }
+    } finally {
+      this.updating = false;
+    }
+  }
+
+  private async initialize(): Promise<void> {
     try {
       const stats = await stat(this.path);
-
-      updatedAt = stats.mtimeMs + UPDATE_INTERVAL;
 
       const data = await readFile(this.path);
 
       this.readerResolver!(new Reader(data));
       this.readerResolver = undefined;
+
+      this.updatedAt = stats.mtimeMs;
     } catch (error) {
       Logs.warn('geolite2', IN_GEOLITE2_FAILED_TO_READ_DATABASE);
     }
 
-    setTimeout(
-      () => this.update(),
-      updatedAt === undefined ? 0 : Math.max(updatedAt - Date.now(), 0),
-    );
+    if (this.outdated) {
+      await this.update();
+    }
   }
 
-  private updateTimer: NodeJS.Timeout | undefined;
-
   private async update(): Promise<void> {
-    clearTimeout(this.updateTimer);
-
     let reader: Reader<CountryResponse> | undefined;
 
     try {
@@ -118,16 +138,13 @@ export class GeoLite2 {
 
       await writeFile(this.path, data);
 
+      this.updatedAt = Date.now();
+
       Logs.info('geolite2', IN_GEOLITE2_DATABASE_UPDATED);
     } catch (error) {
       Logs.error('geolite2', IN_GEOLITE2_DATABASE_UPDATE_FAILED);
       Logs.debug('geolite2', error);
     }
-
-    this.updateTimer = setTimeout(
-      () => void this.update(),
-      reader ? UPDATE_INTERVAL : UPDATE_RETRY_INTERVAL,
-    );
 
     if (this.readerResolver) {
       // Use false to mark database not available.
