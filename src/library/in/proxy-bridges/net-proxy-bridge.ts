@@ -35,7 +35,8 @@ export class NetProxyBridge {
     connectSocket: Net.Socket,
     host: string,
     port: number,
-    headerMap: Map<string, string> | undefined,
+    route: RouteCandidate | undefined,
+    referer: string | undefined,
   ): Promise<void> {
     Logs.info(
       context,
@@ -47,20 +48,18 @@ export class NetProxyBridge {
       error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
     );
 
-    const referer = headerMap?.get('referer');
-    const hostInHeader = headerMap?.get('host')?.replace(/:\d+$/, '');
-
-    let route: RouteCandidate | undefined;
-
-    try {
-      route = await errorWhile(
-        this.router.route(hostInHeader ?? host, referer),
-        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
-        [connectSocketErrorWhile],
-      );
-    } catch (error) {
-      Logs.debug(context, error);
-      return;
+    if (referer !== undefined) {
+      try {
+        route =
+          (await errorWhile(
+            this.router.routeURL(referer),
+            () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
+            [connectSocketErrorWhile],
+          )) ?? route;
+      } catch (error) {
+        Logs.debug(context, error);
+        return;
+      }
     }
 
     let tunnel: Duplex;
@@ -96,9 +95,10 @@ export class NetProxyBridge {
   async request(
     context: InLogContext,
     request: HTTP.IncomingMessage,
+    route: RouteCandidate | undefined,
+    referer: string | undefined,
   ): Promise<void> {
     const urlString = request.url!;
-
     const requestSocket = request.socket;
 
     Logs.info(context, IN_REQUEST_NET(urlString, requestSocket.remoteAddress!));
@@ -115,21 +115,21 @@ export class NetProxyBridge {
       search,
       hash,
     } = new URL(urlString);
+
     const port = parseInt(portString) || 80;
 
-    const {referer} = request.headers;
-
-    let route: RouteCandidate | undefined;
-
-    try {
-      route = await errorWhile(
-        this.router.route(host, referer),
-        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
-        [requestSocketErrorWhile],
-      );
-    } catch (error) {
-      Logs.debug(context, error);
-      return;
+    if (referer !== undefined) {
+      try {
+        route =
+          (await errorWhile(
+            this.router.routeURL(referer),
+            () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
+            [requestSocketErrorWhile],
+          )) ?? route;
+      } catch (error) {
+        Logs.debug(context, error);
+        return;
+      }
     }
 
     let socket: Duplex;

@@ -31,15 +31,13 @@ export async function setup(
   }: Config,
   {caCertPath, caKeyPath, geolite2Path}: SetupOptions,
 ): Promise<void> {
-  let caOptions: TLSProxyBridgeCAOptions | false;
+  let caOptions: TLSProxyBridgeCAOptions | undefined;
 
   if (
     httpProxyOptions.refererSniffing ??
     HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT
   ) {
     caOptions = await ensureCACertificate(caCertPath, caKeyPath);
-  } else {
-    caOptions = false;
   }
 
   const geolite2 = new GeoLite2({path: geolite2Path});
@@ -60,9 +58,11 @@ export async function setup(
 
   geolite2.tunnelServer = tunnelServer;
 
-  const tlsProxyBridge = new TLSProxyBridge(tunnelServer, router, {
-    ca: caOptions,
-  });
+  const tlsProxyBridge =
+    caOptions &&
+    new TLSProxyBridge(tunnelServer, router, {
+      ca: caOptions,
+    });
 
   const netProxyBridge = new NetProxyBridge(tunnelServer, router);
 
@@ -72,8 +72,9 @@ export async function setup(
 
   new HTTPProxy(
     tunnelServer,
-    tlsProxyBridge,
     netProxyBridge,
+    tlsProxyBridge,
+    router,
     web,
     httpProxyOptions,
   );

@@ -1,6 +1,6 @@
 import assert from 'assert';
 import {once} from 'events';
-import * as Net from 'net';
+import type * as Net from 'net';
 import type {Duplex} from 'stream';
 import * as TLS from 'tls';
 
@@ -44,16 +44,14 @@ export type TLSProxyBridgeCAOptions = {
 };
 
 export type TLSProxyBridgeOptions = {
-  ca: TLSProxyBridgeCAOptions | false;
+  ca: TLSProxyBridgeCAOptions;
 };
 
 export class TLSProxyBridge {
-  readonly ca:
-    | {
-        cert: Forge.pki.Certificate;
-        key: Forge.pki.PrivateKey;
-      }
-    | undefined;
+  readonly ca: {
+    cert: Forge.pki.Certificate;
+    key: Forge.pki.PrivateKey;
+  };
 
   private certKeyPair = Forge.pki.rsa.generateKeyPair(2048);
 
@@ -62,49 +60,31 @@ export class TLSProxyBridge {
     readonly router: Router,
     {ca}: TLSProxyBridgeOptions,
   ) {
-    if (ca) {
-      this.ca = {
-        cert: Forge.pki.certificateFromPem(ca.cert),
-        key: Forge.pki.privateKeyFromPem(ca.key),
-      };
-    }
+    this.ca = {
+      cert: Forge.pki.certificateFromPem(ca.cert),
+      key: Forge.pki.privateKeyFromPem(ca.key),
+    };
   }
 
   private knownALPNProtocolMap = new Map<ALPNProtocolKey, string | false>();
 
+  /**
+   * Note: using this method suggests referer sniffing will happen.
+   */
   async connect(
     context: InLogContext,
     connectSocket: Net.Socket,
     host: string,
     port: number,
-    readTLSResult: ReadTLSResult,
+    {serverName, alpnProtocols}: ReadTLSResult,
+    route: RouteCandidate | undefined,
   ): Promise<void> {
+    context.decrypted = true;
+
     Logs.info(
       context,
       IN_CONNECT_TLS(host, port, connectSocket.remoteAddress!),
     );
-
-    if (this.ca) {
-      await this.connectWithCA(
-        context,
-        connectSocket,
-        host,
-        port,
-        readTLSResult,
-      );
-    } else {
-      await this.connectWithoutCA(context, connectSocket, host, port);
-    }
-  }
-
-  private async connectWithCA(
-    context: InLogContext,
-    connectSocket: Net.Socket,
-    host: string,
-    port: number,
-    {serverName, alpnProtocols}: ReadTLSResult,
-  ): Promise<void> {
-    context.decrypted = true;
 
     if (alpnProtocols) {
       Logs.debug(context, IN_ALPN_PROTOCOL_CANDIDATES(alpnProtocols));
@@ -126,18 +106,19 @@ export class TLSProxyBridge {
     );
 
     if (knownALPNProtocol === undefined) {
-      return this.performOptimisticConnectWithCA(
+      await this.performOptimisticConnect(
         context,
         host,
         port,
         connectSocket,
         alpnProtocols,
         serverName,
+        route,
       );
     } else {
       Logs.debug(context, IN_ALPN_KNOWN_PROTOCOL_SELECTION(knownALPNProtocol));
 
-      return this.performHTTPConnectWithCA(
+      await this.performHTTPConnect(
         context,
         host,
         port,
@@ -145,71 +126,19 @@ export class TLSProxyBridge {
         alpnProtocols,
         knownALPNProtocol,
         serverName,
+        route,
       );
     }
   }
 
-  private async connectWithoutCA(
-    context: InLogContext,
-    connectSocket: Net.Socket,
-    host: string,
-    port: number,
-  ): Promise<void> {
-    const connectSocketErrorWhile = streamErrorWhileEntry(
-      connectSocket,
-      error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
-    );
-
-    let route: RouteCandidate | undefined;
-
-    try {
-      route = await errorWhile(
-        this.router.routeHost(host),
-        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
-        [connectSocketErrorWhile],
-      );
-    } catch (error) {
-      Logs.debug(context, error);
-      return;
-    }
-
-    let tunnel: Duplex;
-
-    if (route) {
-      try {
-        tunnel = await errorWhile(
-          this.tunnelServer.connect(context, route, host, port),
-          error => Logs.error(context, IN_ERROR_TUNNEL_CONNECTING(error)),
-          [connectSocketErrorWhile],
-        );
-      } catch (error) {
-        Logs.debug(context, error);
-        return;
-      }
-    } else {
-      tunnel = Net.connect(port, host);
-    }
-
-    try {
-      await pipelines([
-        [connectSocket, tunnel],
-        [tunnel, connectSocket],
-      ]);
-
-      Logs.info(context, IN_CONNECT_SOCKET_CLOSED);
-    } catch (error) {
-      Logs.error(context, IN_ERROR_PIPING_CONNECT_SOCKET_FROM_TO_TUNNEL(error));
-      Logs.debug(context, error);
-    }
-  }
-
-  private async performOptimisticConnectWithCA(
+  private async performOptimisticConnect(
     context: InLogContext,
     host: string,
     port: number,
     connectSocket: Net.Socket,
     alpnProtocols: string[] | undefined,
     serverName: string | undefined,
+    optimisticRoute: RouteCandidate | undefined,
   ): Promise<void> {
     Logs.debug(context, IN_OPTIMISTIC_CONNECT);
 
@@ -217,19 +146,6 @@ export class TLSProxyBridge {
       connectSocket,
       error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
     );
-
-    let optimisticRoute: RouteCandidate | undefined;
-
-    try {
-      optimisticRoute = await errorWhile(
-        this.router.routeHost(serverName ?? host),
-        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
-        [connectSocketErrorWhile],
-      );
-    } catch (error) {
-      Logs.debug(context, error);
-      return;
-    }
 
     let rightSecureProxySocket: TLS.TLSSocket;
 
@@ -356,7 +272,7 @@ export class TLSProxyBridge {
     );
   }
 
-  private async performHTTPConnectWithCA(
+  private async performHTTPConnect(
     context: InLogContext,
     host: string,
     port: number,
@@ -364,6 +280,7 @@ export class TLSProxyBridge {
     alpnProtocols: string[] | undefined,
     alpnProtocol: string | false,
     serverName: string | undefined,
+    route: RouteCandidate | undefined,
   ): Promise<void> {
     const {certificate, trusted} = this.requireP2PCertificateForKnownRemote(
       host,
@@ -393,17 +310,18 @@ export class TLSProxyBridge {
         Logs.error(context, IN_ERROR_LEFT_SECURE_PROXY_SOCKET_ERROR(error)),
     );
 
-    let route: RouteCandidate | undefined;
-
-    try {
-      route = await errorWhile(
-        this.router.route(serverName ?? host, referer),
-        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
-        [leftSecureProxySocketErrorWhile],
-      );
-    } catch (error) {
-      Logs.debug(context, error);
-      return;
+    if (referer !== undefined) {
+      try {
+        route =
+          (await errorWhile(
+            this.router.routeURL(referer),
+            () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
+            [leftSecureProxySocketErrorWhile],
+          )) ?? route;
+      } catch (error) {
+        Logs.debug(context, error);
+        return;
+      }
     }
 
     let rightSecureProxySocket: TLS.TLSSocket;

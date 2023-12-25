@@ -8,8 +8,18 @@ import {UAParser} from 'ua-parser-js';
 import * as x from 'x-value';
 
 import type {InLogContext} from '../@log/index.js';
-import {IN_HTTP_PROXY_LISTENING_ON, Logs} from '../@log/index.js';
-import {matchAnyHost} from '../@utils/index.js';
+import {
+  IN_ERROR_CONNECT_SOCKET_ERROR,
+  IN_ERROR_REQUEST_SOCKET_ERROR,
+  IN_ERROR_ROUTING_CONNECTION,
+  IN_HTTP_PROXY_LISTENING_ON,
+  Logs,
+} from '../@log/index.js';
+import {
+  errorWhile,
+  matchAnyHost,
+  streamErrorWhileEntry,
+} from '../@utils/index.js';
 import type {ConnectionId} from '../common.js';
 import type {ListeningHost} from '../x.js';
 import {Port} from '../x.js';
@@ -17,6 +27,7 @@ import {Port} from '../x.js';
 import type {ReadHTTPHeadersOrTLSResult} from './@sniffing.js';
 import {readHTTPHeadersOrTLS} from './@sniffing.js';
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
+import type {RouteCandidate, Router} from './router/index.js';
 import type {TunnelServer} from './tunnel-server.js';
 import {WEB_HOSTNAME, type Web} from './web.js';
 
@@ -68,8 +79,9 @@ export class HTTPProxy {
 
   constructor(
     readonly tunnelServer: TunnelServer,
-    readonly tlsProxyBridge: TLSProxyBridge,
     readonly netProxyBridge: NetProxyBridge,
+    readonly tlsProxyBridge: TLSProxyBridge | undefined,
+    readonly router: Router,
     readonly web: Web,
     {
       host = HOST_DEFAULT,
@@ -90,17 +102,24 @@ export class HTTPProxy {
     }
 
     this.server = HTTP.createServer()
-      .on('connect', this.onHTTPServerConnect)
-      .on('request', this.onHTTPServerRequest)
+      .on(
+        'connect',
+        (request, connectSocket: Net.Socket) =>
+          void this.connect(request, connectSocket),
+      )
+      .on(
+        'request',
+        (request, response) => void this.request(request, response),
+      )
       .listen(port, host, () => {
         Logs.info('proxy', IN_HTTP_PROXY_LISTENING_ON(host, port));
       });
   }
 
-  private onHTTPServerConnect = (
+  private async connect(
     request: HTTP.IncomingMessage,
     connectSocket: Net.Socket,
-  ): void => {
+  ): Promise<void> {
     connectSocket
       .setTimeout(CONNECT_SOCKET_TIMEOUT)
       .on('timeout', () => connectSocket.destroy());
@@ -123,71 +142,118 @@ export class HTTPProxy {
       host: `${host}:${port}`,
     };
 
-    void (async () => {
-      const {refererSniffingOptions} = this;
+    const {refererSniffingOptions, netProxyBridge, tlsProxyBridge} = this;
 
-      let peekingResult: ReadHTTPHeadersOrTLSResult | undefined;
+    let hostname: string;
+    let referer: string | undefined;
 
-      if (refererSniffingOptions) {
-        const {include, exclude} = refererSniffingOptions;
+    let peekingResult: ReadHTTPHeadersOrTLSResult | undefined;
 
-        const browserName = ua.browser.name;
+    if (refererSniffingOptions) {
+      const {include, exclude} = refererSniffingOptions;
 
-        const matchingBrowser =
-          browserName !== undefined &&
-          (include.browsers?.some(pattern => minimatch(browserName, pattern)) ??
-            true) &&
-          !(exclude.browsers ?? []).some(pattern =>
-            minimatch(browserName, pattern),
-          );
+      const browserName = ua.browser.name;
 
-        peekingResult = matchingBrowser
-          ? await readHTTPHeadersOrTLS(connectSocket)
-          : undefined;
+      const matchingBrowser =
+        browserName !== undefined &&
+        (include.browsers?.some(pattern => minimatch(browserName, pattern)) ??
+          true) &&
+        !(exclude.browsers ?? []).some(pattern =>
+          minimatch(browserName, pattern),
+        );
 
-        if (peekingResult && peekingResult.type === 'tls') {
-          const {serverName} = peekingResult;
+      peekingResult = matchingBrowser
+        ? await readHTTPHeadersOrTLS(connectSocket)
+        : undefined;
 
-          const matchingHost =
-            (include.hosts
-              ? matchAnyHost([host, serverName], include.hosts)
-              : true) &&
-            !(exclude.hosts
-              ? matchAnyHost([host, serverName], exclude.hosts)
-              : false);
-
-          if (matchingHost) {
-            await this.tlsProxyBridge.connect(
-              context,
-              connectSocket,
-              host,
-              port,
-              peekingResult,
-            );
-
-            return;
-          }
-        }
+      switch (peekingResult?.type) {
+        case 'http1':
+        case 'http2':
+          hostname =
+            peekingResult.headerMap.get('host')?.replace(/:\d+$/, '') ?? host;
+          referer = peekingResult.headerMap.get('referer');
+          break;
+        case 'tls':
+          hostname = peekingResult.serverName ?? host;
+          break;
+        default:
+          hostname = host;
+          break;
       }
+    } else {
+      hostname = host;
+    }
 
-      await this.netProxyBridge.connect(
+    const connectSocketErrorWhile = streamErrorWhileEntry(
+      connectSocket,
+      error => Logs.error(context, IN_ERROR_CONNECT_SOCKET_ERROR(error)),
+    );
+
+    let route: RouteCandidate | undefined;
+    let ignoreReferer: boolean;
+
+    try {
+      [route, ignoreReferer] = await errorWhile(
+        this.preRoute(hostname),
+        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
+        [connectSocketErrorWhile],
+      );
+    } catch (error) {
+      Logs.debug(context, error);
+      return;
+    }
+
+    if (ignoreReferer) {
+      return netProxyBridge.connect(
         context,
         connectSocket,
         host,
         port,
-        peekingResult &&
-          (peekingResult.type === 'http1' || peekingResult.type === 'http2')
-          ? peekingResult.headerMap
-          : undefined,
+        route,
+        undefined,
       );
-    })();
-  };
+    }
 
-  private onHTTPServerRequest = (
+    if (peekingResult?.type === 'tls' && tlsProxyBridge) {
+      const {include, exclude} = refererSniffingOptions!;
+      const {serverName} = peekingResult;
+
+      const matchingHost =
+        (include.hosts
+          ? matchAnyHost([host, serverName], include.hosts)
+          : true) &&
+        !(exclude.hosts
+          ? matchAnyHost([host, serverName], exclude.hosts)
+          : false);
+
+      if (matchingHost) {
+        return tlsProxyBridge.connect(
+          context,
+          connectSocket,
+          host,
+          port,
+          peekingResult,
+          route,
+        );
+      }
+    }
+
+    return netProxyBridge.connect(
+      context,
+      connectSocket,
+      host,
+      port,
+      route,
+      referer,
+    );
+  }
+
+  private async request(
     request: HTTP.IncomingMessage,
     response: HTTP.ServerResponse,
-  ): void => {
+  ): Promise<void> {
     const urlString = request.url!;
+    const requestSocket = request.socket;
 
     let url: URL | undefined;
 
@@ -204,13 +270,11 @@ export class HTTPProxy {
 
     const {handledRequestSocketSet} = this;
 
-    if (handledRequestSocketSet.has(request.socket)) {
+    if (handledRequestSocketSet.has(requestSocket)) {
       return;
     }
 
-    handledRequestSocketSet.add(request.socket);
-
-    request.socket.setMaxListeners(20);
+    handledRequestSocketSet.add(requestSocket);
 
     const connectionId = this.getNextConnectionId();
 
@@ -221,8 +285,50 @@ export class HTTPProxy {
       host: url.host,
     };
 
-    void this.netProxyBridge.request(context, request);
-  };
+    const requestSocketErrorWhile = streamErrorWhileEntry(
+      requestSocket,
+      error => Logs.error(context, IN_ERROR_REQUEST_SOCKET_ERROR(error)),
+    );
+
+    let route: RouteCandidate | undefined;
+    let ignoreReferer: boolean;
+
+    try {
+      [route, ignoreReferer] = await errorWhile(
+        this.preRoute(url.hostname),
+        () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
+        [requestSocketErrorWhile],
+      );
+    } catch (error) {
+      Logs.debug(context, error);
+      return;
+    }
+
+    await this.netProxyBridge.request(
+      context,
+      request,
+      route,
+      ignoreReferer ? undefined : request.headers.referer,
+    );
+  }
+
+  private async preRoute(
+    hostname: string,
+  ): Promise<[route: RouteCandidate | undefined, ignoreReferer: boolean]> {
+    const {router} = this;
+
+    const route = await router.routeHost(hostname);
+
+    const routeWithoutResolvingIP = await router.routeHost(hostname, false);
+
+    return [
+      route,
+      // Ignore referer if the route is dominated by an explicit rule (result
+      // with/without resolving the IP is the same).
+      routeWithoutResolvingIP !== undefined &&
+        routeWithoutResolvingIP.remote === route?.remote,
+    ];
+  }
 
   private getNextConnectionId(): ConnectionId {
     return ++this.lastContextIdNumber as ConnectionId;

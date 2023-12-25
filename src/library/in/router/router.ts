@@ -49,16 +49,10 @@ export class Router {
       this.initializeRouteMatchOptions(routeMatchOptions);
   }
 
-  async route(
+  async routeHost(
     host: string,
-    referer: string | undefined,
+    resolveIP = true,
   ): Promise<RouteCandidate | undefined> {
-    return referer !== undefined
-      ? this.routeURL(referer)
-      : this.routeHost(host);
-  }
-
-  async routeHost(host: string): Promise<RouteCandidate | undefined> {
     let domain: string | undefined;
     let resolvedIPPromise: Promise<string | undefined> | undefined;
 
@@ -66,6 +60,10 @@ export class Router {
       resolvedIPPromise = Promise.resolve(host);
     } else {
       domain = host;
+
+      if (!resolveIP) {
+        resolvedIPPromise = Promise.resolve(undefined);
+      }
     }
 
     const resolve = (): Promise<string | undefined> =>
