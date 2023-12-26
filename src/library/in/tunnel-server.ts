@@ -20,6 +20,7 @@ import {
   IN_TUNNEL_OUT_IN_STREAM_ERROR,
   IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
   IN_TUNNEL_PASSWORD_MISMATCH,
+  IN_TUNNEL_SERVER_ERROR,
   IN_TUNNEL_SERVER_LISTENING_ON,
   IN_TUNNEL_SERVER_SESSION_ERROR,
   IN_TUNNEL_SERVER_TUNNELING,
@@ -148,6 +149,10 @@ export class TunnelServer {
             this.handleOutInStream(data, stream);
             break;
         }
+      })
+      .on('error', error => {
+        Logs.error('tunnel-server', IN_TUNNEL_SERVER_ERROR(error));
+        Logs.debug('tunnel-server', error);
       })
       .listen(port, host, () => {
         Logs.info('tunnel-server', IN_TUNNEL_SERVER_LISTENING_ON(host, port));
