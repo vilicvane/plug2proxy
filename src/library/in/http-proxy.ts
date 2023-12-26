@@ -12,6 +12,7 @@ import {
   IN_ERROR_CONNECT_SOCKET_ERROR,
   IN_ERROR_REQUEST_SOCKET_ERROR,
   IN_ERROR_ROUTING_CONNECTION,
+  IN_HTTP_PROXY_AUTHENTICATION_ERROR,
   IN_HTTP_PROXY_LISTENING_ON,
   Logs,
 } from '../@log/index.js';
@@ -41,12 +42,14 @@ export const HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT = false;
 export const HTTPProxyRefererSniffingOptions = x.object({
   include: x
     .object({
+      users: x.array(x.string).optional(),
       browsers: x.array(x.string).optional(),
       hosts: x.array(x.string).optional(),
     })
     .optional(),
   exclude: x
     .object({
+      users: x.array(x.string).optional(),
       browsers: x.array(x.string).optional(),
       hosts: x.array(x.string).optional(),
     })
@@ -124,8 +127,6 @@ export class HTTPProxy {
       .setTimeout(CONNECT_SOCKET_TIMEOUT)
       .on('timeout', () => connectSocket.destroy());
 
-    const ua = new UAParser(request.headers['user-agent']).getResult();
-
     const [host, portString] = request.url!.split(':');
     const port = parseInt(portString);
 
@@ -152,9 +153,31 @@ export class HTTPProxy {
     if (refererSniffingOptions) {
       const {include, exclude} = refererSniffingOptions;
 
-      const browserName = ua.browser.name;
+      const [authType, authCredentialsBase64] =
+        request.headers['proxy-authorization']?.split(' ') ?? [];
 
-      const matchingBrowser =
+      let username: string | undefined;
+
+      try {
+        username =
+          authType === 'Basic'
+            ? Buffer.from(authCredentialsBase64, 'base64')
+                .toString()
+                .split(':')[0]
+            : undefined;
+      } catch (error) {
+        Logs.error(context, IN_HTTP_PROXY_AUTHENTICATION_ERROR(error));
+        Logs.debug(context, error);
+      }
+
+      const {
+        browser: {name: browserName},
+      } = new UAParser(request.headers['user-agent']).getResult();
+
+      const matched =
+        username !== undefined &&
+        (include.users?.includes(username) ?? true) &&
+        !(exclude.users ?? []).includes(username) &&
         browserName !== undefined &&
         (include.browsers?.some(pattern => minimatch(browserName, pattern)) ??
           true) &&
@@ -162,7 +185,7 @@ export class HTTPProxy {
           minimatch(browserName, pattern),
         );
 
-      peekingResult = matchingBrowser
+      peekingResult = matched
         ? await readHTTPHeadersOrTLS(connectSocket)
         : undefined;
 
