@@ -70,14 +70,7 @@ export async function setup(
     caCertPath: caOptions ? caCertPath : undefined,
   });
 
-  new HTTPProxy(
-    tunnelServer,
-    netProxyBridge,
-    tlsProxyBridge,
-    router,
-    web,
-    httpProxyOptions,
-  );
+  new HTTPProxy(netProxyBridge, tlsProxyBridge, router, web, httpProxyOptions);
 
   if (ddnsOptions) {
     new DDNS(ddnsOptions);

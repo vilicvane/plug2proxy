@@ -29,7 +29,6 @@ import type {ReadHTTPHeadersOrTLSResult} from './@sniffing.js';
 import {readHTTPHeadersOrTLS} from './@sniffing.js';
 import type {NetProxyBridge, TLSProxyBridge} from './proxy-bridges/index.js';
 import type {RouteCandidate, Router} from './router/index.js';
-import type {TunnelServer} from './tunnel-server.js';
 import {WEB_HOSTNAME, type Web} from './web.js';
 
 const CONNECT_SOCKET_TIMEOUT = ms('30s');
@@ -81,7 +80,6 @@ export class HTTPProxy {
     | undefined;
 
   constructor(
-    readonly tunnelServer: TunnelServer,
     readonly netProxyBridge: NetProxyBridge,
     readonly tlsProxyBridge: TLSProxyBridge | undefined,
     readonly router: Router,
