@@ -15,10 +15,19 @@ const TunnelConfig = x.object({
   replicas: x.number.optional(),
 });
 
-export const Config = x.object({
-  mode: x.literal('out'),
-  alias: x.string.optional(),
-  tunnels: x.array(TunnelConfig),
-});
+export const Config = x.intersection([
+  x.object({
+    mode: x.literal('out'),
+    alias: x.string.optional(),
+  }),
+  x.union([
+    x.object({
+      tunnel: TunnelConfig,
+    }),
+    x.object({
+      tunnels: x.array(TunnelConfig),
+    }),
+  ]),
+]);
 
 export type Config = x.TypeOf<typeof Config>;

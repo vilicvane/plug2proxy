@@ -29,12 +29,22 @@ const HTTPProxyConfig = x.object({
     .optional(),
 });
 
-export const Config = x.object({
-  mode: x.literal('in'),
-  alias: x.string.optional(),
-  tunnel: TunnelServerConfig.optional(),
-  proxy: HTTPProxyConfig.optional(),
-  ddns: DDNSOptions.optional(),
-});
+export const Config = x.intersection([
+  x.object({
+    mode: x.literal('in'),
+    alias: x.string.optional(),
+    tunnel: TunnelServerConfig.optional(),
+    ddns: DDNSOptions.optional(),
+  }),
+  x.union([
+    x.object({
+      proxy: HTTPProxyConfig,
+    }),
+    x.object({
+      proxies: x.array(HTTPProxyConfig),
+    }),
+    x.object({}),
+  ]),
+]);
 
 export type Config = x.TypeOf<typeof Config>;

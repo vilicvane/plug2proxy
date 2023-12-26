@@ -34,7 +34,7 @@ import {WEB_HOSTNAME, type Web} from './web.js';
 const CONNECT_SOCKET_TIMEOUT = ms('30s');
 
 const HOST_DEFAULT = '';
-const PORT_DEFAULT = Port.nominalize(8000);
+const PORT_DEFAULT_START_NUMBER = 8000;
 
 export const HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT = false;
 
@@ -80,13 +80,14 @@ export class HTTPProxy {
     | undefined;
 
   constructor(
+    index: number,
     readonly netProxyBridge: NetProxyBridge,
     readonly tlsProxyBridge: TLSProxyBridge | undefined,
     readonly router: Router,
     readonly web: Web,
     {
       host = HOST_DEFAULT,
-      port = PORT_DEFAULT,
+      port = Port.nominalize(PORT_DEFAULT_START_NUMBER + index),
       refererSniffing:
         refererSniffingOptions = HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT,
     }: HTTPProxyOptions,

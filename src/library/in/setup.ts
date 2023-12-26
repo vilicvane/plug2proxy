@@ -23,23 +23,9 @@ export type SetupOptions = {
 };
 
 export async function setup(
-  {
-    alias,
-    tunnel: tunnelServerConfig = {},
-    proxy: httpProxyOptions = {},
-    ddns: ddnsOptions,
-  }: Config,
+  {alias, tunnel: tunnelServerConfig = {}, ddns: ddnsOptions, ...rest}: Config,
   {caCertPath, caKeyPath, geolite2Path}: SetupOptions,
 ): Promise<void> {
-  let caOptions: TLSProxyBridgeCAOptions | undefined;
-
-  if (
-    httpProxyOptions.refererSniffing ??
-    HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT
-  ) {
-    caOptions = await ensureCACertificate(caCertPath, caKeyPath);
-  }
-
   const geolite2 = new GeoLite2({path: geolite2Path});
 
   const router = new Router(geolite2);
@@ -58,19 +44,40 @@ export async function setup(
 
   geolite2.tunnelServer = tunnelServer;
 
-  const tlsProxyBridge =
-    caOptions &&
-    new TLSProxyBridge(tunnelServer, router, {
-      ca: caOptions,
+  const httpProxyOptionsArray =
+    'proxy' in rest ? [rest.proxy] : 'proxies' in rest ? rest.proxies : [{}];
+
+  for (const [index, httpProxyOptions] of httpProxyOptionsArray.entries()) {
+    let caOptions: TLSProxyBridgeCAOptions | undefined;
+
+    if (
+      httpProxyOptions.refererSniffing ??
+      HTTP_PROXY_REFERER_SNIFFING_OPTIONS_DEFAULT
+    ) {
+      caOptions = await ensureCACertificate(caCertPath, caKeyPath);
+    }
+
+    const tlsProxyBridge =
+      caOptions &&
+      new TLSProxyBridge(tunnelServer, router, {
+        ca: caOptions,
+      });
+
+    const netProxyBridge = new NetProxyBridge(tunnelServer, router);
+
+    const web = new Web({
+      caCertPath: caOptions ? caCertPath : undefined,
     });
 
-  const netProxyBridge = new NetProxyBridge(tunnelServer, router);
-
-  const web = new Web({
-    caCertPath: caOptions ? caCertPath : undefined,
-  });
-
-  new HTTPProxy(netProxyBridge, tlsProxyBridge, router, web, httpProxyOptions);
+    new HTTPProxy(
+      index,
+      netProxyBridge,
+      tlsProxyBridge,
+      router,
+      web,
+      httpProxyOptions,
+    );
+  }
 
   if (ddnsOptions) {
     new DDNS(ddnsOptions);
