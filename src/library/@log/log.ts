@@ -24,7 +24,7 @@ export type OutLogContext = {
   host?: string;
 };
 
-type LogContext =
+export type LogContext =
   | InLogContext
   | OutLogContext
   | 'proxy'

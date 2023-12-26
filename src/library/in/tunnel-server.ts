@@ -6,7 +6,7 @@ import type {Duplex, Readable} from 'stream';
 import duplexer3 from 'duplexer3';
 import {setupAutoWindowSize} from 'http2-auto-window-size';
 
-import type {InLogContext} from '../@log/index.js';
+import type {InLogContext, LogContext} from '../@log/index.js';
 import {
   IN_ROUTE_MATCH_OPTIONS,
   IN_TUNNEL_CLOSED,
@@ -419,9 +419,9 @@ export class TunnelServer {
     return ++this.lastTunnelIdNumber as TunnelId;
   }
 
-  private getContext(tunnelId: TunnelId | undefined): InLogContext {
+  private getContext(tunnelId: TunnelId | undefined): LogContext {
     if (tunnelId === undefined) {
-      return {type: 'in'};
+      return 'tunnel-server';
     }
 
     const tunnel = this.tunnelMap.get(tunnelId);
