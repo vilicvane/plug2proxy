@@ -24,6 +24,7 @@ import {
   IN_TUNNEL_SERVER_LISTENING_ON,
   IN_TUNNEL_SERVER_SESSION_ERROR,
   IN_TUNNEL_SERVER_TUNNELING,
+  IN_TUNNEL_SESSION_STREAM_ERROR,
   IN_TUNNEL_UPDATED,
   IN_TUNNEL_WINDOW_SIZE_UPDATED,
   IN_UNEXPECTED_TUNNEL_HEADER,
@@ -135,6 +136,11 @@ export class TunnelServer {
             'tunnel-server',
             IN_UNEXPECTED_TUNNEL_HEADER(session.socket!.remoteAddress!),
           );
+
+          stream.on('error', error => {
+            Logs.error('tunnel-server', IN_TUNNEL_SESSION_STREAM_ERROR(error));
+            Logs.debug('tunnel-server', error);
+          });
 
           session.close();
 
@@ -398,9 +404,11 @@ export class TunnelServer {
       return;
     }
 
-    Logs.debug(connection.context, IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED);
+    const {context, resolve} = connection;
 
-    connection.resolve(stream);
+    resolve(stream);
+
+    Logs.debug(context, IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED);
 
     stream.respond({':status': 200});
   }

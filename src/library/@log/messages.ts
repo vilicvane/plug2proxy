@@ -120,6 +120,9 @@ export const IN_TUNNEL_IN_OUT_STREAM_ERROR = (error: unknown) =>
 export const IN_TUNNEL_OUT_IN_STREAM_ERROR = (error: unknown) =>
   `tunnel OUT-IN stream error: ${getErrorCode(error)}`;
 
+export const IN_TUNNEL_SESSION_STREAM_ERROR = (error: unknown) =>
+  `tunnel session stream error: ${getErrorCode(error)}`;
+
 export const IN_TUNNEL_CONFIGURE_STREAM_ERROR = (error: unknown) =>
   `tunnel configure stream error: ${getErrorCode(error)}`;
 
