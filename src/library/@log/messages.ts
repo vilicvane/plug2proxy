@@ -12,9 +12,6 @@ import {getErrorCode} from '../@utils/index.js';
 export const IN_HTTP_PROXY_LISTENING_ON = (host: string, port: number) =>
   `listening on ${host}:${port}...`;
 
-export const IN_HTTP_PROXY_AUTHENTICATION_ERROR = (error: unknown) =>
-  `authentication error: ${getErrorCode(error)}`;
-
 export const IN_CONNECT_NET = (
   host: string,
   port: number,
