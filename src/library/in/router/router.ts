@@ -22,7 +22,22 @@ import {
 export class Router {
   private candidateMap = new Map<TunnelId, RouteCandidate>();
 
-  constructor(readonly geolite2: GeoLite2) {}
+  private directRules: {
+    match: RuleMatch;
+    negate: boolean;
+  }[];
+
+  constructor(
+    readonly geolite2: GeoLite2,
+    direct: RouteMatchRule[] | undefined,
+  ) {
+    this.directRules = (direct ?? []).map(rule => {
+      return {
+        match: this.createMatchFunction(rule),
+        negate: rule.negate ?? false,
+      };
+    });
+  }
 
   register(
     id: TunnelId,
@@ -75,6 +90,22 @@ export class Router {
           return undefined;
         },
       ));
+
+    for (const {match, negate} of this.directRules) {
+      let matched = await match(domain, resolve);
+
+      if (matched === undefined) {
+        continue;
+      }
+
+      if (negate) {
+        matched = !matched;
+      }
+
+      if (matched) {
+        return undefined;
+      }
+    }
 
     let highestPriority = -Infinity;
     let priorCandidates: RouteCandidate[] = [];

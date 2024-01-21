@@ -1,6 +1,7 @@
 import * as x from 'x-value';
 import * as xn from 'x-value/node';
 
+import {RouteMatchRule} from '../router.js';
 import {ListeningHost, Port} from '../x.js';
 
 import {DDNSOptions} from './ddns/index.js';
@@ -34,6 +35,7 @@ export const Config = x.intersection([
     mode: x.literal('in'),
     alias: x.string.optional(),
     tunnel: TunnelServerConfig.optional(),
+    direct: x.array(RouteMatchRule).optional(),
     ddns: DDNSOptions.optional(),
   }),
   x.union([

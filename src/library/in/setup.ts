@@ -23,12 +23,18 @@ export type SetupOptions = {
 };
 
 export async function setup(
-  {alias, tunnel: tunnelServerConfig = {}, ddns: ddnsOptions, ...rest}: Config,
+  {
+    alias,
+    tunnel: tunnelServerConfig = {},
+    ddns: ddnsOptions,
+    direct,
+    ...rest
+  }: Config,
   {caCertPath, caKeyPath, geolite2Path}: SetupOptions,
 ): Promise<void> {
   const geolite2 = new GeoLite2({path: geolite2Path});
 
-  const router = new Router(geolite2);
+  const router = new Router(geolite2, direct);
 
   const tunnelServer = new TunnelServer(router, {
     alias,
