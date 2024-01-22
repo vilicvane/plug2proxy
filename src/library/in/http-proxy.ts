@@ -17,6 +17,7 @@ import {
 } from '../@log/index.js';
 import {
   errorWhile,
+  getURLPort,
   matchAnyHost,
   streamErrorWhileEntry,
 } from '../@utils/index.js';
@@ -193,7 +194,7 @@ export class HTTPProxy {
 
     try {
       [route, ignoreReferer] = await errorWhile(
-        this.preRoute(hostname),
+        this.preRoute(hostname, port),
         () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
         [connectSocketErrorWhile],
       );
@@ -289,12 +290,14 @@ export class HTTPProxy {
       error => Logs.error(context, IN_ERROR_REQUEST_SOCKET_ERROR(error)),
     );
 
+    const port = getURLPort(url);
+
     let route: RouteCandidate | undefined;
     let ignoreReferer: boolean;
 
     try {
       [route, ignoreReferer] = await errorWhile(
-        this.preRoute(url.hostname),
+        this.preRoute(url.hostname, port),
         () => Logs.error(context, IN_ERROR_ROUTING_CONNECTION),
         [requestSocketErrorWhile],
       );
@@ -313,12 +316,17 @@ export class HTTPProxy {
 
   private async preRoute(
     hostname: string,
+    port: number,
   ): Promise<[route: RouteCandidate | undefined, ignoreReferer: boolean]> {
     const {router} = this;
 
-    const route = await router.routeHost(hostname);
+    const route = await router.routeHost(hostname, port);
 
-    const routeWithoutResolvingIP = await router.routeHost(hostname, false);
+    const routeWithoutResolvingIP = await router.routeHost(
+      hostname,
+      port,
+      false,
+    );
 
     return [
       route,

@@ -16,6 +16,7 @@ import {
   IN_GEOLITE2_FAILED_TO_READ_DATABASE,
   Logs,
 } from '../../@log/index.js';
+import {getURLPort} from '../../@utils/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
 import type {RuleMatch} from './rule-match.js';
@@ -69,7 +70,7 @@ export class GeoLite2 {
       return region !== undefined ? matches.includes(region) : false;
     };
 
-    return async (_domain, resolve) => {
+    return async (_domain, _port, resolve) => {
       const ip = await resolve();
       return ip !== undefined ? route(ip) : undefined;
     };
@@ -161,13 +162,15 @@ export class GeoLite2 {
     url: string,
     redirectionsLeft = 3,
   ): Promise<HTTP.IncomingMessage> {
-    const {protocol, hostname: host, port: portString} = new URL(url);
+    const urlObject = new URL(url);
 
-    const port = parseInt(portString) || (protocol === 'https:' ? 443 : 80);
+    const {hostname} = urlObject;
+
+    const port = getURLPort(urlObject);
 
     const [response] = (await once(
       HTTPS.get(url, {
-        host,
+        host: hostname,
         port, // Port is required here, otherwise it seems to be 80.
         createConnection: ((
           _args: object,
@@ -176,17 +179,19 @@ export class GeoLite2 {
             (error: Error): void;
           },
         ) => {
-          this.tunnelServer.connect({type: 'in'}, undefined, host, port).then(
-            socket =>
-              callback(
-                null,
-                TLS.connect({
-                  socket,
-                  servername: host,
-                }),
-              ),
-            error => callback(error),
-          );
+          this.tunnelServer
+            .connect({type: 'in'}, undefined, hostname, port)
+            .then(
+              socket =>
+                callback(
+                  null,
+                  TLS.connect({
+                    socket,
+                    servername: hostname,
+                  }),
+                ),
+              error => callback(error),
+            );
         }) as unknown as NonNullable<
           HTTP.ClientRequestArgs['createConnection']
         >,

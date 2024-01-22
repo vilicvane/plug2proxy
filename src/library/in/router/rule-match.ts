@@ -15,6 +15,7 @@ const PRIVATE_NETWORK_MATCHES = [
 
 export type RuleMatch = (
   domain: string | undefined,
+  port: number,
   resolve: () => Promise<string | undefined>,
 ) => Promise<boolean | undefined> | boolean | undefined;
 
@@ -37,7 +38,7 @@ export function createIPRuleMatch(pattern: string | string[]): RuleMatch {
   const route = (ip: string): boolean =>
     ipMatchings.some(ipMatching => ipMatching.matches(ip));
 
-  return async (_domain, resolve) => {
+  return async (_domain, _port, resolve) => {
     const ip = await resolve();
     return ip !== undefined ? route(ip) : undefined;
   };
@@ -47,4 +48,10 @@ export function createDomainRuleMatch(pattern: string | string[]): RuleMatch {
   const patterns = Array.isArray(pattern) ? pattern : [pattern];
 
   return domain => domain !== undefined && matchHost(domain, patterns);
+}
+
+export function createPortRuleMatch(port: number | number[]): RuleMatch {
+  const portSet = new Set(Array.isArray(port) ? port : [port]);
+
+  return (_domain, port) => portSet.has(port);
 }

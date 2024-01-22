@@ -51,6 +51,14 @@ export const RouteMatchRule = x.intersection([
         description:
           '域名，支持 micromatch 格式。如 ["baidu.com", "*.baidu.com"]。',
       }),
+    x
+      .object({
+        type: x.literal('port'),
+        match: x.union([x.number, x.array(x.number)]),
+      })
+      .nominal({
+        description: '特定端口。',
+      }),
   ]),
   x.object({
     negate: x.boolean

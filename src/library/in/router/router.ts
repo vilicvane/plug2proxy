@@ -4,6 +4,7 @@ import * as DNS from 'dns/promises';
 import * as Net from 'net';
 
 import {IN_ROUTER_FAILED_TO_RESOLVE_DOMAIN, Logs} from '../../@log/index.js';
+import {getURLPort} from '../../@utils/index.js';
 import type {TunnelId} from '../../common.js';
 import {
   ROUTE_MATCH_PRIORITY_DEFAULT,
@@ -17,6 +18,7 @@ import {
   type RuleMatch,
   createDomainRuleMatch,
   createIPRuleMatch,
+  createPortRuleMatch,
 } from './rule-match.js';
 
 export class Router {
@@ -65,16 +67,17 @@ export class Router {
   }
 
   async routeHost(
-    host: string,
+    hostname: string,
+    port: number,
     resolveIP = true,
   ): Promise<RouteCandidate | undefined> {
     let domain: string | undefined;
     let resolvedIPPromise: Promise<string | undefined> | undefined;
 
-    if (Net.isIP(host)) {
-      resolvedIPPromise = Promise.resolve(host);
+    if (Net.isIP(hostname)) {
+      resolvedIPPromise = Promise.resolve(hostname);
     } else {
-      domain = host;
+      domain = hostname;
 
       if (!resolveIP) {
         resolvedIPPromise = Promise.resolve(undefined);
@@ -92,7 +95,7 @@ export class Router {
       ));
 
     for (const {match, negate} of this.directRules) {
-      let matched = await match(domain, resolve);
+      let matched = await match(domain, port, resolve);
 
       if (matched === undefined) {
         continue;
@@ -113,6 +116,7 @@ export class Router {
     for (const candidate of this.candidateMap.values()) {
       const priority = await match(
         domain,
+        port,
         resolve,
         candidate.routeMatchOptions,
       );
@@ -135,8 +139,11 @@ export class Router {
   }
 
   routeURL(url: string): Promise<RouteCandidate | undefined> {
-    const {hostname: host} = new URL(url);
-    return this.routeHost(host);
+    const urlObject = new URL(url);
+
+    const port = getURLPort(urlObject);
+
+    return this.routeHost(urlObject.hostname, port);
   }
 
   private initializeRouteMatchOptions({
@@ -170,6 +177,8 @@ export class Router {
         return createDomainRuleMatch(match.match);
       case 'ip':
         return createIPRuleMatch(match.match);
+      case 'port':
+        return createPortRuleMatch(match.match);
       case 'geoip':
         return this.geolite2.createGeoIPRuleMatch(match.match);
     }
@@ -197,11 +206,12 @@ type InitializedRouteMatchOptions = {
 
 async function match(
   domain: string | undefined,
+  port: number,
   resolve: () => Promise<string | undefined>,
   {include, exclude, priority: priorityDefault}: InitializedRouteMatchOptions,
 ): Promise<number | false> {
   for (const {match, negate} of exclude) {
-    let matched = await match(domain, resolve);
+    let matched = await match(domain, port, resolve);
 
     if (matched === undefined) {
       continue;
@@ -219,7 +229,7 @@ async function match(
   let highestPriority: number | undefined;
 
   for (const {match, negate, priority = priorityDefault} of include) {
-    let matched = await match(domain, resolve);
+    let matched = await match(domain, port, resolve);
 
     if (matched === undefined) {
       continue;

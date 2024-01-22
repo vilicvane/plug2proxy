@@ -18,6 +18,7 @@ import {
 } from '../../@log/index.js';
 import {
   errorWhile,
+  getURLPort,
   pipelines,
   streamErrorWhileEntry,
 } from '../../@utils/index.js';
@@ -108,15 +109,9 @@ export class NetProxyBridge {
       error => Logs.error(context, IN_ERROR_REQUEST_SOCKET_ERROR(error)),
     );
 
-    const {
-      hostname: host,
-      port: portString,
-      pathname,
-      search,
-      hash,
-    } = new URL(urlString);
+    const urlObject = new URL(urlString);
 
-    const port = parseInt(portString) || 80;
+    const {hostname, pathname, search, hash} = urlObject;
 
     if (referer !== undefined) {
       try {
@@ -132,12 +127,14 @@ export class NetProxyBridge {
       }
     }
 
+    const port = getURLPort(urlObject);
+
     let socket: Duplex;
 
     if (route) {
       try {
         socket = await errorWhile(
-          this.tunnelServer.connect(context, route, host, port),
+          this.tunnelServer.connect(context, route, hostname, port),
           error => Logs.error(context, IN_ERROR_TUNNEL_CONNECTING(error)),
           [requestSocketErrorWhile],
         );
@@ -146,7 +143,7 @@ export class NetProxyBridge {
         return;
       }
     } else {
-      socket = Net.connect(port, host);
+      socket = Net.connect(port, hostname);
     }
 
     const uri = `${pathname}${search}${hash}`;
