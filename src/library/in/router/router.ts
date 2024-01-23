@@ -17,6 +17,7 @@ import type {GeoLite2} from './geolite2.js';
 import {
   type RuleMatch,
   createDomainRuleMatch,
+  createHostRuleMatch,
   createIPRuleMatch,
   createPortRuleMatch,
 } from './rule-match.js';
@@ -181,6 +182,8 @@ export class Router {
         return createPortRuleMatch(match.match);
       case 'geoip':
         return this.geolite2.createGeoIPRuleMatch(match.match);
+      case 'host':
+        return createHostRuleMatch(match.match, this.geolite2);
     }
   }
 }

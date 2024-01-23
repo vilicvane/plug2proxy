@@ -1,6 +1,9 @@
 import IPMatching from 'ip-matching';
 
 import {matchHost} from '../../@utils/index.js';
+import type {RouteHostMatchRule} from '../../router.js';
+
+import type {GeoLite2} from './geolite2.js';
 
 const LOOPBACK_MATCHES = ['127.0.0.0/8', '::1'];
 
@@ -54,4 +57,49 @@ export function createPortRuleMatch(port: number | number[]): RuleMatch {
   const portSet = new Set(Array.isArray(port) ? port : [port]);
 
   return (_domain, port) => portSet.has(port);
+}
+
+export function createHostRuleMatch(
+  rule: RouteHostMatchRule | RouteHostMatchRule[],
+  geolite2: GeoLite2,
+): RuleMatch {
+  const rules = Array.isArray(rule) ? rule : [rule];
+
+  const matches = rules.map(({ip, geoip, domain, port}) => {
+    const and: RuleMatch[] = [];
+
+    if (ip !== undefined) {
+      and.push(createIPRuleMatch(ip));
+    }
+
+    if (geoip !== undefined) {
+      and.push(geolite2.createGeoIPRuleMatch(geoip));
+    }
+
+    if (domain !== undefined) {
+      and.push(createDomainRuleMatch(domain));
+    }
+
+    if (port !== undefined) {
+      and.push(createPortRuleMatch(port));
+    }
+
+    return and;
+  });
+
+  return async function (domain, port, resolve) {
+    outer: for (const and of matches) {
+      for (const match of and) {
+        const result = await match(domain, port, resolve);
+
+        if (result !== true) {
+          continue outer;
+        }
+      }
+
+      return true;
+    }
+
+    return false;
+  };
 }

@@ -12,6 +12,20 @@ export const RouteMatchIPRuleMatchPattern = x.union([
   IPMatchPattern,
 ]);
 
+export const RouteHostMatchRule = x.object({
+  ip: x
+    .union([
+      x.array(RouteMatchIPRuleMatchPattern),
+      RouteMatchIPRuleMatchPattern,
+    ])
+    .optional(),
+  geoip: x.union([x.array(x.string), x.string]).optional(),
+  domain: x.union([x.array(x.string), x.string]).optional(),
+  port: x.union([x.array(x.number), x.number]).optional(),
+});
+
+export type RouteHostMatchRule = x.TypeOf<typeof RouteHostMatchRule>;
+
 export const RouteMatchRule = x.intersection([
   x.union([
     x
@@ -59,6 +73,10 @@ export const RouteMatchRule = x.intersection([
       .nominal({
         description: '特定端口。',
       }),
+    x.object({
+      type: x.literal('host'),
+      match: x.union([RouteHostMatchRule, x.array(RouteHostMatchRule)]),
+    }),
   ]),
   x.object({
     negate: x.boolean
