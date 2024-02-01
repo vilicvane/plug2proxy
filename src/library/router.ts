@@ -39,8 +39,8 @@ export const RouteMatchRule = x.intersection([
       .object({
         type: x.literal('ip'),
         match: x.union([
-          RouteMatchIPRuleMatchPattern,
           x.array(RouteMatchIPRuleMatchPattern),
+          RouteMatchIPRuleMatchPattern,
         ]),
       })
       .nominal({
@@ -50,7 +50,7 @@ export const RouteMatchRule = x.intersection([
     x
       .object({
         type: x.literal('geoip'),
-        match: x.union([x.string, x.array(x.string)]),
+        match: x.union([x.array(x.string), x.string]),
       })
       .nominal({
         description:
@@ -59,7 +59,7 @@ export const RouteMatchRule = x.intersection([
     x
       .object({
         type: x.literal('domain'),
-        match: x.union([x.string, x.array(x.string)]),
+        match: x.union([x.array(x.string), x.string]),
       })
       .nominal({
         description:
@@ -68,14 +68,14 @@ export const RouteMatchRule = x.intersection([
     x
       .object({
         type: x.literal('port'),
-        match: x.union([x.number, x.array(x.number)]),
+        match: x.union([x.array(x.number), x.number]),
       })
       .nominal({
         description: '特定端口。',
       }),
     x.object({
       type: x.literal('host'),
-      match: x.union([RouteHostMatchRule, x.array(RouteHostMatchRule)]),
+      match: x.union([x.array(RouteHostMatchRule), RouteHostMatchRule]),
     }),
   ]),
   x.object({
