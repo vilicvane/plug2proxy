@@ -1,4 +1,5 @@
 import * as x from 'x-value';
+import * as xn from 'x-value/node';
 
 import {RouteMatchOptions} from '../router.js';
 import {Port} from '../x.js';
@@ -10,6 +11,7 @@ const TunnelConfig = x.object({
   host: x.string,
   port: Port.optional(),
   password: x.string.optional(),
+  ca: x.union([x.string, xn.Buffer]).optional(),
   rejectUnauthorized: x.boolean.optional(),
   match: RouteMatchOptions.optional(),
   replicas: x.number.optional(),

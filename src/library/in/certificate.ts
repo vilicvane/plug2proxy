@@ -6,14 +6,21 @@ import Forge from '@vilic/node-forge';
 export async function ensureCACertificate(
   certPath: string,
   keyPath: string,
-): Promise<{cert: string; key: string}> {
+): Promise<{
+  cert: Forge.pki.Certificate;
+  key: Forge.pki.PrivateKey;
+  pemCert: string;
+  pemKey: string;
+}> {
   let pemCert = await readFile(certPath, 'utf8').catch(() => undefined);
   let pemKey = await readFile(keyPath, 'utf8').catch(() => undefined);
 
   if (pemCert !== undefined && pemKey !== undefined) {
     return {
-      cert: pemCert,
-      key: pemKey,
+      cert: Forge.pki.certificateFromPem(pemCert),
+      key: Forge.pki.privateKeyFromPem(pemKey),
+      pemCert,
+      pemKey,
     };
   }
 
@@ -71,12 +78,16 @@ export async function ensureCACertificate(
   await writeFile(keyPath, pemKey);
 
   return {
-    cert: pemCert,
-    key: pemKey,
+    cert,
+    key: privateKey,
+    pemCert,
+    pemKey,
   };
 }
 
 export async function getSelfSignedCertificate(
+  caCert: Forge.pki.Certificate,
+  caKey: Forge.pki.PrivateKey,
   commonName: string,
 ): Promise<{cert: string; key: string}> {
   const {privateKey, publicKey} = Forge.pki.rsa.generateKeyPair(2048);
@@ -95,14 +106,9 @@ export async function getSelfSignedCertificate(
       value: commonName,
     },
   ]);
-  cert.setIssuer([
-    {
-      shortName: 'CN',
-      value: 'Plug2Proxy Self-Signed',
-    },
-  ]);
+  cert.setIssuer(caCert.subject.attributes);
 
-  cert.sign(privateKey, Forge.md.sha512.create());
+  cert.sign(caKey, Forge.md.sha512.create());
 
   const pemCert = Forge.pki.certificateToPem(cert);
   const pemKey = Forge.pki.privateKeyToPem(privateKey);

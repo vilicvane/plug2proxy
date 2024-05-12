@@ -39,8 +39,8 @@ import type {RouteCandidate, Router} from '../router/index.js';
 import type {TunnelServer} from '../tunnel-server.js';
 
 export type TLSProxyBridgeCAOptions = {
-  cert: string;
-  key: string;
+  cert: Forge.pki.Certificate;
+  key: Forge.pki.PrivateKey;
 };
 
 export type TLSProxyBridgeOptions = {
@@ -60,10 +60,7 @@ export class TLSProxyBridge {
     readonly router: Router,
     {ca}: TLSProxyBridgeOptions,
   ) {
-    this.ca = {
-      cert: Forge.pki.certificateFromPem(ca.cert),
-      key: Forge.pki.privateKeyFromPem(ca.key),
-    };
+    this.ca = ca;
   }
 
   private knownALPNProtocolMap = new Map<ALPNProtocolKey, string | false>();

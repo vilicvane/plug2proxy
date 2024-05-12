@@ -57,6 +57,7 @@ export type TunnelOptions = {
   host: string;
   port?: number;
   password?: string;
+  ca?: string | Buffer;
   rejectUnauthorized?: boolean;
   match?: RouteMatchOptions;
 };
@@ -71,6 +72,8 @@ export class Tunnel {
   readonly authority: string;
 
   readonly password: string | undefined;
+
+  readonly ca: string | Buffer | undefined;
 
   readonly rejectUnauthorized: boolean;
 
@@ -90,6 +93,7 @@ export class Tunnel {
       host,
       port = TUNNEL_PORT_DEFAULT,
       password,
+      ca,
       rejectUnauthorized = true,
       match: routeMatchOptions = {},
       alias,
@@ -108,6 +112,8 @@ export class Tunnel {
     )}:${port}`;
 
     this.password = password;
+
+    this.ca = ca;
 
     this.rejectUnauthorized = rejectUnauthorized;
 
@@ -133,6 +139,8 @@ export class Tunnel {
     Logs.info(context, OUT_CONNECTING(this.authority));
 
     const session = HTTP2.connect(this.authority, {
+      ca: this.ca,
+      checkServerIdentity: this.ca ? () => undefined : undefined,
       rejectUnauthorized: this.rejectUnauthorized,
       maxOutstandingPings: MAX_OUTSTANDING_PINGS,
       settings: {
@@ -143,10 +151,7 @@ export class Tunnel {
         setupAutoWindowSize(session, {
           initialWindowSize: INITIAL_WINDOW_SIZE,
           onSetLocalWindowSize: windowSize => {
-            Logs.debug(
-              this.context,
-              OUT_TUNNEL_WINDOW_SIZE_UPDATED(windowSize),
-            );
+            Logs.debug(context, OUT_TUNNEL_WINDOW_SIZE_UPDATED(windowSize));
           },
         });
 
