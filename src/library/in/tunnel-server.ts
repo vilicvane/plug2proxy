@@ -1,6 +1,7 @@
 import assert from 'assert';
 import {randomInt} from 'crypto';
 import * as HTTP2 from 'http2';
+import type {Socket} from 'net';
 import type {Duplex, Readable} from 'stream';
 
 import duplexer3 from 'duplexer3';
@@ -20,6 +21,7 @@ import {
   IN_TUNNEL_OUT_IN_STREAM_ERROR,
   IN_TUNNEL_OUT_IN_STREAM_ESTABLISHED,
   IN_TUNNEL_PASSWORD_MISMATCH,
+  IN_TUNNEL_SERVER_CONNECTION_ERROR,
   IN_TUNNEL_SERVER_ERROR,
   IN_TUNNEL_SERVER_LISTENING_ON,
   IN_TUNNEL_SERVER_SESSION_ERROR,
@@ -91,6 +93,15 @@ export class TunnelServer {
         initialWindowSize: INITIAL_WINDOW_SIZE,
       },
     })
+      .on('connection', (socket: Socket) => {
+        socket.on('error', error => {
+          Logs.error(
+            'tunnel-server',
+            IN_TUNNEL_SERVER_CONNECTION_ERROR(error, socket.remoteAddress!),
+          );
+          Logs.debug('tunnel-server', error);
+        });
+      })
       .on('session', session => {
         const {sessionToTunnelIdMap, tunnelMap} = this;
 

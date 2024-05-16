@@ -90,6 +90,14 @@ export const IN_UNEXPECTED_TUNNEL_HEADER = (remoteAddress: string) =>
 export const IN_TUNNEL_SERVER_ERROR = (error: unknown) =>
   `tunnel server error: ${getErrorCode(error)}`;
 
+export const IN_TUNNEL_SERVER_CONNECTION_ERROR = (
+  error: unknown,
+  remoteAddress: string,
+) =>
+  `tunnel server connection (from ${remoteAddress}) error: ${getErrorCode(
+    error,
+  )}`;
+
 export const IN_TUNNEL_SERVER_SESSION_ERROR = (error: unknown) =>
   `tunnel server session error: ${getErrorCode(error)}`;
 
