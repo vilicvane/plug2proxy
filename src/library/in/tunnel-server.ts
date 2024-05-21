@@ -3,6 +3,7 @@ import {randomInt} from 'crypto';
 import * as HTTP2 from 'http2';
 import type {Socket} from 'net';
 import type {Duplex, Readable} from 'stream';
+import type {TLSSocket} from 'tls';
 
 import duplexer3 from 'duplexer3';
 import {setupAutoWindowSize} from 'http2-auto-window-size';
@@ -94,6 +95,15 @@ export class TunnelServer {
       },
     })
       .on('connection', (socket: Socket) => {
+        socket.on('error', error => {
+          Logs.error(
+            'tunnel-server',
+            IN_TUNNEL_SERVER_CONNECTION_ERROR(error, socket.remoteAddress!),
+          );
+          Logs.debug('tunnel-server', error);
+        });
+      })
+      .on('secureConnection', (socket: TLSSocket) => {
         socket.on('error', error => {
           Logs.error(
             'tunnel-server',
