@@ -1,0 +1,9 @@
+[package]
+name = "plug2proxy-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.88", features = ["backtrace"] }
+socket2 = "0.5.7"
+tokio = { version = "1.40.0", features = ["full"] }
