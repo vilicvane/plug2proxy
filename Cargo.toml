@@ -5,5 +5,10 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.88", features = ["backtrace"] }
+async-trait = "0.1.82"
+hickory-client = "0.24.1"
+hickory-resolver = "0.24.1"
+hickory-server = { version = "0.24.1", features = ["hickory-resolver"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 socket2 = "0.5.7"
 tokio = { version = "1.40.0", features = ["full"] }
