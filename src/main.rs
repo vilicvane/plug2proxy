@@ -1,18 +1,99 @@
+mod fake_authority;
+mod notes;
+mod tproxy_socket;
+
 use std::{
-    collections::BTreeMap,
     net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use fake_authority::FakeAuthority;
+use stun::message::Getter as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt};
-
-mod fake_authority;
-mod tproxy_socket;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let (peer_1, peer_1_address) = create_peer_socket().await?;
+    let (peer_2, peer_2_address) = create_peer_socket().await?;
+
+    peer_1.send_to("hello".as_bytes(), peer_1_address).await?;
+    peer_1.send_to("hello".as_bytes(), peer_2_address).await?;
+    peer_2.send_to("hello".as_bytes(), peer_2_address).await?;
+    peer_2.send_to("hello".as_bytes(), peer_1_address).await?;
+
+    tokio::spawn(async move {
+        let mut buffer = [0u8; 1024];
+
+        loop {
+            let (length, address) = peer_1.recv_from(&mut buffer).await?;
+
+            println!(
+                "received {} bytes from {}: {:?}",
+                length,
+                address,
+                &buffer[..length]
+            );
+        }
+
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+    });
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    peer_2.send_to("world".as_bytes(), peer_1_address).await?;
+
+    // stun_client.close().await?;
+
+    tokio::signal::ctrl_c().await?;
+
+    Ok(())
+}
+
+async fn create_peer_socket() -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
+    let stun_server_address = "stun.l.google.com:19302";
+
+    let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
+
+    println!("peer local address: {:?}", socket.local_addr()?);
+
+    socket.connect(stun_server_address).await?;
+
+    let mut stun_client = stun::client::ClientBuilder::new()
+        .with_conn(socket.clone())
+        .build()?;
+
+    let mut message = stun::message::Message::new();
+
+    message.build(&[
+        Box::new(stun::agent::TransactionId::new()),
+        Box::new(stun::message::BINDING_REQUEST),
+    ])?;
+
+    let (response_sender, mut response_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    stun_client
+        .send(&message, Some(Arc::new(response_sender)))
+        .await?;
+
+    let address = {
+        let body = response_receiver.recv().await.unwrap().event_body?;
+
+        let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
+
+        xor_addr.get_from(&body)?;
+
+        SocketAddr::new(xor_addr.ip, xor_addr.port)
+    };
+
+    println!("peer address: {:?}", address);
+
+    Ok((socket, address))
+}
+
+async fn test_sqlite() -> anyhow::Result<()> {
     let sqlite = rusqlite::Connection::open_with_flags(
         "test.db",
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -29,12 +110,6 @@ async fn main() -> anyhow::Result<()> {
         "#,
         [],
     )?;
-
-    // let x = hickory_client::client::ClientFuture::
-
-    test_dns().await?;
-
-    tokio::signal::ctrl_c().await?;
 
     Ok(())
 }
