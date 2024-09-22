@@ -1,8 +1,10 @@
 mod fake_authority;
 mod notes;
+mod peer_socket;
 mod tproxy_socket;
 
 use std::{
+    cell::RefCell,
     net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::Arc,
@@ -10,40 +12,60 @@ use std::{
 };
 
 use fake_authority::FakeAuthority;
+use peer_socket::PeerSocket;
 use stun::message::Getter as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt};
+use webrtc::util::Conn;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let (peer_1, peer_1_address) = create_peer_socket().await?;
     let (peer_2, peer_2_address) = create_peer_socket().await?;
 
-    peer_1.send_to("hello".as_bytes(), peer_1_address).await?;
-    peer_1.send_to("hello".as_bytes(), peer_2_address).await?;
-    peer_2.send_to("hello".as_bytes(), peer_2_address).await?;
-    peer_2.send_to("hello".as_bytes(), peer_1_address).await?;
+    peer_1.send_to(&[], peer_1_address).await?;
+    peer_1.send_to(&[], peer_2_address).await?;
+    peer_2.send_to(&[], peer_2_address).await?;
+    peer_2.send_to(&[], peer_1_address).await?;
 
-    tokio::spawn(async move {
-        let mut buffer = [0u8; 1024];
+    tokio::spawn({
+        let peer_1 = peer_1.clone();
 
-        loop {
-            let (length, address) = peer_1.recv_from(&mut buffer).await?;
+        async move {
+            let mut buffer = [0u8; 1024];
 
-            println!(
-                "received {} bytes from {}: {:?}",
-                length,
-                address,
-                &buffer[..length]
-            );
+            loop {
+                println!("receiving...");
+
+                let (length, address) = peer_1.recv_from(&mut buffer).await?;
+
+                println!(
+                    "received {} bytes from {}: {:?}",
+                    length,
+                    address,
+                    &buffer[..length]
+                );
+            }
+
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
         }
-
-        #[allow(unreachable_code)]
-        anyhow::Ok(())
     });
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
-    peer_2.send_to("world".as_bytes(), peer_1_address).await?;
+        println!("sending messages...");
+
+        peer_1.send("world 1".as_bytes()).await?;
+
+        peer_2
+            .send_to(
+                "world local 2".as_bytes(),
+                format!("127.0.0.1:{}", peer_1_address.port()).parse()?,
+            )
+            .await?;
+        peer_2.send("world 2".as_bytes()).await?;
+    }
 
     // stun_client.close().await?;
 
@@ -52,14 +74,19 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_peer_socket() -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
-    let stun_server_address = "stun.l.google.com:19302";
+async fn create_peer_socket() -> anyhow::Result<(Arc<PeerSocket>, SocketAddr)> {
+    let stun_server_address = "74.125.250.129:19302";
+    // let stun_server_address = "stun.l.google.com:19302";
 
-    let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
+    let socket = Arc::new(PeerSocket::new(tokio::net::UdpSocket::bind("0:0").await?));
 
     println!("peer local address: {:?}", socket.local_addr()?);
 
-    socket.connect(stun_server_address).await?;
+    socket.connect(stun_server_address.parse()?).await?;
+
+    // let local_address = socket.local_addr()?;
+
+    // Ok((socket, address))
 
     let mut stun_client = stun::client::ClientBuilder::new()
         .with_conn(socket.clone())
@@ -89,6 +116,8 @@ async fn create_peer_socket() -> anyhow::Result<(Arc<tokio::net::UdpSocket>, Soc
     };
 
     println!("peer address: {:?}", address);
+
+    stun_client.close().await?;
 
     Ok((socket, address))
 }
