@@ -3,15 +3,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use webrtc::util::{Conn, Result};
+use webrtc_util::Conn;
 
-pub struct PeerSocket {
-    socket: tokio::net::UdpSocket,
+pub struct ConnWrapper {
+    socket: Arc<tokio::net::UdpSocket>,
     remote_addr: Mutex<Option<SocketAddr>>,
 }
 
-impl PeerSocket {
-    pub fn new(socket: tokio::net::UdpSocket) -> Self {
+impl ConnWrapper {
+    pub fn new(socket: Arc<tokio::net::UdpSocket>) -> Self {
         Self {
             socket,
             remote_addr: Mutex::new(None),
@@ -20,22 +20,22 @@ impl PeerSocket {
 }
 
 #[async_trait::async_trait]
-impl Conn for PeerSocket {
-    async fn connect(&self, addr: SocketAddr) -> Result<()> {
+impl Conn for ConnWrapper {
+    async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
         self.remote_addr.lock().unwrap().replace(addr);
 
         Ok(())
     }
 
-    async fn recv(&self, buf: &mut [u8]) -> Result<usize> {
+    async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
         Ok(self.socket.recv(buf).await?)
     }
 
-    async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
         Ok(self.socket.recv_from(buf).await?)
     }
 
-    async fn send(&self, buf: &[u8]) -> Result<usize> {
+    async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
         let remote_addr = self
             .remote_addr
             .lock()
@@ -46,11 +46,11 @@ impl Conn for PeerSocket {
         Ok(self.socket.send_to(buf, remote_addr).await?)
     }
 
-    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
         Ok(self.socket.send_to(buf, target).await?)
     }
 
-    fn local_addr(&self) -> Result<SocketAddr> {
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
         Ok(self.socket.local_addr()?)
     }
 
@@ -58,7 +58,7 @@ impl Conn for PeerSocket {
         self.remote_addr.lock().unwrap().clone()
     }
 
-    async fn close(&self) -> Result<()> {
+    async fn close(&self) -> webrtc_util::Result<()> {
         Ok(self.socket.close().await?)
     }
 
