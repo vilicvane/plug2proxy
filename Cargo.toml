@@ -12,6 +12,11 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
+[lints.clippy]
+collapsible_else_if = "allow"
+disallowed_macros = "warn"
+too_many_arguments = "allow"
+
 [dependencies]
 anyhow = { version = "1.0.88", features = ["backtrace"] }
 async-imap = { version = "0.10.1", default-features = false, features = ["runtime-tokio"] }
