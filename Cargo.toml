@@ -24,8 +24,10 @@ hickory-client = "0.24.1"
 hickory-resolver = "0.24.1"
 hickory-server = { version = "0.24.1", features = ["hickory-resolver"] }
 imap = "2.4.1"
+lettre = "0.11.9"
 native-tls = "0.2.12"
 quinn = "0.11.5"
+rand = "0.8.5"
 rcgen = "0.13.1"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 rustls = { version = "0.23.13", features = ["ring"] }
