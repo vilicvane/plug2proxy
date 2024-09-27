@@ -21,6 +21,7 @@ pub trait Stream {
     async fn write_all(&mut self, buf: &[u8]) -> anyhow::Result<()>;
 }
 
+#[derive(Debug)]
 pub enum TransportType {
     Udp,
     Tcp,

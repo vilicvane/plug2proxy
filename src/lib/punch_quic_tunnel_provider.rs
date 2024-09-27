@@ -16,14 +16,18 @@ use crate::{
 };
 
 pub struct PunchQuicServerTunnelConfig {
-    stun_server_addr: String,
+    pub stun_server_addr: String,
 }
 
 pub struct PunchQuicServerTunnelProvider {
     config: PunchQuicServerTunnelConfig,
 }
 
-impl PunchQuicServerTunnelProvider {}
+impl PunchQuicServerTunnelProvider {
+    pub fn new(config: PunchQuicServerTunnelConfig) -> Self {
+        Self { config }
+    }
+}
 
 #[async_trait::async_trait]
 impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
@@ -31,8 +35,6 @@ impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
         let (socket, internet_address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
         println!("internet address: {}", internet_address.to_string());
-
-        let socket = Arc::try_unwrap(socket).unwrap();
 
         println!("peer address:");
 
@@ -61,11 +63,17 @@ impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
 }
 
 pub struct PunchQuicClientTunnelConfig {
-    stun_server_addr: String,
+    pub stun_server_addr: String,
 }
 
 pub struct PunchQuicClientTunnelProvider {
     config: PunchQuicClientTunnelConfig,
+}
+
+impl PunchQuicClientTunnelProvider {
+    pub fn new(config: PunchQuicClientTunnelConfig) -> Self {
+        Self { config }
+    }
 }
 
 #[async_trait::async_trait]
@@ -74,8 +82,6 @@ impl ClientTunnelProvider for PunchQuicClientTunnelProvider {
         let (socket, internet_address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
         println!("internet address: {}", internet_address.to_string());
-
-        let socket = Arc::try_unwrap(socket).unwrap();
 
         println!("peer address:");
 
@@ -100,49 +106,61 @@ impl ClientTunnelProvider for PunchQuicClientTunnelProvider {
 
 async fn create_peer_socket(
     stun_server_addr: &str,
-) -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
-    let stun_server_addr = stun_server_addr.to_socket_addrs()?.next().unwrap();
+) -> anyhow::Result<(tokio::net::UdpSocket, SocketAddr)> {
+    async fn inner(
+        stun_server_addr: &str,
+    ) -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
+        let stun_server_addr = stun_server_addr.to_socket_addrs()?.next().unwrap();
 
-    let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
+        let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
 
-    let stun_client_conn = ConnWrapper::new(socket.clone());
+        let stun_client_conn = ConnWrapper::new(socket.clone());
 
-    stun_client_conn.connect(stun_server_addr).await?;
+        stun_client_conn.connect(stun_server_addr).await?;
 
-    let mut stun_client = stun::client::ClientBuilder::new()
-        .with_conn(Arc::new(stun_client_conn))
-        .build()?;
+        let mut stun_client = stun::client::ClientBuilder::new()
+            .with_conn(Arc::new(stun_client_conn))
+            .build()?;
 
-    let address = {
-        let (response_sender, mut response_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let address = {
+            let (response_sender, mut response_receiver) = tokio::sync::mpsc::unbounded_channel();
 
-        let mut message = stun::message::Message::new();
+            let mut message = stun::message::Message::new();
 
-        message.build(&[
-            Box::new(stun::agent::TransactionId::new()),
-            Box::new(stun::message::BINDING_REQUEST),
-        ])?;
+            message.build(&[
+                Box::new(stun::agent::TransactionId::new()),
+                Box::new(stun::message::BINDING_REQUEST),
+            ])?;
 
-        stun_client
-            .send(&message, Some(Arc::new(response_sender)))
-            .await?;
+            stun_client
+                .send(&message, Some(Arc::new(response_sender)))
+                .await?;
 
-        let body = response_receiver.recv().await.unwrap().event_body?;
+            let body = response_receiver.recv().await.unwrap().event_body?;
 
-        let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
+            let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
 
-        xor_addr.get_from(&body)?;
+            xor_addr.get_from(&body)?;
 
-        SocketAddr::new(xor_addr.ip, xor_addr.port)
-    };
+            SocketAddr::new(xor_addr.ip, xor_addr.port)
+        };
 
-    println!("peer address: {:?}", address);
+        println!("peer address: {:?}", address);
 
-    stun_client.close().await?;
+        stun_client.close().await?;
 
-    // stun_client does a spawn internally, and loop till close, so yield now
+        Ok((socket, address))
+    }
+
+    let (socket, address) = inner(stun_server_addr).await?;
+
+    // `stun_client` does a spawn internally, and loops till close, so yield now
     // and give it a chance to drop the socket reference.
+    //
+    // But I don't know why I have to put this after `inner()` call.
     tokio::task::yield_now().await;
+
+    let socket = Arc::try_unwrap(socket).unwrap();
 
     Ok((socket, address))
 }
