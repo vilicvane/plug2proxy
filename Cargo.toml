@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 path = "src/lib/mod.rs"
 
+[[bin]]
+name = "plug2proxy"
+path = "src/bin/main.rs"
+
 [profile.dev]
 panic = "abort"
 
@@ -24,18 +28,23 @@ async-native-tls = { version = "0.5.0", default-features = false, features = ["r
 async-trait = "0.1.82"
 clap = { version = "4.5.17", features = ["derive"] }
 color-backtrace = "0.6.1"
+derive_more = { version = "1.0.0", features = ["full"] }
 futures = "0.3.30"
 hickory-client = "0.24.1"
 hickory-resolver = "0.24.1"
 hickory-server = { version = "0.24.1", features = ["hickory-resolver"] }
 imap = "2.4.1"
+json_comments = "0.2.2"
 lettre = "0.11.9"
 native-tls = "0.2.12"
 quinn = "0.11.5"
 rand = "0.8.5"
 rcgen = "0.13.1"
+redis = { version = "0.27.2", features = ["json", "tokio-comp"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 rustls = { version = "0.23.13", features = ["ring"] }
+serde = "1.0.210"
+serde_json = "1.0.128"
 socket2 = "0.5.7"
 stun = "0.6.0"
 tokio = { version = "1.40.0", features = ["full"] }

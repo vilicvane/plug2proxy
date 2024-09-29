@@ -4,11 +4,11 @@ use std::{
 };
 
 use stun::message::Getter as _;
-use webrtc::dtls::conn;
 use webrtc_util::Conn;
 
 use crate::{
-    punch::{self, punch},
+    match_server::{MatchPeerId, MatchServer},
+    punch::punch,
     punch_quic_tunnel::{PunchQuicClientTunnel, PunchQuicServerTunnel},
     quinn::{create_client_endpoint, create_server_endpoint},
     tunnel::{ClientTunnel, ServerTunnel},
@@ -19,33 +19,34 @@ pub struct PunchQuicServerTunnelConfig {
     pub stun_server_addr: String,
 }
 
-pub struct PunchQuicServerTunnelProvider {
+pub struct PunchQuicServerTunnelProvider<TMatchServer> {
+    id: MatchPeerId,
+    match_server: TMatchServer,
     config: PunchQuicServerTunnelConfig,
 }
 
-impl PunchQuicServerTunnelProvider {
-    pub fn new(config: PunchQuicServerTunnelConfig) -> Self {
-        Self { config }
+impl<TMatchServer: MatchServer> PunchQuicServerTunnelProvider<TMatchServer> {
+    pub fn new(
+        id: MatchPeerId,
+        match_server: TMatchServer,
+        config: PunchQuicServerTunnelConfig,
+    ) -> Self {
+        Self {
+            id,
+            match_server,
+            config,
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
+impl<TMatchServer: MatchServer + Sync> ServerTunnelProvider
+    for PunchQuicServerTunnelProvider<TMatchServer>
+{
     async fn accept(&self) -> anyhow::Result<Box<dyn ServerTunnel>> {
-        let (socket, internet_address) = create_peer_socket(&self.config.stun_server_addr).await?;
+        let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        println!("internet address: {}", internet_address.to_string());
-
-        println!("peer address:");
-
-        let stdin = std::io::stdin();
-
-        let peer_address = stdin
-            .lines()
-            .next()
-            .unwrap()
-            .unwrap()
-            .parse::<SocketAddr>()?;
+        let peer_address = self.match_server.match_client(&self.id, address).await?;
 
         punch(&socket, peer_address).await?;
 
@@ -66,33 +67,34 @@ pub struct PunchQuicClientTunnelConfig {
     pub stun_server_addr: String,
 }
 
-pub struct PunchQuicClientTunnelProvider {
+pub struct PunchQuicClientTunnelProvider<TMatchServer> {
+    id: MatchPeerId,
+    match_server: TMatchServer,
     config: PunchQuicClientTunnelConfig,
 }
 
-impl PunchQuicClientTunnelProvider {
-    pub fn new(config: PunchQuicClientTunnelConfig) -> Self {
-        Self { config }
+impl<TMatchServer: MatchServer> PunchQuicClientTunnelProvider<TMatchServer> {
+    pub fn new(
+        id: MatchPeerId,
+        match_server: TMatchServer,
+        config: PunchQuicClientTunnelConfig,
+    ) -> Self {
+        Self {
+            id,
+            match_server,
+            config,
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl ClientTunnelProvider for PunchQuicClientTunnelProvider {
+impl<TMatchServer: MatchServer + Sync> ClientTunnelProvider
+    for PunchQuicClientTunnelProvider<TMatchServer>
+{
     async fn accept(&self) -> anyhow::Result<Box<dyn ClientTunnel>> {
-        let (socket, internet_address) = create_peer_socket(&self.config.stun_server_addr).await?;
+        let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        println!("internet address: {}", internet_address.to_string());
-
-        println!("peer address:");
-
-        let stdin = std::io::stdin();
-
-        let peer_address = stdin
-            .lines()
-            .next()
-            .unwrap()
-            .unwrap()
-            .parse::<SocketAddr>()?;
+        let peer_address = self.match_server.match_server(&self.id, address).await?;
 
         punch(&socket, peer_address).await?;
 

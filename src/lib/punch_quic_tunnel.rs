@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 
-use crate::tunnel::{ClientTunnel, ServerTunnel, Stream, TransportType};
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType};
 
 pub struct PunchQuicServerTunnel {
     conn: quinn::Connection,
@@ -14,7 +16,13 @@ impl PunchQuicServerTunnel {
 
 #[async_trait::async_trait]
 impl ServerTunnel for PunchQuicServerTunnel {
-    async fn accept(&self) -> anyhow::Result<(TransportType, SocketAddr, Box<dyn Stream>)> {
+    async fn accept(
+        &self,
+    ) -> anyhow::Result<(
+        TransportType,
+        SocketAddr,
+        (Box<dyn AsyncWrite + Unpin>, Box<dyn AsyncRead + Unpin>),
+    )> {
         let (send_stream, mut recv_stream) = self.conn.accept_bi().await?;
 
         let (typ, remote_addr) = {
@@ -59,10 +67,7 @@ impl ServerTunnel for PunchQuicServerTunnel {
         Ok((
             typ,
             remote_addr,
-            Box::new(QuinnStream {
-                send_stream,
-                recv_stream,
-            }),
+            (Box::new(send_stream), Box::new(recv_stream)),
         ))
     }
 }
@@ -83,7 +88,7 @@ impl ClientTunnel for PunchQuicClientTunnel {
         &self,
         typ: TransportType,
         remote_addr: SocketAddr,
-    ) -> anyhow::Result<Box<dyn Stream>> {
+    ) -> anyhow::Result<(Box<dyn AsyncWrite + Unpin>, Box<dyn AsyncRead + Unpin>)> {
         let (mut send_stream, recv_stream) = self.conn.open_bi().await?;
 
         let head_buf = {
@@ -112,25 +117,6 @@ impl ClientTunnel for PunchQuicClientTunnel {
 
         send_stream.write_all(&head_buf).await?;
 
-        Ok(Box::new(QuinnStream {
-            send_stream,
-            recv_stream,
-        }))
-    }
-}
-
-struct QuinnStream {
-    send_stream: quinn::SendStream,
-    recv_stream: quinn::RecvStream,
-}
-
-#[async_trait::async_trait]
-impl Stream for QuinnStream {
-    async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<Option<usize>> {
-        Ok(self.recv_stream.read(buf).await?)
-    }
-
-    async fn write_all(&mut self, buf: &[u8]) -> anyhow::Result<()> {
-        Ok(self.send_stream.write_all(buf).await?)
+        Ok((Box::new(send_stream), Box::new(recv_stream)))
     }
 }
