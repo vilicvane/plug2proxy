@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use clap::Parser;
 use plug2proxy::{
     match_server::MatchPeerId,
@@ -46,15 +48,38 @@ async fn main() -> anyhow::Result<()> {
 
         let tunnel = provider.accept().await?;
 
-        let (typ, remote_addr, (_, mut recv_stream)) = tunnel.accept().await?;
+        let (typ, remote_addr, (mut tunnel_send_stream, mut tunnel_recv_stream)) =
+            tunnel.accept().await?;
 
-        println!("accept {typ:?} connection to {remote_addr:?}");
+        println!("accept {typ:?} connection to {remote_addr}");
 
-        let mut content = String::new();
+        let (mut remote_recv_stream, mut remote_send_stream) =
+            tokio::net::TcpStream::connect(remote_addr)
+                .await?
+                .into_split();
 
-        recv_stream.read_to_string(&mut content).await?;
+        println!("connected to {}", remote_addr);
 
-        println!("{}", content);
+        tokio::try_join!(
+            async {
+                tokio::io::copy(&mut tunnel_recv_stream, &mut remote_send_stream).await?;
+
+                println!("tunnel_recv_stream EOF");
+
+                remote_send_stream.shutdown().await?;
+
+                anyhow::Ok(())
+            },
+            async {
+                tokio::io::copy(&mut remote_recv_stream, &mut tunnel_send_stream).await?;
+
+                println!("remote_recv_stream EOF");
+
+                tunnel_send_stream.shutdown().await?;
+
+                anyhow::Ok(())
+            },
+        )?;
 
         tokio::signal::ctrl_c().await?;
     } else {
@@ -68,14 +93,21 @@ async fn main() -> anyhow::Result<()> {
 
         let tunnel = provider.accept().await?;
 
-        let (mut send_stream, _) = tunnel
-            .connect(TransportType::Tcp, "127.0.0.1:8080".parse()?)
+        let (mut send_stream, mut recv_stream) = tunnel
+            .connect(TransportType::Tcp, "39.156.66.10:80".parse()?)
             .await?;
 
-        send_stream.write_all(b"hello world\n").await?;
+        send_stream
+            .write_all("GET / HTTP/1.1\r\nHost: baidu.com\r\n\r\n".as_bytes())
+            .await?;
+
         send_stream.shutdown().await?;
 
-        tokio::signal::ctrl_c().await?;
+        let mut content = String::new();
+
+        recv_stream.read_to_string(&mut content).await?;
+
+        println!("{}", content);
     }
 
     Ok(())

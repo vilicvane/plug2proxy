@@ -14,6 +14,7 @@ impl RedisMatchServer {
     }
 }
 
+#[allow(dependency_on_unit_never_type_fallback)]
 #[async_trait::async_trait]
 impl MatchServer for RedisMatchServer {
     async fn match_server(
@@ -79,7 +80,7 @@ impl MatchServer for RedisMatchServer {
 
     async fn match_client(
         &self,
-        id: &MatchPeerId,
+        _id: &MatchPeerId,
         address: SocketAddr,
     ) -> anyhow::Result<SocketAddr> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
