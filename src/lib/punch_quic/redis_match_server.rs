@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use redis::AsyncCommands;
 
-use crate::match_server::{MatchPeerId, MatchServer};
+use super::match_server::{MatchPeerId, MatchServer};
 
 pub struct RedisMatchServer {
     redis: redis::Client,

@@ -1,4 +1,4 @@
-use plug2proxy::config::{stun_server_default, ExchangeServerConfig};
+use crate::config::{stun_server_default, ExchangeServerConfig};
 
 #[derive(serde::Deserialize)]
 pub struct Config {

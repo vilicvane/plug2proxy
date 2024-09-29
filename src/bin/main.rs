@@ -1,7 +1,5 @@
-pub mod client;
-pub mod server;
-
 use clap::Parser as _;
+use plug2proxy::{client, server};
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -13,13 +11,21 @@ struct Cli {
 #[serde(tag = "role")]
 enum Config {
     #[serde(rename = "server")]
-    Server(server::config::Config),
+    Server(server::Config),
     #[serde(rename = "client")]
-    Client(client::config::Config),
+    Client(client::Config),
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
+    color_backtrace::install();
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .unwrap();
+
     let cli = Cli::parse();
 
     let config: Config = {
@@ -30,8 +36,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match config {
-        Config::Server(config) => server::up::up(config).await?,
-        Config::Client(config) => client::up::up(config).await?,
+        Config::Server(config) => server::up(config).await?,
+        Config::Client(config) => client::up(config).await?,
     }
 
     Ok(())

@@ -7,12 +7,15 @@ use stun::message::Getter as _;
 use webrtc_util::Conn;
 
 use crate::{
-    match_server::{MatchPeerId, MatchServer},
-    punch::punch,
-    punch_quic_tunnel::{PunchQuicClientTunnel, PunchQuicServerTunnel},
-    quinn::{create_client_endpoint, create_server_endpoint},
     tunnel::{ClientTunnel, ServerTunnel},
     tunnel_provider::{ClientTunnelProvider, ServerTunnelProvider},
+};
+
+use super::{
+    match_server::{MatchPeerId, MatchServer},
+    punch::punch,
+    quinn::{create_client_endpoint, create_server_endpoint},
+    PunchQuicClientTunnel, PunchQuicServerTunnel,
 };
 
 pub struct PunchQuicServerTunnelConfig {

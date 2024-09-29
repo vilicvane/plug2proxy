@@ -1,13 +1,10 @@
-use std::io::Write as _;
-
 use clap::Parser;
 use plug2proxy::{
-    match_server::MatchPeerId,
-    punch_quic_tunnel_provider::{
+    punch_quic::{
+        match_server::MatchPeerId, redis_match_server::RedisMatchServer,
         PunchQuicClientTunnelConfig, PunchQuicClientTunnelProvider, PunchQuicServerTunnelConfig,
         PunchQuicServerTunnelProvider,
     },
-    redis_match_server::RedisMatchServer,
     tunnel::TransportType,
     tunnel_provider::{ClientTunnelProvider, ServerTunnelProvider},
 };

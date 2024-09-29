@@ -1,9 +1,6 @@
+pub mod client;
 pub mod config;
-pub mod match_server;
-pub mod punch;
-pub mod punch_quic_tunnel;
-pub mod punch_quic_tunnel_provider;
-pub mod quinn;
-pub mod redis_match_server;
+pub mod punch_quic;
+pub mod server;
 pub mod tunnel;
 pub mod tunnel_provider;
