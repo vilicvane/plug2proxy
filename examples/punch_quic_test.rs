@@ -1,8 +1,9 @@
 use clap::Parser;
 use plug2proxy::{
     punch_quic::{
-        redis_match_server::RedisMatchServer, PunchQuicClientTunnelConfig,
-        PunchQuicClientTunnelProvider, PunchQuicServerTunnelConfig, PunchQuicServerTunnelProvider,
+        redis_matcher::{RedisClientSideMatcher, RedisServerSideMatcher},
+        PunchQuicClientTunnelConfig, PunchQuicClientTunnelProvider, PunchQuicServerTunnelConfig,
+        PunchQuicServerTunnelProvider,
     },
     tunnel::TransportType,
     tunnel_provider::{ClientTunnelProvider, ServerTunnelProvider},
@@ -32,9 +33,9 @@ async fn main() -> anyhow::Result<()> {
 
     let redis = redis::Client::open(format!("{redis_url}?protocol=resp3"))?;
 
-    let match_server = Box::new(RedisMatchServer::new(redis));
-
     if cli.server {
+        let match_server = Box::new(RedisServerSideMatcher::new(redis));
+
         let provider = PunchQuicServerTunnelProvider::new(
             match_server,
             PunchQuicServerTunnelConfig {
@@ -62,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::signal::ctrl_c().await?;
     } else {
+        let match_server = Box::new(RedisClientSideMatcher::new(redis));
+
         let provider = PunchQuicClientTunnelProvider::new(
             match_server,
             PunchQuicClientTunnelConfig {

@@ -1,15 +1,15 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType, TunnelId};
 
 pub struct PunchQuicServerTunnel {
-    conn: quinn::Connection,
+    conn: Arc<quinn::Connection>,
 }
 
 impl PunchQuicServerTunnel {
-    pub fn new(conn: quinn::Connection) -> Self {
+    pub fn new(conn: Arc<quinn::Connection>) -> Self {
         PunchQuicServerTunnel { conn }
     }
 }
@@ -30,7 +30,17 @@ impl ServerTunnel for PunchQuicServerTunnel {
             Box<dyn AsyncWrite + Send + Unpin>,
         ),
     )> {
-        let (send_stream, mut recv_stream) = self.conn.accept_bi().await?;
+        let (send_stream, mut recv_stream) = {
+            loop {
+                match self.conn.accept_bi().await {
+                    Ok(tuple) => break tuple,
+                    Err(error) => match error {
+                        quinn::ConnectionError::TimedOut => continue,
+                        _ => return Err(error.into()),
+                    },
+                }
+            }
+        };
 
         let (typ, remote_addr) = {
             let head_buf = &mut [0u8; 1];

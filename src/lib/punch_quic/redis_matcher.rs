@@ -1,26 +1,25 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use redis::AsyncCommands;
 
-use super::match_server::MatchServer;
+use super::matcher::{ClientSideMatcher, ServerSideMatcher};
 
-pub struct RedisMatchServer {
+pub struct RedisClientSideMatcher {
     redis: redis::Client,
 }
 
-impl RedisMatchServer {
+impl RedisClientSideMatcher {
     pub fn new(redis: redis::Client) -> Self {
         Self { redis }
     }
 }
 
-#[allow(dependency_on_unit_never_type_fallback)]
 #[async_trait::async_trait]
-impl MatchServer for RedisMatchServer {
+impl ClientSideMatcher for RedisClientSideMatcher {
     async fn match_server(
         &self,
-        id: uuid::Uuid,
-        address: SocketAddr,
+        client_id: uuid::Uuid,
+        client_address: SocketAddr,
     ) -> anyhow::Result<SocketAddr> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
@@ -31,7 +30,8 @@ impl MatchServer for RedisMatchServer {
             .get_multiplexed_async_connection_with_config(&config)
             .await?;
 
-        conn.subscribe(match_channel_name(id, address)).await?;
+        conn.subscribe(match_channel_name(client_id, client_address))
+            .await?;
 
         let match_task = async {
             while let Some(push) = receiver.recv().await {
@@ -54,8 +54,8 @@ impl MatchServer for RedisMatchServer {
                     conn.publish(
                         CLIENT_ANNOUNCEMENT_CHANNEL_NAME,
                         serde_json::to_string(&ClientAnnouncement {
-                            id: id.clone(),
-                            address,
+                            id: client_id.clone(),
+                            address: client_address,
                         })?,
                     )
                     .await?;
@@ -77,12 +77,29 @@ impl MatchServer for RedisMatchServer {
 
         Ok(address)
     }
+}
 
+pub struct RedisServerSideMatcher {
+    client_id_set: Arc<tokio::sync::Mutex<HashSet<uuid::Uuid>>>,
+    redis: redis::Client,
+}
+
+impl RedisServerSideMatcher {
+    pub fn new(redis: redis::Client) -> Self {
+        Self {
+            client_id_set: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            redis,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ServerSideMatcher for RedisServerSideMatcher {
     async fn match_client(
         &self,
-        _id: uuid::Uuid,
-        address: SocketAddr,
-    ) -> anyhow::Result<SocketAddr> {
+        _server_id: uuid::Uuid,
+        server_address: SocketAddr,
+    ) -> anyhow::Result<(uuid::Uuid, SocketAddr)> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let config = redis::AsyncConnectionConfig::new().set_push_sender(sender);
@@ -106,6 +123,15 @@ impl MatchServer for RedisMatchServer {
             let client_announcement: ClientAnnouncement =
                 serde_json::from_slice(message.get_payload_bytes())?;
 
+            if self
+                .client_id_set
+                .lock()
+                .await
+                .contains(&client_announcement.id)
+            {
+                continue;
+            }
+
             let client_key = match_key(client_announcement.id, client_announcement.address);
 
             println!("key: {:?}", client_key);
@@ -114,7 +140,7 @@ impl MatchServer for RedisMatchServer {
                 .send_packed_command(
                     redis::cmd("SET")
                         .arg(client_key)
-                        .arg(address.to_string())
+                        .arg(server_address.to_string())
                         .arg("NX")
                         .arg("EX")
                         .arg(MATCH_TIMEOUT_SECONDS),
@@ -127,16 +153,28 @@ impl MatchServer for RedisMatchServer {
 
             conn.publish(
                 match_channel_name(client_announcement.id, client_announcement.address),
-                address.to_string(),
+                server_address.to_string(),
             )
             .await?;
 
             println!("matched: {:?}", client_announcement.address);
 
-            return Ok(client_announcement.address);
+            return Ok((client_announcement.id, client_announcement.address));
         }
 
         anyhow::bail!("failed to match a client.");
+    }
+
+    async fn register_client(&self, client_id: uuid::Uuid) -> anyhow::Result<()> {
+        self.client_id_set.lock().await.insert(client_id);
+
+        Ok(())
+    }
+
+    async fn unregister_client(&self, client_id: &uuid::Uuid) -> anyhow::Result<()> {
+        self.client_id_set.lock().await.remove(&client_id);
+
+        Ok(())
     }
 }
 
