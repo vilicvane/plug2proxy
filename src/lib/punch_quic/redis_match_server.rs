@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use redis::AsyncCommands;
 
-use super::match_server::{MatchPeerId, MatchServer};
+use super::match_server::MatchServer;
 
 pub struct RedisMatchServer {
     redis: redis::Client,
@@ -19,7 +19,7 @@ impl RedisMatchServer {
 impl MatchServer for RedisMatchServer {
     async fn match_server(
         &self,
-        id: &MatchPeerId,
+        id: uuid::Uuid,
         address: SocketAddr,
     ) -> anyhow::Result<SocketAddr> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -80,7 +80,7 @@ impl MatchServer for RedisMatchServer {
 
     async fn match_client(
         &self,
-        _id: &MatchPeerId,
+        _id: uuid::Uuid,
         address: SocketAddr,
     ) -> anyhow::Result<SocketAddr> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -106,7 +106,7 @@ impl MatchServer for RedisMatchServer {
             let client_announcement: ClientAnnouncement =
                 serde_json::from_slice(message.get_payload_bytes())?;
 
-            let client_key = match_key(&client_announcement.id, client_announcement.address);
+            let client_key = match_key(client_announcement.id, client_announcement.address);
 
             println!("key: {:?}", client_key);
 
@@ -126,7 +126,7 @@ impl MatchServer for RedisMatchServer {
             }
 
             conn.publish(
-                match_channel_name(&client_announcement.id, client_announcement.address),
+                match_channel_name(client_announcement.id, client_announcement.address),
                 address.to_string(),
             )
             .await?;
@@ -144,16 +144,16 @@ const CLIENT_ANNOUNCEMENT_CHANNEL_NAME: &str = "client_announcement";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ClientAnnouncement {
-    id: MatchPeerId,
+    id: uuid::Uuid,
     address: SocketAddr,
 }
 
-const MATCH_TIMEOUT_SECONDS: u64 = 5;
+const MATCH_TIMEOUT_SECONDS: u64 = 30;
 
-fn match_key(id: &MatchPeerId, address: SocketAddr) -> String {
-    format!("{}/{}", id.0, address)
+fn match_key(id: uuid::Uuid, address: SocketAddr) -> String {
+    format!("{}/{}", id, address)
 }
 
-fn match_channel_name(id: &MatchPeerId, address: SocketAddr) -> String {
+fn match_channel_name(id: uuid::Uuid, address: SocketAddr) -> String {
     format!("match/{}", match_key(id, address))
 }

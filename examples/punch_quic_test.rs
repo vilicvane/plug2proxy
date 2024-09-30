@@ -1,12 +1,12 @@
 use clap::Parser;
 use plug2proxy::{
     punch_quic::{
-        match_server::MatchPeerId, redis_match_server::RedisMatchServer,
-        PunchQuicClientTunnelConfig, PunchQuicClientTunnelProvider, PunchQuicServerTunnelConfig,
-        PunchQuicServerTunnelProvider,
+        redis_match_server::RedisMatchServer, PunchQuicClientTunnelConfig,
+        PunchQuicClientTunnelProvider, PunchQuicServerTunnelConfig, PunchQuicServerTunnelProvider,
     },
     tunnel::TransportType,
     tunnel_provider::{ClientTunnelProvider, ServerTunnelProvider},
+    utils::io::copy_bidirectional,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -32,11 +32,10 @@ async fn main() -> anyhow::Result<()> {
 
     let redis = redis::Client::open(format!("{redis_url}?protocol=resp3"))?;
 
-    let match_server = RedisMatchServer::new(redis);
+    let match_server = Box::new(RedisMatchServer::new(redis));
 
     if cli.server {
         let provider = PunchQuicServerTunnelProvider::new(
-            MatchPeerId("test_server".to_owned()),
             match_server,
             PunchQuicServerTunnelConfig {
                 stun_server_addr: STUN_SERVER_ADDR.to_string(),
@@ -45,43 +44,25 @@ async fn main() -> anyhow::Result<()> {
 
         let tunnel = provider.accept().await?;
 
-        let (typ, remote_addr, (mut tunnel_send_stream, mut tunnel_recv_stream)) =
-            tunnel.accept().await?;
+        let (typ, remote_addr, (tunnel_recv_stream, tunnel_send_stream)) = tunnel.accept().await?;
 
         println!("accept {typ:?} connection to {remote_addr}");
 
-        let (mut remote_recv_stream, mut remote_send_stream) =
-            tokio::net::TcpStream::connect(remote_addr)
-                .await?
-                .into_split();
+        let (remote_recv_stream, remote_send_stream) = tokio::net::TcpStream::connect(remote_addr)
+            .await?
+            .into_split();
 
         println!("connected to {}", remote_addr);
 
-        tokio::try_join!(
-            async {
-                tokio::io::copy(&mut tunnel_recv_stream, &mut remote_send_stream).await?;
-
-                println!("tunnel_recv_stream EOF");
-
-                remote_send_stream.shutdown().await?;
-
-                anyhow::Ok(())
-            },
-            async {
-                tokio::io::copy(&mut remote_recv_stream, &mut tunnel_send_stream).await?;
-
-                println!("remote_recv_stream EOF");
-
-                tunnel_send_stream.shutdown().await?;
-
-                anyhow::Ok(())
-            },
-        )?;
+        copy_bidirectional(
+            (tunnel_recv_stream, remote_send_stream),
+            (remote_recv_stream, tunnel_send_stream),
+        )
+        .await?;
 
         tokio::signal::ctrl_c().await?;
     } else {
         let provider = PunchQuicClientTunnelProvider::new(
-            MatchPeerId("test_client".to_owned()),
             match_server,
             PunchQuicClientTunnelConfig {
                 stun_server_addr: STUN_SERVER_ADDR.to_string(),
@@ -90,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
         let tunnel = provider.accept().await?;
 
-        let (mut send_stream, mut recv_stream) = tunnel
+        let (mut recv_stream, mut send_stream) = tunnel
             .connect(TransportType::Tcp, "39.156.66.10:80".parse()?)
             .await?;
 

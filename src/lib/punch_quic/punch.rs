@@ -24,14 +24,20 @@ pub async fn punch(socket: &tokio::net::UdpSocket, target: SocketAddr) -> anyhow
         anyhow::Ok(())
     };
 
+    let timeout_task = async {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        anyhow::bail!("punching timeout");
+
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+    };
+
     tokio::select! {
         _ = send_to_task => {
             panic!("unexpected completion of send_to_task");
         }
-        result = receive_task => {
-            let _ = result?;
-
-            Ok(())
-        }
+        result = receive_task => result,
+        result = timeout_task => result,
     }
 }

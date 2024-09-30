@@ -11,4 +11,4 @@ iptables --table mangle --append PREROUTING --protocol tcp --match socket --jump
 iptables --table mangle --append OUTPUT --protocol tcp --destination 192.168.99.99 --jump MARK --set-mark 1
 iptables --table mangle --append PREROUTING  --protocol tcp --destination 192.168.99.99 --jump TPROXY --on-port 12233 --tproxy-mark 1
 
-iptables --table mangle --append OUTPUT --protocol tcp --destination 192.168.99.99 --jump REDIRECT --to-ports 12233
+iptables --table nat --append OUTPUT --protocol tcp --destination 192.168.99.99 --jump REDIRECT --to-ports 12233

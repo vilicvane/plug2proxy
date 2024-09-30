@@ -1,8 +1,8 @@
-use crate::config::{stun_server_default, ExchangeServerConfig};
+use crate::config::{stun_server_default, MatchServerConfig};
 
 #[derive(serde::Deserialize)]
 pub struct Config {
     #[serde(default = "stun_server_default")]
     pub stun_server: String,
-    pub exchange_server: ExchangeServerConfig,
+    pub match_server: MatchServerConfig,
 }

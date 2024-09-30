@@ -1,3 +1,5 @@
 {
-  "cSpell.words": ["libc", "ocsp", "quic", "rustls", "tproxy", "webrtc"]
+    "editor.tabSize": 4,
+    "prettier.tabWidth": 4,
+    "cSpell.words": ["libc", "ocsp", "quic", "rustls", "tproxy", "webrtc"]
 }

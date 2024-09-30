@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    match_server::{MatchPeerId, MatchServer},
+    match_server::MatchServer,
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicClientTunnel, PunchQuicServerTunnel,
@@ -22,20 +22,19 @@ pub struct PunchQuicServerTunnelConfig {
     pub stun_server_addr: String,
 }
 
-pub struct PunchQuicServerTunnelProvider<TMatchServer> {
-    id: MatchPeerId,
-    match_server: TMatchServer,
+pub struct PunchQuicServerTunnelProvider {
+    id: uuid::Uuid,
+    match_server: Box<dyn MatchServer + Sync>,
     config: PunchQuicServerTunnelConfig,
 }
 
-impl<TMatchServer: MatchServer> PunchQuicServerTunnelProvider<TMatchServer> {
+impl PunchQuicServerTunnelProvider {
     pub fn new(
-        id: MatchPeerId,
-        match_server: TMatchServer,
+        match_server: Box<dyn MatchServer + Sync>,
         config: PunchQuicServerTunnelConfig,
     ) -> Self {
         Self {
-            id,
+            id: uuid::Uuid::new_v4(),
             match_server,
             config,
         }
@@ -43,13 +42,11 @@ impl<TMatchServer: MatchServer> PunchQuicServerTunnelProvider<TMatchServer> {
 }
 
 #[async_trait::async_trait]
-impl<TMatchServer: MatchServer + Sync> ServerTunnelProvider
-    for PunchQuicServerTunnelProvider<TMatchServer>
-{
+impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn ServerTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        let peer_address = self.match_server.match_client(&self.id, address).await?;
+        let peer_address = self.match_server.match_client(self.id, address).await?;
 
         punch(&socket, peer_address).await?;
 
@@ -70,20 +67,19 @@ pub struct PunchQuicClientTunnelConfig {
     pub stun_server_addr: String,
 }
 
-pub struct PunchQuicClientTunnelProvider<TMatchServer> {
-    id: MatchPeerId,
-    match_server: TMatchServer,
+pub struct PunchQuicClientTunnelProvider {
+    id: uuid::Uuid,
+    match_server: Box<dyn MatchServer + Sync>,
     config: PunchQuicClientTunnelConfig,
 }
 
-impl<TMatchServer: MatchServer> PunchQuicClientTunnelProvider<TMatchServer> {
+impl PunchQuicClientTunnelProvider {
     pub fn new(
-        id: MatchPeerId,
-        match_server: TMatchServer,
+        match_server: Box<dyn MatchServer + Sync>,
         config: PunchQuicClientTunnelConfig,
     ) -> Self {
         Self {
-            id,
+            id: uuid::Uuid::new_v4(),
             match_server,
             config,
         }
@@ -91,13 +87,11 @@ impl<TMatchServer: MatchServer> PunchQuicClientTunnelProvider<TMatchServer> {
 }
 
 #[async_trait::async_trait]
-impl<TMatchServer: MatchServer + Sync> ClientTunnelProvider
-    for PunchQuicClientTunnelProvider<TMatchServer>
-{
+impl ClientTunnelProvider for PunchQuicClientTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn ClientTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        let peer_address = self.match_server.match_server(&self.id, address).await?;
+        let peer_address = self.match_server.match_server(self.id, address).await?;
 
         punch(&socket, peer_address).await?;
 

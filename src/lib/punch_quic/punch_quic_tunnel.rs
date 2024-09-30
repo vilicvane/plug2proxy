@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType};
+use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType, TunnelId};
 
 pub struct PunchQuicServerTunnel {
     conn: quinn::Connection,
@@ -16,12 +16,19 @@ impl PunchQuicServerTunnel {
 
 #[async_trait::async_trait]
 impl ServerTunnel for PunchQuicServerTunnel {
+    fn get_id(&self) -> TunnelId {
+        TunnelId::new()
+    }
+
     async fn accept(
         &self,
     ) -> anyhow::Result<(
         TransportType,
         SocketAddr,
-        (Box<dyn AsyncWrite + Unpin>, Box<dyn AsyncRead + Unpin>),
+        (
+            Box<dyn AsyncRead + Send + Unpin>,
+            Box<dyn AsyncWrite + Send + Unpin>,
+        ),
     )> {
         let (send_stream, mut recv_stream) = self.conn.accept_bi().await?;
 
@@ -67,8 +74,12 @@ impl ServerTunnel for PunchQuicServerTunnel {
         Ok((
             typ,
             remote_addr,
-            (Box::new(send_stream), Box::new(recv_stream)),
+            (Box::new(recv_stream), Box::new(send_stream)),
         ))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
     }
 }
 
@@ -84,11 +95,18 @@ impl PunchQuicClientTunnel {
 
 #[async_trait::async_trait]
 impl ClientTunnel for PunchQuicClientTunnel {
+    fn get_id(&self) -> TunnelId {
+        TunnelId::new()
+    }
+
     async fn connect(
         &self,
         typ: TransportType,
         remote_addr: SocketAddr,
-    ) -> anyhow::Result<(Box<dyn AsyncWrite + Unpin>, Box<dyn AsyncRead + Unpin>)> {
+    ) -> anyhow::Result<(
+        Box<dyn AsyncRead + Send + Unpin>,
+        Box<dyn AsyncWrite + Send + Unpin>,
+    )> {
         let (mut send_stream, recv_stream) = self.conn.open_bi().await?;
 
         let head_buf = {
@@ -117,6 +135,10 @@ impl ClientTunnel for PunchQuicClientTunnel {
 
         send_stream.write_all(&head_buf).await?;
 
-        Ok((Box::new(send_stream), Box::new(recv_stream)))
+        Ok((Box::new(recv_stream), Box::new(send_stream)))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
     }
 }
