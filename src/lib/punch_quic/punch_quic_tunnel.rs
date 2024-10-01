@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
 use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType, TunnelId};
 
@@ -40,7 +40,7 @@ impl ServerTunnel for PunchQuicServerTunnel {
                     Ok(tuple) => break tuple,
                     Err(error) => match error {
                         quinn::ConnectionError::TimedOut => {
-                            if self.conn.close_reason().is_some() {
+                            if self.is_closed() {
                                 return Err(anyhow::anyhow!("connection closed."));
                             }
 
@@ -53,37 +53,23 @@ impl ServerTunnel for PunchQuicServerTunnel {
         };
 
         let (typ, remote_addr) = {
-            let head_buf = &mut [0u8; 1];
-
-            recv_stream.read_exact(head_buf).await?;
+            let head_byte = recv_stream.read_u8().await?;
 
             (
-                match head_buf[0] & 0b0000_0001 {
+                match head_byte & 0b0000_0001 {
                     0 => TransportType::Udp,
                     _ => TransportType::Tcp,
                 },
-                match head_buf[0] & 0b0000_0010 {
+                match head_byte & 0b0000_0010 {
                     0 => {
-                        let mut ip_buf = [0u8; 4];
-                        let mut port_buf = [0u8; 2];
-
-                        recv_stream.read_exact(&mut ip_buf).await?;
-                        recv_stream.read_exact(&mut port_buf).await?;
-
-                        let ip = std::net::Ipv4Addr::from(ip_buf);
-                        let port = u16::from_be_bytes(port_buf);
+                        let ip = std::net::Ipv4Addr::from(recv_stream.read_u32().await?);
+                        let port = recv_stream.read_u16().await?;
 
                         SocketAddr::new(ip.into(), port)
                     }
                     _ => {
-                        let mut ip_buf = [0u8; 16];
-                        let mut port_buf = [0u8; 2];
-
-                        recv_stream.read_exact(&mut ip_buf).await?;
-                        recv_stream.read_exact(&mut port_buf).await?;
-
-                        let ip = std::net::Ipv6Addr::from(ip_buf);
-                        let port = u16::from_be_bytes(port_buf);
+                        let ip = std::net::Ipv6Addr::from(recv_stream.read_u128().await?);
+                        let port = recv_stream.read_u16().await?;
 
                         SocketAddr::new(ip.into(), port)
                     }

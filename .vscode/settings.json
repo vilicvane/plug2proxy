@@ -2,5 +2,14 @@
     "editor.tabSize": 4,
     "rust-analyzer.check.command": "clippy",
     "prettier.tabWidth": 4,
-    "cSpell.words": ["libc", "ocsp", "quic", "rustls", "tproxy", "webrtc"]
+    "cSpell.words": [
+        "addrs",
+        "libc",
+        "ocsp",
+        "quic",
+        "rustls",
+        "tproxy",
+        "webrtc",
+        "xoraddr"
+    ]
 }

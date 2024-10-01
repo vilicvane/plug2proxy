@@ -1,22 +1,22 @@
 use tokio::io::AsyncWriteExt as _;
 
 pub async fn copy_bidirectional(
-    a: (
+    a_b: (
         impl tokio::io::AsyncRead + Send + Unpin,
         impl tokio::io::AsyncWrite + Send + Unpin,
     ),
-    b: (
+    b_a: (
         impl tokio::io::AsyncRead + Send + Unpin,
         impl tokio::io::AsyncWrite + Send + Unpin,
     ),
 ) -> Result<(), tokio::io::Error> {
-    let (mut a_read, mut a_write) = a;
-    let (mut b_read, mut b_write) = b;
+    let (mut a_read, mut b_write) = a_b;
+    let (mut b_read, mut a_write) = b_a;
 
     let a_to_b_task = async {
         tokio::io::copy(&mut a_read, &mut b_write).await?;
 
-        b_write.shutdown().await?;
+        let _ = b_write.shutdown().await;
 
         tokio::io::Result::Ok(())
     };
@@ -24,7 +24,7 @@ pub async fn copy_bidirectional(
     let b_to_a_task = async {
         tokio::io::copy(&mut b_read, &mut a_write).await?;
 
-        a_write.shutdown().await?;
+        let _ = a_write.shutdown().await;
 
         tokio::io::Result::Ok(())
     };

@@ -5,7 +5,7 @@ const PUNCHING_PACKET: &[u8] = &[];
 pub async fn punch(socket: &tokio::net::UdpSocket, target: SocketAddr) -> anyhow::Result<()> {
     let send_to_task = async {
         loop {
-            println!("sending punching packet...");
+            log::debug!("punching {}...", target);
 
             socket.send_to(PUNCHING_PACKET, target).await?;
 

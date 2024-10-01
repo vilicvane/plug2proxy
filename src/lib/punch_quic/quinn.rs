@@ -1,8 +1,8 @@
-use std::{net::UdpSocket, sync::Arc};
+use std::{net::UdpSocket, sync::Arc, time::Duration};
 
 use quinn::{
-    crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, EndpointConfig, ServerConfig,
-    TokioRuntime,
+    crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, EndpointConfig, IdleTimeout,
+    ServerConfig, TokioRuntime, TransportConfig,
 };
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
@@ -12,7 +12,12 @@ pub fn create_server_endpoint(socket: UdpSocket) -> anyhow::Result<Endpoint> {
         let cert_der = CertificateDer::from(cert.cert);
         let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
-        ServerConfig::with_single_cert(vec![cert_der.clone()], key.into()).unwrap()
+        let mut server_config =
+            ServerConfig::with_single_cert(vec![cert_der.clone()], key.into()).unwrap();
+
+        server_config.transport_config(Arc::new(create_transport_config()));
+
+        server_config
     };
 
     Ok(Endpoint::new(
@@ -32,7 +37,11 @@ pub fn create_client_endpoint(socket: UdpSocket) -> anyhow::Result<Endpoint> {
 
         let crypto = Arc::new(QuicClientConfig::try_from(crypto).unwrap());
 
-        ClientConfig::new(crypto)
+        let mut client_config = ClientConfig::new(crypto);
+
+        client_config.transport_config(Arc::new(create_transport_config()));
+
+        client_config
     };
 
     let mut endpoint = Endpoint::new(
@@ -45,6 +54,18 @@ pub fn create_client_endpoint(socket: UdpSocket) -> anyhow::Result<Endpoint> {
     endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)
+}
+
+fn create_transport_config() -> TransportConfig {
+    let mut transport_config = TransportConfig::default();
+
+    transport_config
+        .keep_alive_interval(Some(Duration::from_secs(5)))
+        .max_idle_timeout(Some(
+            IdleTimeout::try_from(Duration::from_secs(30)).unwrap(),
+        ));
+
+    transport_config
 }
 
 #[derive(Debug)]

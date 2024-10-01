@@ -163,8 +163,6 @@ async fn create_peer_socket(
             SocketAddr::new(xor_addr.ip, xor_addr.port)
         };
 
-        println!("peer address: {:?}", address);
-
         stun_client.close().await?;
 
         Ok((socket, address))
@@ -218,8 +216,7 @@ impl Conn for ConnWrapper {
             .remote_addr
             .lock()
             .unwrap()
-            .expect("connect to an address before send.")
-            .clone();
+            .expect("connect to an address before send.");
 
         Ok(self.socket.send_to(buf, remote_addr).await?)
     }
@@ -233,7 +230,7 @@ impl Conn for ConnWrapper {
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
-        self.remote_addr.lock().unwrap().clone()
+        *self.remote_addr.lock().unwrap()
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {

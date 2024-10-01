@@ -33,8 +33,6 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
         async move {
             loop {
                 if let Ok(tunnel) = tunnel_provider.accept().await {
-                    println!("tunnel accepted: {}", tunnel.get_id());
-
                     tunnel_set
                         .lock()
                         .await
