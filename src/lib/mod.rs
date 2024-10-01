@@ -1,6 +1,8 @@
 pub mod client;
 pub mod config;
+pub mod fake_ip_dns;
 pub mod punch_quic;
+pub mod routing;
 pub mod server;
 pub mod tunnel;
 pub mod tunnel_provider;

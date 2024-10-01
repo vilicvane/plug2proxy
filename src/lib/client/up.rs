@@ -4,6 +4,7 @@ use futures::TryFutureExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
+    fake_ip_dns,
     punch_quic::{PunchQuicClientTunnelConfig, PunchQuicClientTunnelProvider},
     tunnel::{ClientTunnel, TunnelId},
     tunnel_provider::ClientTunnelProvider as _,
@@ -12,7 +13,7 @@ use crate::{
 
 use super::config::Config;
 
-pub async fn up(config: Config) -> anyhow::Result<()> {
+pub async fn proxy_up(config: Config) -> anyhow::Result<()> {
     let match_server = config.matcher.new_client_side_matcher()?;
 
     let tunnel_provider = PunchQuicClientTunnelProvider::new(
@@ -109,6 +110,12 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
         _ = tunnel_task => panic!("unexpected completion of tunnel task."),
         _ = listen_task => Err(anyhow::anyhow!("listening ended unexpectedly.")),
     }?;
+
+    Ok(())
+}
+
+pub async fn dns_up(_config: Config) -> anyhow::Result<()> {
+    fake_ip_dns::up().await?;
 
     Ok(())
 }

@@ -25,7 +25,7 @@ too_many_arguments = "allow"
 anyhow = { version = "1.0.88", features = ["backtrace"] }
 async-imap = { version = "0.10.1", default-features = false, features = ["runtime-tokio"] }
 async-native-tls = { version = "0.5.0", default-features = false, features = ["runtime-tokio"] }
-async-trait = "0.1.82"
+async-trait = "0.1.83"
 chrono = "0.4.38"
 clap = { version = "4.5.17", features = ["derive"] }
 color-backtrace = "0.6.1"
@@ -37,14 +37,17 @@ hickory-client = "0.24.1"
 hickory-resolver = "0.24.1"
 hickory-server = { version = "0.24.1", features = ["hickory-resolver"] }
 imap = "2.4.1"
+itertools = "0.13.0"
 json_comments = "0.2.2"
 lettre = "0.11.9"
 log = "0.4.22"
+maxminddb = "0.24.0"
 native-tls = "0.2.12"
 quinn = "0.11.5"
 rand = "0.8.5"
 rcgen = "0.13.1"
 redis = { version = "0.27.2", features = ["connection-manager", "tokio-comp", "tokio-rustls-comp"] }
+regex = "1.11.0"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 rustls = { version = "0.23.13", features = ["ring"] }
 serde = "1.0.210"

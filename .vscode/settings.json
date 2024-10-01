@@ -4,7 +4,10 @@
     "prettier.tabWidth": 4,
     "cSpell.words": [
         "addrs",
+        "itertools",
         "libc",
+        "maxmind",
+        "maxminddb",
         "ocsp",
         "quic",
         "rustls",

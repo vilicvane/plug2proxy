@@ -35,7 +35,9 @@ async fn main() -> anyhow::Result<()> {
 
     match config {
         Config::Server(config) => server::up(config).await?,
-        Config::Client(config) => client::up(config).await?,
+        Config::Client(config) => {
+            tokio::try_join!(client::proxy_up(config.clone()), client::dns_up(config))?;
+        }
     }
 
     Ok(())

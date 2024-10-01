@@ -7,7 +7,7 @@ pub fn stun_server_default() -> String {
     "stun.l.google.com:19302".to_string()
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum MatcherConfig {
     #[serde(rename = "redis")]
@@ -34,7 +34,7 @@ impl MatcherConfig {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct RedisMatcherConfig {
     pub url: String,
 }
