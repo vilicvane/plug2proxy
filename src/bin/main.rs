@@ -1,5 +1,5 @@
 use clap::Parser as _;
-use plug2proxy::{client, server};
+use plug2proxy::{client, server, utils::log::init_log};
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -18,9 +18,7 @@ enum Config {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
-    color_backtrace::install();
+    init_log();
 
     rustls::crypto::ring::default_provider()
         .install_default()

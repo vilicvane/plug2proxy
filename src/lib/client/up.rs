@@ -33,6 +33,8 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
         async move {
             loop {
                 if let Ok(tunnel) = tunnel_provider.accept().await {
+                    println!("tunnel accepted: {}", tunnel.get_id());
+
                     tunnel_set
                         .lock()
                         .await
@@ -49,7 +51,7 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
         let tunnel_map = Arc::clone(&tunnel_map);
 
         async move {
-            let tcp_server_address = "127.0.0.1:12345".parse::<SocketAddr>()?;
+            let tcp_server_address = "0.0.0.0:12345".parse::<SocketAddr>()?;
 
             let tcp_listener = socket2::Socket::new(
                 socket2::Domain::for_address(tcp_server_address),
@@ -62,8 +64,11 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
             tcp_listener.bind(&socket2::SockAddr::from(tcp_server_address))?;
             tcp_listener.listen(1024)?;
 
-            let tcp_listener =
-                tokio::net::TcpListener::from_std(std::net::TcpListener::from(tcp_listener))?;
+            let tcp_listener = std::net::TcpListener::from(tcp_listener);
+
+            tcp_listener.set_nonblocking(true)?;
+
+            let tcp_listener = tokio::net::TcpListener::from_std(tcp_listener)?;
 
             while let Ok((mut stream, _)) = tcp_listener.accept().await {
                 let destination = get_tokio_tcp_stream_original_dst(&stream)?;

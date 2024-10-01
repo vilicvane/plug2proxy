@@ -23,11 +23,11 @@ impl ClientSideMatcher for RedisClientSideMatcher {
     ) -> anyhow::Result<SocketAddr> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
-        let config = redis::AsyncConnectionConfig::new().set_push_sender(sender);
+        let config = redis::aio::ConnectionManagerConfig::new().set_push_sender(sender);
 
         let mut conn = self
             .redis
-            .get_multiplexed_async_connection_with_config(&config)
+            .get_connection_manager_with_config(config)
             .await?;
 
         conn.subscribe(match_channel_name(client_id, client_address))
@@ -81,15 +81,57 @@ impl ClientSideMatcher for RedisClientSideMatcher {
 
 pub struct RedisServerSideMatcher {
     client_id_set: Arc<tokio::sync::Mutex<HashSet<uuid::Uuid>>>,
-    redis: redis::Client,
+    redis_conn: redis::aio::ConnectionManager,
+    client_announcement_receiver:
+        Arc<tokio::sync::Mutex<tokio::sync::broadcast::Receiver<ClientAnnouncement>>>,
 }
 
 impl RedisServerSideMatcher {
-    pub fn new(redis: redis::Client) -> Self {
-        Self {
+    pub async fn new(redis: redis::Client) -> anyhow::Result<Self> {
+        let (redis_conn, client_announcement_receiver) = {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let config = redis::aio::ConnectionManagerConfig::new().set_push_sender(sender);
+
+            let mut conn = redis.get_connection_manager_with_config(config).await?;
+
+            conn.subscribe(CLIENT_ANNOUNCEMENT_CHANNEL_NAME).await?;
+
+            let (client_announcement_sender, client_announcement_receiver) =
+                tokio::sync::broadcast::channel(1);
+
+            tokio::spawn(async move {
+                loop {
+                    let push = receiver
+                        .recv()
+                        .await
+                        .expect("unexpected end of server side matcher subscription.");
+
+                    let Some(message) = redis::Msg::from_push_info(push) else {
+                        continue;
+                    };
+
+                    if message.get_channel_name() != CLIENT_ANNOUNCEMENT_CHANNEL_NAME {
+                        continue;
+                    }
+
+                    if let Result::<ClientAnnouncement, _>::Ok(client_announcement) =
+                        serde_json::from_slice(message.get_payload_bytes())
+                    {
+                        let _ = client_announcement_sender.send(client_announcement);
+                    }
+                }
+            });
+
+            (conn, client_announcement_receiver)
+        };
+
+        Ok(Self {
             client_id_set: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            redis,
-        }
+            redis_conn,
+            client_announcement_receiver: Arc::new(tokio::sync::Mutex::new(
+                client_announcement_receiver,
+            )),
+        })
     }
 }
 
@@ -100,28 +142,13 @@ impl ServerSideMatcher for RedisServerSideMatcher {
         _server_id: uuid::Uuid,
         server_address: SocketAddr,
     ) -> anyhow::Result<(uuid::Uuid, SocketAddr)> {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        let config = redis::AsyncConnectionConfig::new().set_push_sender(sender);
-
-        let mut conn = self
-            .redis
-            .get_multiplexed_async_connection_with_config(&config)
-            .await?;
-
-        conn.subscribe(CLIENT_ANNOUNCEMENT_CHANNEL_NAME).await?;
-
-        while let Some(push) = receiver.recv().await {
-            let Some(message) = redis::Msg::from_push_info(push) else {
-                continue;
-            };
-
-            if message.get_channel_name() != CLIENT_ANNOUNCEMENT_CHANNEL_NAME {
-                continue;
-            }
-
-            let client_announcement: ClientAnnouncement =
-                serde_json::from_slice(message.get_payload_bytes())?;
+        loop {
+            let client_announcement = self
+                .client_announcement_receiver
+                .lock()
+                .await
+                .recv()
+                .await?;
 
             if self
                 .client_id_set
@@ -136,7 +163,9 @@ impl ServerSideMatcher for RedisServerSideMatcher {
 
             println!("key: {:?}", client_key);
 
-            let match_key_set = conn
+            let mut redis_conn = self.redis_conn.clone();
+
+            let match_key_set = redis_conn
                 .send_packed_command(
                     redis::cmd("SET")
                         .arg(client_key)
@@ -151,11 +180,12 @@ impl ServerSideMatcher for RedisServerSideMatcher {
                 continue;
             }
 
-            conn.publish(
-                match_channel_name(client_announcement.id, client_announcement.address),
-                server_address.to_string(),
-            )
-            .await?;
+            redis_conn
+                .publish(
+                    match_channel_name(client_announcement.id, client_announcement.address),
+                    server_address.to_string(),
+                )
+                .await?;
 
             println!("matched: {:?}", client_announcement.address);
 
@@ -180,7 +210,7 @@ impl ServerSideMatcher for RedisServerSideMatcher {
 
 const CLIENT_ANNOUNCEMENT_CHANNEL_NAME: &str = "client_announcement";
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct ClientAnnouncement {
     id: uuid::Uuid,
     address: SocketAddr,

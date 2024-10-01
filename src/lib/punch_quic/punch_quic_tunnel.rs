@@ -5,19 +5,23 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType, TunnelId};
 
 pub struct PunchQuicServerTunnel {
+    id: TunnelId,
     conn: Arc<quinn::Connection>,
 }
 
 impl PunchQuicServerTunnel {
     pub fn new(conn: Arc<quinn::Connection>) -> Self {
-        PunchQuicServerTunnel { conn }
+        PunchQuicServerTunnel {
+            id: TunnelId::new(),
+            conn,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl ServerTunnel for PunchQuicServerTunnel {
     fn get_id(&self) -> TunnelId {
-        TunnelId::new()
+        self.id
     }
 
     async fn accept(
@@ -35,7 +39,13 @@ impl ServerTunnel for PunchQuicServerTunnel {
                 match self.conn.accept_bi().await {
                     Ok(tuple) => break tuple,
                     Err(error) => match error {
-                        quinn::ConnectionError::TimedOut => continue,
+                        quinn::ConnectionError::TimedOut => {
+                            if self.conn.close_reason().is_some() {
+                                return Err(anyhow::anyhow!("connection closed."));
+                            }
+
+                            continue;
+                        }
                         _ => return Err(error.into()),
                     },
                 }
@@ -94,19 +104,23 @@ impl ServerTunnel for PunchQuicServerTunnel {
 }
 
 pub struct PunchQuicClientTunnel {
+    id: TunnelId,
     conn: quinn::Connection,
 }
 
 impl PunchQuicClientTunnel {
     pub fn new(conn: quinn::Connection) -> Self {
-        PunchQuicClientTunnel { conn }
+        PunchQuicClientTunnel {
+            id: TunnelId::new(),
+            conn,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl ClientTunnel for PunchQuicClientTunnel {
     fn get_id(&self) -> TunnelId {
-        TunnelId::new()
+        self.id
     }
 
     async fn connect(
@@ -129,6 +143,7 @@ impl ClientTunnel for PunchQuicClientTunnel {
 
             match remote_addr {
                 SocketAddr::V4(addr) => {
+                    #[allow(clippy::identity_op)]
                     buf.push(type_bit | 0b0000_0000);
                     buf.extend_from_slice(&addr.ip().octets());
                     buf.extend_from_slice(&addr.port().to_be_bytes());

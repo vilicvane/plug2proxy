@@ -44,7 +44,7 @@ pub enum TransportType {
     Tcp,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, derive_more::Display)]
 pub struct TunnelId(pub uuid::Uuid);
 
 impl TunnelId {

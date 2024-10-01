@@ -10,7 +10,7 @@ use crate::{
 use super::config::Config;
 
 pub async fn up(config: Config) -> anyhow::Result<()> {
-    let match_server = config.matcher.new_server_side_matcher()?;
+    let match_server = config.matcher.new_server_side_matcher().await?;
 
     let tunnel_provider = PunchQuicServerTunnelProvider::new(
         match_server,
@@ -35,10 +35,12 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
 }
 
 async fn handle_tunnel(tunnel: Box<dyn ServerTunnel>) -> anyhow::Result<()> {
+    println!("tunnel accepted: {}", tunnel.get_id());
+
     loop {
         match tunnel.accept().await {
             Ok((typ, remote_addr, (tunnel_recv_stream, tunnel_send_stream))) => {
-                log::info!("accept {} connection to {}", typ, remote_addr);
+                println!("accept {} connection to {}", typ, remote_addr);
 
                 match typ {
                     crate::tunnel::TransportType::Udp => tokio::spawn(handle_udp_stream(
@@ -54,7 +56,7 @@ async fn handle_tunnel(tunnel: Box<dyn ServerTunnel>) -> anyhow::Result<()> {
                 };
             }
             Err(error) => {
-                log::error!("error accepting connection: {:?}", error);
+                eprintln!("error accepting connection: {:?}", error);
 
                 if tunnel.is_closed() {
                     break;

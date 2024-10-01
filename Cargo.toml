@@ -26,8 +26,10 @@ anyhow = { version = "1.0.88", features = ["backtrace"] }
 async-imap = { version = "0.10.1", default-features = false, features = ["runtime-tokio"] }
 async-native-tls = { version = "0.5.0", default-features = false, features = ["runtime-tokio"] }
 async-trait = "0.1.82"
+chrono = "0.4.38"
 clap = { version = "4.5.17", features = ["derive"] }
 color-backtrace = "0.6.1"
+colored = "2.1.0"
 derive_more = { version = "1.0.0", features = ["full"] }
 env_logger = "0.11.5"
 futures = "0.3.30"
@@ -42,7 +44,7 @@ native-tls = "0.2.12"
 quinn = "0.11.5"
 rand = "0.8.5"
 rcgen = "0.13.1"
-redis = { version = "0.27.2", features = ["tokio-comp", "tokio-rustls-comp"] }
+redis = { version = "0.27.2", features = ["connection-manager", "tokio-comp", "tokio-rustls-comp"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 rustls = { version = "0.23.13", features = ["ring"] }
 serde = "1.0.210"

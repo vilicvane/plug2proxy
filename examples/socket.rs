@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("{:?}", get_tokio_tcp_stream_original_dst(&stream)?);
 
-    stream.write("hello world\n".as_bytes()).await?;
+    stream.write_all("hello world\n".as_bytes()).await?;
 
     loop {
         let mut buffer = [0; 8];

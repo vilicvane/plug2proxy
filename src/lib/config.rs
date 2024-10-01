@@ -23,9 +23,11 @@ impl MatcherConfig {
         Ok(Box::new(matcher))
     }
 
-    pub fn new_server_side_matcher(&self) -> anyhow::Result<Box<dyn ServerSideMatcher + Sync>> {
+    pub async fn new_server_side_matcher(
+        &self,
+    ) -> anyhow::Result<Box<dyn ServerSideMatcher + Sync>> {
         let matcher = match self {
-            Self::Redis(config) => RedisServerSideMatcher::new(get_redis_client(config)?),
+            Self::Redis(config) => RedisServerSideMatcher::new(get_redis_client(config)?).await?,
         };
 
         Ok(Box::new(matcher))
