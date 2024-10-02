@@ -12,7 +12,11 @@ use hickory_client::{
         DNSClass, RData, Record, RecordType,
     },
 };
-use hickory_resolver::{lookup::Lookup, TokioAsyncResolver};
+use hickory_resolver::{
+    config::{NameServerConfig, NameServerConfigGroup, Protocol},
+    lookup::Lookup,
+    TokioAsyncResolver,
+};
 use hickory_server::{
     authority::{Authority, LookupError, LookupOptions, MessageRequest, UpdateResult, ZoneType},
     server::RequestInfo,
@@ -37,7 +41,42 @@ pub struct FakeAuthority {
 impl FakeAuthority {
     pub fn new(db_path: &str) -> Self {
         let resolver = {
-            let config = hickory_resolver::config::ResolverConfig::default();
+            let mut config = hickory_resolver::config::ResolverConfig::new();
+
+            // config.add_name_server(NameServerConfig::new(
+            //     "223.6.6.6:53".parse().unwrap(),
+            //     Protocol::Udp,
+            // ));
+
+            // config.add_name_server(NameServerConfig {
+            //     socket_addr: "223.6.6.6:853".parse().unwrap(),
+            //     protocol: Protocol::Tls,
+            //     tls_dns_name: Some("dns.alidns.com".to_owned()),
+            //     trust_negative_responses: true,
+            //     // tls_config: None,
+            //     bind_addr: None,
+            // });
+
+            // let mut roots = rustls::RootCertStore::empty();
+
+            // for cert in rustls_native_certs::load_native_certs().unwrap() {
+            //     roots.add(cert).unwrap();
+            // }
+
+            // let client_config = rustls::ClientConfig::builder()
+            //     .with_root_certificates(roots)
+            //     .with_no_client_auth();
+
+            // config.set_tls_client_config(Arc::new());
+
+            config.add_name_server(NameServerConfig {
+                socket_addr: "8.8.8.8:853".parse().unwrap(),
+                protocol: Protocol::Tls,
+                tls_dns_name: Some("8.8.8.8".to_owned()),
+                trust_negative_responses: true,
+                // tls_config: None,
+                bind_addr: None,
+            });
 
             hickory_resolver::TokioAsyncResolver::new(
                 config,
@@ -58,7 +97,9 @@ impl FakeAuthority {
                         real_ip STRING NOT NULL,
                         expires_at INTEGER NOT NULL
                     );
+                    CREATE INDEX IF NOT EXISTS idx_type ON records (type);
                     CREATE INDEX IF NOT EXISTS idx_name ON records (name);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_type_name ON records (type, name);
                     CREATE INDEX IF NOT EXISTS idx_expires_at ON records (expires_at);
                 "#,
                 [],

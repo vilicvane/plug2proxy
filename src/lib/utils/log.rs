@@ -7,7 +7,7 @@ use log::Level;
 pub fn init_log() {
     color_backtrace::install();
 
-    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+    env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
         .format(|f, record| {
             let timestamp = chrono::Local::now()
                 .format("%Y-%m-%d %H:%M:%S.%3f")
