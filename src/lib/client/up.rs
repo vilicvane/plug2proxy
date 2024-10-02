@@ -25,7 +25,7 @@ pub async fn proxy_up(config: Config) -> anyhow::Result<()> {
 
     let sqlite_connection = rusqlite::Connection::open(".debug/test.db").unwrap();
 
-    let match_server = config.matcher.new_client_side_matcher()?;
+    let match_server = config.match_server.new_client_side_match_server()?;
 
     let tunnel_provider = PunchQuicClientTunnelProvider::new(
         match_server,

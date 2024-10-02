@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 #[async_trait::async_trait]
-pub trait ClientSideMatcher {
+pub trait ClientSideMatchServer {
     async fn match_server(
         &self,
         client_id: uuid::Uuid,
@@ -10,7 +10,7 @@ pub trait ClientSideMatcher {
 }
 
 #[async_trait::async_trait]
-pub trait ServerSideMatcher: Send {
+pub trait ServerSideMatchServer: Send {
     async fn match_client(
         &self,
         server_id: uuid::Uuid,

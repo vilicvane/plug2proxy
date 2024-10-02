@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    matcher::{ClientSideMatcher, ServerSideMatcher},
+    match_server::{ClientSideMatchServer, ServerSideMatchServer},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicClientTunnel, PunchQuicServerTunnel,
@@ -25,18 +25,18 @@ pub struct PunchQuicServerTunnelConfig {
 
 pub struct PunchQuicServerTunnelProvider {
     id: uuid::Uuid,
-    matcher: Arc<Box<dyn ServerSideMatcher + Sync>>,
+    match_server: Arc<Box<dyn ServerSideMatchServer + Sync>>,
     config: PunchQuicServerTunnelConfig,
 }
 
 impl PunchQuicServerTunnelProvider {
     pub fn new(
-        matcher: Box<dyn ServerSideMatcher + Sync>,
+        match_server: Box<dyn ServerSideMatchServer + Sync>,
         config: PunchQuicServerTunnelConfig,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
-            matcher: Arc::new(matcher),
+            match_server: Arc::new(match_server),
             config,
         }
     }
@@ -47,7 +47,7 @@ impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn ServerTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        let (client_id, client_address) = self.matcher.match_client(self.id, address).await?;
+        let (client_id, client_address) = self.match_server.match_client(self.id, address).await?;
 
         punch(&socket, client_address).await?;
 
@@ -62,16 +62,16 @@ impl ServerTunnelProvider for PunchQuicServerTunnelProvider {
 
         let conn = Arc::new(conn);
 
-        self.matcher.register_client(client_id).await?;
+        self.match_server.register_client(client_id).await?;
 
         tokio::spawn({
             let conn = Arc::clone(&conn);
-            let matcher = Arc::clone(&self.matcher);
+            let match_server = Arc::clone(&self.match_server);
 
             async move {
                 let _ = conn.closed().await;
 
-                matcher.unregister_client(&client_id).await?;
+                match_server.unregister_client(&client_id).await?;
 
                 anyhow::Ok(())
             }
@@ -88,18 +88,18 @@ pub struct PunchQuicClientTunnelConfig {
 
 pub struct PunchQuicClientTunnelProvider {
     id: uuid::Uuid,
-    matcher: Box<dyn ClientSideMatcher + Sync>,
+    match_server: Box<dyn ClientSideMatchServer + Sync>,
     config: PunchQuicClientTunnelConfig,
 }
 
 impl PunchQuicClientTunnelProvider {
     pub fn new(
-        matcher: Box<dyn ClientSideMatcher + Sync>,
+        match_server: Box<dyn ClientSideMatchServer + Sync>,
         config: PunchQuicClientTunnelConfig,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
-            matcher,
+            match_server,
             config,
         }
     }
@@ -110,7 +110,7 @@ impl ClientTunnelProvider for PunchQuicClientTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn ClientTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        let peer_address = self.matcher.match_server(self.id, address).await?;
+        let peer_address = self.match_server.match_server(self.id, address).await?;
 
         punch(&socket, peer_address).await?;
 

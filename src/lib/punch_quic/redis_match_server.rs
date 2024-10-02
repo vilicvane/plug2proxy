@@ -2,20 +2,20 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use redis::AsyncCommands;
 
-use super::matcher::{ClientSideMatcher, ServerSideMatcher};
+use super::match_server::{ClientSideMatchServer, ServerSideMatchServer};
 
-pub struct RedisClientSideMatcher {
+pub struct RedisClientSideMatchServer {
     redis: redis::Client,
 }
 
-impl RedisClientSideMatcher {
+impl RedisClientSideMatchServer {
     pub fn new(redis: redis::Client) -> Self {
         Self { redis }
     }
 }
 
 #[async_trait::async_trait]
-impl ClientSideMatcher for RedisClientSideMatcher {
+impl ClientSideMatchServer for RedisClientSideMatchServer {
     async fn match_server(
         &self,
         client_id: uuid::Uuid,
@@ -79,14 +79,14 @@ impl ClientSideMatcher for RedisClientSideMatcher {
     }
 }
 
-pub struct RedisServerSideMatcher {
+pub struct RedisServerSideMatchServer {
     client_id_set: Arc<tokio::sync::Mutex<HashSet<uuid::Uuid>>>,
     redis_conn: redis::aio::ConnectionManager,
     client_announcement_receiver:
         Arc<tokio::sync::Mutex<tokio::sync::broadcast::Receiver<ClientAnnouncement>>>,
 }
 
-impl RedisServerSideMatcher {
+impl RedisServerSideMatchServer {
     pub async fn new(redis: redis::Client) -> anyhow::Result<Self> {
         let (redis_conn, client_announcement_receiver) = {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -104,7 +104,7 @@ impl RedisServerSideMatcher {
                     let push = receiver
                         .recv()
                         .await
-                        .expect("unexpected end of server side matcher subscription.");
+                        .expect("unexpected end of server side match server subscription.");
 
                     let Some(message) = redis::Msg::from_push_info(push) else {
                         continue;
@@ -136,7 +136,7 @@ impl RedisServerSideMatcher {
 }
 
 #[async_trait::async_trait]
-impl ServerSideMatcher for RedisServerSideMatcher {
+impl ServerSideMatchServer for RedisServerSideMatchServer {
     async fn match_client(
         &self,
         _server_id: uuid::Uuid,

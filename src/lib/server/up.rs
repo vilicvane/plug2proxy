@@ -10,7 +10,7 @@ use crate::{
 use super::config::Config;
 
 pub async fn up(config: Config) -> anyhow::Result<()> {
-    let match_server = config.matcher.new_server_side_matcher().await?;
+    let match_server = config.match_server.new_server_side_match_server().await?;
 
     let tunnel_provider = PunchQuicServerTunnelProvider::new(
         match_server,
