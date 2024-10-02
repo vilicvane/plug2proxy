@@ -10,9 +10,9 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     fake_ip_dns,
-    punch_quic::{PunchQuicClientTunnelConfig, PunchQuicClientTunnelProvider},
-    tunnel::{ClientTunnel, TunnelId},
-    tunnel_provider::ClientTunnelProvider as _,
+    punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
+    tunnel::{InTunnel, TunnelId},
+    tunnel_provider::InTunnelProvider as _,
     utils::{io::copy_bidirectional, net::get_tokio_tcp_stream_original_dst},
 };
 
@@ -25,18 +25,18 @@ pub async fn proxy_up(config: Config) -> anyhow::Result<()> {
 
     let sqlite_connection = rusqlite::Connection::open(".debug/test.db").unwrap();
 
-    let match_server = config.match_server.new_client_side_match_server()?;
+    let match_server = config.match_server.new_in_match_server()?;
 
-    let tunnel_provider = PunchQuicClientTunnelProvider::new(
+    let tunnel_provider = PunchQuicInTunnelProvider::new(
         match_server,
-        PunchQuicClientTunnelConfig {
+        PunchQuicInTunnelConfig {
             stun_server_addr: config.stun_server,
         },
     );
 
     let tunnel_map = Arc::new(tokio::sync::Mutex::new(HashMap::<
         TunnelId,
-        Arc<Box<dyn ClientTunnel>>,
+        Arc<Box<dyn InTunnel>>,
     >::new()));
 
     let tunnel_task = {

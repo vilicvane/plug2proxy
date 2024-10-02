@@ -2,16 +2,16 @@ use std::{net::SocketAddr, sync::Arc};
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
-use crate::tunnel::{ClientTunnel, ServerTunnel, TransportType, TunnelId};
+use crate::tunnel::{InTunnel, OutTunnel, TransportType, TunnelId};
 
-pub struct PunchQuicServerTunnel {
+pub struct PunchQuicInTunnel {
     id: TunnelId,
-    conn: Arc<quinn::Connection>,
+    conn: quinn::Connection,
 }
 
-impl PunchQuicServerTunnel {
-    pub fn new(conn: Arc<quinn::Connection>) -> Self {
-        PunchQuicServerTunnel {
+impl PunchQuicInTunnel {
+    pub fn new(conn: quinn::Connection) -> Self {
+        PunchQuicInTunnel {
             id: TunnelId::new(),
             conn,
         }
@@ -19,7 +19,72 @@ impl PunchQuicServerTunnel {
 }
 
 #[async_trait::async_trait]
-impl ServerTunnel for PunchQuicServerTunnel {
+impl InTunnel for PunchQuicInTunnel {
+    fn get_id(&self) -> TunnelId {
+        self.id
+    }
+
+    async fn connect(
+        &self,
+        typ: TransportType,
+        remote_addr: SocketAddr,
+    ) -> anyhow::Result<(
+        Box<dyn AsyncRead + Send + Unpin>,
+        Box<dyn AsyncWrite + Send + Unpin>,
+    )> {
+        let (mut send_stream, recv_stream) = self.conn.open_bi().await?;
+
+        let head_buf = {
+            let mut buf = Vec::new();
+
+            let type_bit = match typ {
+                TransportType::Udp => 0b0000_0000,
+                TransportType::Tcp => 0b0000_0001,
+            };
+
+            match remote_addr {
+                SocketAddr::V4(addr) => {
+                    #[allow(clippy::identity_op)]
+                    buf.push(type_bit | 0b0000_0000);
+                    buf.extend_from_slice(&addr.ip().octets());
+                    buf.extend_from_slice(&addr.port().to_be_bytes());
+                }
+                SocketAddr::V6(addr) => {
+                    buf.push(type_bit | 0b0000_0010);
+                    buf.extend_from_slice(&addr.ip().octets());
+                    buf.extend_from_slice(&addr.port().to_be_bytes());
+                }
+            };
+
+            buf
+        };
+
+        send_stream.write_all(&head_buf).await?;
+
+        Ok((Box::new(recv_stream), Box::new(send_stream)))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
+    }
+}
+
+pub struct PunchQuicOutTunnel {
+    id: TunnelId,
+    conn: Arc<quinn::Connection>,
+}
+
+impl PunchQuicOutTunnel {
+    pub fn new(conn: Arc<quinn::Connection>) -> Self {
+        PunchQuicOutTunnel {
+            id: TunnelId::new(),
+            conn,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OutTunnel for PunchQuicOutTunnel {
     fn get_id(&self) -> TunnelId {
         self.id
     }
@@ -82,71 +147,6 @@ impl ServerTunnel for PunchQuicServerTunnel {
             remote_addr,
             (Box::new(recv_stream), Box::new(send_stream)),
         ))
-    }
-
-    fn is_closed(&self) -> bool {
-        self.conn.close_reason().is_some()
-    }
-}
-
-pub struct PunchQuicClientTunnel {
-    id: TunnelId,
-    conn: quinn::Connection,
-}
-
-impl PunchQuicClientTunnel {
-    pub fn new(conn: quinn::Connection) -> Self {
-        PunchQuicClientTunnel {
-            id: TunnelId::new(),
-            conn,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ClientTunnel for PunchQuicClientTunnel {
-    fn get_id(&self) -> TunnelId {
-        self.id
-    }
-
-    async fn connect(
-        &self,
-        typ: TransportType,
-        remote_addr: SocketAddr,
-    ) -> anyhow::Result<(
-        Box<dyn AsyncRead + Send + Unpin>,
-        Box<dyn AsyncWrite + Send + Unpin>,
-    )> {
-        let (mut send_stream, recv_stream) = self.conn.open_bi().await?;
-
-        let head_buf = {
-            let mut buf = Vec::new();
-
-            let type_bit = match typ {
-                TransportType::Udp => 0b0000_0000,
-                TransportType::Tcp => 0b0000_0001,
-            };
-
-            match remote_addr {
-                SocketAddr::V4(addr) => {
-                    #[allow(clippy::identity_op)]
-                    buf.push(type_bit | 0b0000_0000);
-                    buf.extend_from_slice(&addr.ip().octets());
-                    buf.extend_from_slice(&addr.port().to_be_bytes());
-                }
-                SocketAddr::V6(addr) => {
-                    buf.push(type_bit | 0b0000_0010);
-                    buf.extend_from_slice(&addr.ip().octets());
-                    buf.extend_from_slice(&addr.port().to_be_bytes());
-                }
-            };
-
-            buf
-        };
-
-        send_stream.write_all(&head_buf).await?;
-
-        Ok((Box::new(recv_stream), Box::new(send_stream)))
     }
 
     fn is_closed(&self) -> bool {

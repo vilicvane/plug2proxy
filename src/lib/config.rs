@@ -1,6 +1,6 @@
 use crate::punch_quic::{
-    match_server::{ClientSideMatchServer, ServerSideMatchServer},
-    redis_match_server::{RedisClientSideMatchServer, RedisServerSideMatchServer},
+    match_server::{InMatchServer, OutMatchServer},
+    redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
 };
 
 pub fn stun_server_default() -> String {
@@ -15,23 +15,17 @@ pub enum MatchServerConfig {
 }
 
 impl MatchServerConfig {
-    pub fn new_client_side_match_server(
-        &self,
-    ) -> anyhow::Result<Box<dyn ClientSideMatchServer + Sync>> {
+    pub fn new_in_match_server(&self) -> anyhow::Result<Box<dyn InMatchServer + Sync>> {
         let server = match self {
-            Self::Redis(config) => RedisClientSideMatchServer::new(get_redis_client(config)?),
+            Self::Redis(config) => RedisInMatchServer::new(new_redis_client(config)?),
         };
 
         Ok(Box::new(server))
     }
 
-    pub async fn new_server_side_match_server(
-        &self,
-    ) -> anyhow::Result<Box<dyn ServerSideMatchServer + Sync>> {
+    pub async fn new_out_match_server(&self) -> anyhow::Result<Box<dyn OutMatchServer + Sync>> {
         let server = match self {
-            Self::Redis(config) => {
-                RedisServerSideMatchServer::new(get_redis_client(config)?).await?
-            }
+            Self::Redis(config) => RedisOutMatchServer::new(new_redis_client(config)?).await?,
         };
 
         Ok(Box::new(server))
@@ -43,7 +37,7 @@ pub struct RedisMatchServerConfig {
     pub url: String,
 }
 
-fn get_redis_client(
+fn new_redis_client(
     RedisMatchServerConfig { url }: &RedisMatchServerConfig,
 ) -> anyhow::Result<redis::Client> {
     Ok(redis::Client::open(format!("{}?protocol=resp3", url))?)

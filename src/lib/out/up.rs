@@ -1,20 +1,20 @@
 use std::sync::Arc;
 
 use crate::{
-    punch_quic::{PunchQuicServerTunnelConfig, PunchQuicServerTunnelProvider},
-    tunnel::ServerTunnel,
-    tunnel_provider::ServerTunnelProvider as _,
+    punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
+    tunnel::OutTunnel,
+    tunnel_provider::OutTunnelProvider as _,
     utils::io::copy_bidirectional,
 };
 
 use super::config::Config;
 
 pub async fn up(config: Config) -> anyhow::Result<()> {
-    let match_server = config.match_server.new_server_side_match_server().await?;
+    let match_server = config.match_server.new_out_match_server().await?;
 
-    let tunnel_provider = PunchQuicServerTunnelProvider::new(
+    let tunnel_provider = PunchQuicOutTunnelProvider::new(
         match_server,
-        PunchQuicServerTunnelConfig {
+        PunchQuicOutTunnelConfig {
             stun_server_addr: config.stun_server,
         },
     );
@@ -34,7 +34,7 @@ pub async fn up(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_tunnel(tunnel: Box<dyn ServerTunnel>) -> anyhow::Result<()> {
+async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
     println!("tunnel accepted: {}", tunnel.get_id());
 
     loop {

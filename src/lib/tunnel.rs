@@ -3,7 +3,23 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[async_trait::async_trait]
-pub trait ServerTunnel: Send + Sync {
+pub trait InTunnel: Send + Sync {
+    fn get_id(&self) -> TunnelId;
+
+    async fn connect(
+        &self,
+        typ: TransportType,
+        remote_addr: SocketAddr,
+    ) -> anyhow::Result<(
+        Box<dyn AsyncRead + Send + Unpin>,
+        Box<dyn AsyncWrite + Send + Unpin>,
+    )>;
+
+    fn is_closed(&self) -> bool;
+}
+
+#[async_trait::async_trait]
+pub trait OutTunnel: Send + Sync {
     fn get_id(&self) -> TunnelId;
 
     async fn accept(
@@ -15,22 +31,6 @@ pub trait ServerTunnel: Send + Sync {
             Box<dyn AsyncRead + Send + Unpin>,
             Box<dyn AsyncWrite + Send + Unpin>,
         ),
-    )>;
-
-    fn is_closed(&self) -> bool;
-}
-
-#[async_trait::async_trait]
-pub trait ClientTunnel: Send + Sync {
-    fn get_id(&self) -> TunnelId;
-
-    async fn connect(
-        &self,
-        typ: TransportType,
-        remote_addr: SocketAddr,
-    ) -> anyhow::Result<(
-        Box<dyn AsyncRead + Send + Unpin>,
-        Box<dyn AsyncWrite + Send + Unpin>,
     )>;
 
     fn is_closed(&self) -> bool;

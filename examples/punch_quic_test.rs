@@ -1,12 +1,12 @@
 use clap::Parser;
 use plug2proxy::{
     punch_quic::{
-        redis_match_server::{RedisClientSideMatchServer, RedisServerSideMatchServer},
-        PunchQuicClientTunnelConfig, PunchQuicClientTunnelProvider, PunchQuicServerTunnelConfig,
-        PunchQuicServerTunnelProvider,
+        redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
+        PunchQuicInTunnelConfig, PunchQuicInTunnelProvider, PunchQuicOutTunnelConfig,
+        PunchQuicOutTunnelProvider,
     },
     tunnel::TransportType,
-    tunnel_provider::{ClientTunnelProvider, ServerTunnelProvider},
+    tunnel_provider::{InTunnelProvider, OutTunnelProvider},
     utils::io::copy_bidirectional,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -34,11 +34,11 @@ async fn main() -> anyhow::Result<()> {
     let redis = redis::Client::open(format!("{redis_url}?protocol=resp3"))?;
 
     if cli.server {
-        let match_server = Box::new(RedisServerSideMatchServer::new(redis).await?);
+        let match_server = Box::new(RedisOutMatchServer::new(redis).await?);
 
-        let provider = PunchQuicServerTunnelProvider::new(
+        let provider = PunchQuicOutTunnelProvider::new(
             match_server,
-            PunchQuicServerTunnelConfig {
+            PunchQuicOutTunnelConfig {
                 stun_server_addr: STUN_SERVER_ADDR.to_string(),
             },
         );
@@ -63,11 +63,11 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::signal::ctrl_c().await?;
     } else {
-        let match_server = Box::new(RedisClientSideMatchServer::new(redis));
+        let match_server = Box::new(RedisInMatchServer::new(redis));
 
-        let provider = PunchQuicClientTunnelProvider::new(
+        let provider = PunchQuicInTunnelProvider::new(
             match_server,
-            PunchQuicClientTunnelConfig {
+            PunchQuicInTunnelConfig {
                 stun_server_addr: STUN_SERVER_ADDR.to_string(),
             },
         );

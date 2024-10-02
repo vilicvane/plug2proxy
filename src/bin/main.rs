@@ -1,5 +1,5 @@
 use clap::Parser as _;
-use plug2proxy::{client, server, utils::log::init_log};
+use plug2proxy::{out, r#in, utils::log::init_log};
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -10,10 +10,10 @@ struct Cli {
 #[derive(serde::Deserialize)]
 #[serde(tag = "role")]
 enum Config {
-    #[serde(rename = "server")]
-    Server(server::Config),
-    #[serde(rename = "client")]
-    Client(client::Config),
+    #[serde(rename = "in")]
+    In(r#in::Config),
+    #[serde(rename = "out")]
+    Out(out::Config),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -34,10 +34,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match config {
-        Config::Server(config) => server::up(config).await?,
-        Config::Client(config) => {
-            tokio::try_join!(client::proxy_up(config.clone()), client::dns_up(config))?;
+        Config::In(config) => {
+            tokio::try_join!(r#in::proxy_up(config.clone()), r#in::dns_up(config))?;
         }
+        Config::Out(config) => out::up(config).await?,
     }
 
     Ok(())

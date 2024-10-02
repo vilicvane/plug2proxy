@@ -1,11 +1,11 @@
-use crate::tunnel::{ClientTunnel, ServerTunnel};
+use crate::tunnel::{InTunnel, OutTunnel};
 
 #[async_trait::async_trait]
-pub trait ServerTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<Box<dyn ServerTunnel>>;
+pub trait OutTunnelProvider {
+    async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>>;
 }
 
 #[async_trait::async_trait]
-pub trait ClientTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<Box<dyn ClientTunnel>>;
+pub trait InTunnelProvider {
+    async fn accept(&self) -> anyhow::Result<Box<dyn InTunnel>>;
 }
