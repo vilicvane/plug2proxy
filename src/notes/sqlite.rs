@@ -6,13 +6,17 @@ async fn test_sqlite() -> anyhow::Result<()> {
 
     sqlite.execute(
         r#"
-      CREATE TABLE IF NOT EXISTS records (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name STRING NOT NULL,
-          real_ip STRING NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_name ON records (name);
-      "#,
+        CREATE TABLE IF NOT EXISTS records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type STRING NOT NULL,
+            name STRING UNIQUE NOT NULL,
+            real_ip BLOB NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_type ON records (type);
+        CREATE INDEX IF NOT EXISTS idx_name ON records (name);
+        CREATE INDEX IF NOT EXISTS idx_expires_at ON records (expires_at);
+        "#,
         [],
     )?;
 
