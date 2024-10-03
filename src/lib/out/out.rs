@@ -1,21 +1,32 @@
 use std::sync::Arc;
 
 use crate::{
+    config::MatchServerConfig,
     punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
     tunnel::OutTunnel,
     tunnel_provider::OutTunnelProvider as _,
     utils::io::copy_bidirectional,
 };
 
-use super::config::Config;
+pub struct Options {
+    pub labels: Vec<String>,
+    pub stun_server_address: String,
+    pub match_server_config: MatchServerConfig,
+}
 
-pub async fn up(config: Config) -> anyhow::Result<()> {
-    let match_server = config.match_server.new_out_match_server().await?;
+pub async fn up(
+    Options {
+        labels,
+        stun_server_address,
+        match_server_config,
+    }: Options,
+) -> anyhow::Result<()> {
+    let match_server = match_server_config.new_out_match_server(labels).await?;
 
     let tunnel_provider = PunchQuicOutTunnelProvider::new(
         match_server,
         PunchQuicOutTunnelConfig {
-            stun_server_addr: config.stun_server,
+            stun_server_address,
         },
     );
 

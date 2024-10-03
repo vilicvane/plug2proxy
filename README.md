@@ -3,6 +3,12 @@
 ```json
 {
     "role": "in",
+    "transparent_proxy": {
+        "listen": "127.0.0.1:12345"
+    },
+    "fake_ip_dns": {
+        "listen": "127.0.0.1:5353"
+    },
     "tunneling": {
         "stun_server": "",
         "match_server": "redis://xxx/"

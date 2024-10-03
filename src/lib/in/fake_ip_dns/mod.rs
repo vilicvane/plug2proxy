@@ -1,5 +1,5 @@
 mod fake_authority;
-mod up;
+mod fake_ip_dns;
 
 pub use fake_authority::*;
-pub use up::*;
+pub use fake_ip_dns::*;

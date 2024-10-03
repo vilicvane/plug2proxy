@@ -20,7 +20,7 @@ use super::{
 };
 
 pub struct PunchQuicInTunnelConfig {
-    pub stun_server_addr: String,
+    pub stun_server_address: String,
 }
 
 pub struct PunchQuicInTunnelProvider {
@@ -45,7 +45,7 @@ impl PunchQuicInTunnelProvider {
 #[async_trait::async_trait]
 impl InTunnelProvider for PunchQuicInTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn InTunnel>> {
-        let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
+        let (socket, address) = create_peer_socket(&self.config.stun_server_address).await?;
 
         let match_out = self.match_server.match_out(self.id, address).await?;
 
@@ -64,7 +64,7 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
 }
 
 pub struct PunchQuicOutTunnelConfig {
-    pub stun_server_addr: String,
+    pub stun_server_address: String,
 }
 
 pub struct PunchQuicOutTunnelProvider {
@@ -89,7 +89,7 @@ impl PunchQuicOutTunnelProvider {
 #[async_trait::async_trait]
 impl OutTunnelProvider for PunchQuicOutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
-        let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
+        let (socket, address) = create_peer_socket(&self.config.stun_server_address).await?;
 
         let match_in = self.match_server.match_in(self.id, address).await?;
 
@@ -127,12 +127,12 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
 }
 
 async fn create_peer_socket(
-    stun_server_addr: &str,
+    stun_server_address: &str,
 ) -> anyhow::Result<(tokio::net::UdpSocket, SocketAddr)> {
     async fn inner(
-        stun_server_addr: &str,
+        stun_server_address: &str,
     ) -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
-        let stun_server_addr = stun_server_addr.to_socket_addrs()?.next().unwrap();
+        let stun_server_addr = stun_server_address.to_socket_addrs()?.next().unwrap();
 
         let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
 
@@ -172,7 +172,7 @@ async fn create_peer_socket(
         Ok((socket, address))
     }
 
-    let (socket, address) = inner(stun_server_addr).await?;
+    let (socket, address) = inner(stun_server_address).await?;
 
     // `stun_client` does a spawn internally, and loops till close, so yield now
     // and give it a chance to drop the socket reference.
@@ -187,14 +187,14 @@ async fn create_peer_socket(
 
 pub struct ConnWrapper {
     socket: Arc<tokio::net::UdpSocket>,
-    remote_addr: Mutex<Option<SocketAddr>>,
+    remote_address: Mutex<Option<SocketAddr>>,
 }
 
 impl ConnWrapper {
     pub fn new(socket: Arc<tokio::net::UdpSocket>) -> Self {
         Self {
             socket,
-            remote_addr: Mutex::new(None),
+            remote_address: Mutex::new(None),
         }
     }
 }
@@ -202,7 +202,7 @@ impl ConnWrapper {
 #[async_trait::async_trait]
 impl Conn for ConnWrapper {
     async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
-        self.remote_addr.lock().unwrap().replace(addr);
+        self.remote_address.lock().unwrap().replace(addr);
 
         Ok(())
     }
@@ -217,7 +217,7 @@ impl Conn for ConnWrapper {
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
         let remote_addr = self
-            .remote_addr
+            .remote_address
             .lock()
             .unwrap()
             .expect("connect to an address before send.");
@@ -234,7 +234,7 @@ impl Conn for ConnWrapper {
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
-        *self.remote_addr.lock().unwrap()
+        *self.remote_address.lock().unwrap()
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {

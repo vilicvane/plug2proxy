@@ -91,21 +91,22 @@ impl InMatchServer for RedisInMatchServer {
 }
 
 pub struct RedisOutMatchServer {
+    labels: Vec<String>,
     in_id_set: Arc<tokio::sync::Mutex<HashSet<uuid::Uuid>>>,
-    redis_conn: redis::aio::ConnectionManager,
+    redis_connection: redis::aio::ConnectionManager,
     in_announcement_receiver:
         Arc<tokio::sync::Mutex<tokio::sync::broadcast::Receiver<InAnnouncement>>>,
 }
 
 impl RedisOutMatchServer {
-    pub async fn new(redis: redis::Client) -> anyhow::Result<Self> {
+    pub async fn new(redis: redis::Client, labels: Vec<String>) -> anyhow::Result<Self> {
         let (redis_conn, in_announcement_receiver) = {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             let config = redis::aio::ConnectionManagerConfig::new().set_push_sender(sender);
 
-            let mut conn = redis.get_connection_manager_with_config(config).await?;
+            let mut connection = redis.get_connection_manager_with_config(config).await?;
 
-            conn.subscribe(IN_ANNOUNCEMENT_CHANNEL_NAME).await?;
+            connection.subscribe(IN_ANNOUNCEMENT_CHANNEL_NAME).await?;
 
             let (in_announcement_sender, in_announcement_receiver) =
                 tokio::sync::broadcast::channel(1);
@@ -133,12 +134,13 @@ impl RedisOutMatchServer {
                 }
             });
 
-            (conn, in_announcement_receiver)
+            (connection, in_announcement_receiver)
         };
 
         Ok(Self {
+            labels,
             in_id_set: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            redis_conn,
+            redis_connection: redis_conn,
             in_announcement_receiver: Arc::new(tokio::sync::Mutex::new(in_announcement_receiver)),
         })
     }
@@ -162,9 +164,9 @@ impl OutMatchServer for RedisOutMatchServer {
 
             println!("key: {:?}", in_match_key);
 
-            let mut redis_conn = self.redis_conn.clone();
+            let mut redis_connection = self.redis_connection.clone();
 
-            let match_key_locking = redis_conn
+            let match_key_locking = redis_connection
                 .send_packed_command(
                     redis::cmd("SET")
                         .arg(in_match_key)
@@ -181,13 +183,13 @@ impl OutMatchServer for RedisOutMatchServer {
 
             let tunnel_id = TunnelId::new();
 
-            redis_conn
+            redis_connection
                 .publish(
                     match_channel_name(in_announcement.id, in_announcement.address),
                     serde_json::to_string(&Match {
                         id: out_id,
                         tunnel_id,
-                        tunnel_labels: vec![],
+                        tunnel_labels: self.labels.clone(),
                         address: out_address,
                     })?,
                 )

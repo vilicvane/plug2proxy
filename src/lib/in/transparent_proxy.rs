@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -9,28 +10,44 @@ use rusqlite::OptionalExtension;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-    fake_ip_dns,
+    config::MatchServerConfig,
     punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
     tunnel::{InTunnel, TunnelId},
     tunnel_provider::InTunnelProvider as _,
     utils::{io::copy_bidirectional, net::get_tokio_tcp_stream_original_dst},
 };
 
-use super::config::Config;
+pub struct Options {
+    pub listen_address: SocketAddr,
+    pub fake_ip_dns_db_path: PathBuf,
+    pub fake_ipv4_net: ipnet::Ipv4Net,
+    pub fake_ipv6_net: ipnet::Ipv6Net,
+    pub stun_server_address: String,
+    pub match_server_config: MatchServerConfig,
+}
 
-pub async fn proxy_up(config: Config) -> anyhow::Result<()> {
-    let fake_ipv4_net = ipnet::Ipv4Net::new(Ipv4Addr::new(198, 18, 0, 0), 15).unwrap();
-    let fake_ipv6_net =
-        ipnet::Ipv6Net::new(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0), 32).unwrap();
+pub async fn up(
+    Options {
+        listen_address,
+        fake_ip_dns_db_path,
+        fake_ipv4_net,
+        fake_ipv6_net,
+        stun_server_address,
+        match_server_config,
+    }: Options,
+) -> anyhow::Result<()> {
+    let sqlite_connection = rusqlite::Connection::open_with_flags(
+        &fake_ip_dns_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
 
-    let sqlite_connection = rusqlite::Connection::open(".debug/test.db").unwrap();
-
-    let match_server = config.match_server.new_in_match_server()?;
+    let match_server = match_server_config.new_in_match_server()?;
 
     let tunnel_provider = PunchQuicInTunnelProvider::new(
         match_server,
         PunchQuicInTunnelConfig {
-            stun_server_addr: config.stun_server,
+            stun_server_address,
         },
     );
 
@@ -61,17 +78,15 @@ pub async fn proxy_up(config: Config) -> anyhow::Result<()> {
         let tunnel_map = Arc::clone(&tunnel_map);
 
         async move {
-            let tcp_server_address = "0.0.0.0:12345".parse::<SocketAddr>()?;
-
             let tcp_listener = socket2::Socket::new(
-                socket2::Domain::for_address(tcp_server_address),
+                socket2::Domain::for_address(listen_address),
                 socket2::Type::STREAM,
                 Some(socket2::Protocol::TCP),
             )?;
 
             tcp_listener.set_ip_transparent(true)?;
 
-            tcp_listener.bind(&socket2::SockAddr::from(tcp_server_address))?;
+            tcp_listener.bind(&socket2::SockAddr::from(listen_address))?;
             tcp_listener.listen(1024)?;
 
             let tcp_listener = std::net::TcpListener::from(tcp_listener);
@@ -183,12 +198,6 @@ pub async fn proxy_up(config: Config) -> anyhow::Result<()> {
         _ = tunnel_task => panic!("unexpected completion of tunnel task."),
         _ = listen_task => Err(anyhow::anyhow!("listening ended unexpectedly.")),
     }?;
-
-    Ok(())
-}
-
-pub async fn dns_up(_config: Config) -> anyhow::Result<()> {
-    fake_ip_dns::up().await?;
 
     Ok(())
 }

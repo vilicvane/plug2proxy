@@ -11,7 +11,7 @@ use plug2proxy::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-const STUN_SERVER_ADDR: &'static str = "stun.l.google.com:19302";
+const STUN_SERVER_ADDR: &str = "stun.l.google.com:19302";
 
 #[derive(clap::Parser, Debug)]
 struct Cli {
@@ -34,12 +34,12 @@ async fn main() -> anyhow::Result<()> {
     let redis = redis::Client::open(format!("{redis_url}?protocol=resp3"))?;
 
     if cli.server {
-        let match_server = Box::new(RedisOutMatchServer::new(redis).await?);
+        let match_server = Box::new(RedisOutMatchServer::new(redis, vec![]).await?);
 
         let provider = PunchQuicOutTunnelProvider::new(
             match_server,
             PunchQuicOutTunnelConfig {
-                stun_server_addr: STUN_SERVER_ADDR.to_string(),
+                stun_server_address: STUN_SERVER_ADDR.to_string(),
             },
         );
 
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         let provider = PunchQuicInTunnelProvider::new(
             match_server,
             PunchQuicInTunnelConfig {
-                stun_server_addr: STUN_SERVER_ADDR.to_string(),
+                stun_server_address: STUN_SERVER_ADDR.to_string(),
             },
         );
 

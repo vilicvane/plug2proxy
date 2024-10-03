@@ -1,5 +1,4 @@
 pub mod config;
-pub mod fake_ip_dns;
 pub mod r#in;
 pub mod out;
 pub mod punch_quic;

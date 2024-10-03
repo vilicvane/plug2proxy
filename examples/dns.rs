@@ -1,7 +1,7 @@
-use std::{backtrace, net::SocketAddr, str::FromStr as _, sync::Arc};
+use std::{backtrace, net::SocketAddr, path::PathBuf, str::FromStr as _, sync::Arc};
 
 use hickory_server::authority::AuthorityObject;
-use plug2proxy::fake_ip_dns::FakeAuthority;
+use plug2proxy::r#in::fake_ip_dns::FakeAuthority;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -9,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut catalog = hickory_server::authority::Catalog::new();
 
-    let authority = FakeAuthority::new(".debug/test.db");
+    let authority = FakeAuthority::new(PathBuf::from(".debug/test.db"));
 
     let authority = Box::new(Arc::new(authority));
 

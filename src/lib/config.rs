@@ -3,10 +3,6 @@ use crate::punch_quic::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
 };
 
-pub fn stun_server_default() -> String {
-    "stun.l.google.com:19302".to_string()
-}
-
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum MatchServerConfig {
@@ -23,9 +19,14 @@ impl MatchServerConfig {
         Ok(Box::new(server))
     }
 
-    pub async fn new_out_match_server(&self) -> anyhow::Result<Box<dyn OutMatchServer + Sync>> {
+    pub async fn new_out_match_server(
+        &self,
+        labels: Vec<String>,
+    ) -> anyhow::Result<Box<dyn OutMatchServer + Sync>> {
         let server = match self {
-            Self::Redis(config) => RedisOutMatchServer::new(new_redis_client(config)?).await?,
+            Self::Redis(config) => {
+                RedisOutMatchServer::new(new_redis_client(config)?, labels).await?
+            }
         };
 
         Ok(Box::new(server))

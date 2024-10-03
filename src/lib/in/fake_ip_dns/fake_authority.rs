@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -13,7 +14,7 @@ use hickory_client::{
     },
 };
 use hickory_resolver::{
-    config::{NameServerConfig, NameServerConfigGroup, Protocol},
+    config::{NameServerConfig, Protocol},
     lookup::Lookup,
     TokioAsyncResolver,
 };
@@ -39,7 +40,7 @@ pub struct FakeAuthority {
 }
 
 impl FakeAuthority {
-    pub fn new(db_path: &str) -> Self {
+    pub fn new(db_path: PathBuf) -> Self {
         let resolver = {
             let mut config = hickory_resolver::config::ResolverConfig::new();
 
@@ -85,7 +86,7 @@ impl FakeAuthority {
             )
         };
 
-        let sqlite_connection = rusqlite::Connection::open(db_path).unwrap();
+        let sqlite_connection = rusqlite::Connection::open(&db_path).unwrap();
 
         sqlite_connection
             .execute(
@@ -111,7 +112,7 @@ impl FakeAuthority {
             fake_ip_v4_start: Ipv4Addr::new(198, 18, 0, 0).to_bits(),
             fake_ip_v6_start: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0).to_bits(),
             resolver,
-            sqlite_connection: Mutex::new(rusqlite::Connection::open(db_path).unwrap()),
+            sqlite_connection: Mutex::new(rusqlite::Connection::open(&db_path).unwrap()),
         }
     }
 
