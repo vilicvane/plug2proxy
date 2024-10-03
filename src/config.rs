@@ -1,8 +1,4 @@
-use std::{
-    default,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    time::Duration,
-};
+use std::net::SocketAddr;
 
 use plug2proxy::{
     config::MatchServerUrlOrConfig,
@@ -11,8 +7,8 @@ use plug2proxy::{
 };
 
 use crate::constants::{
-    fake_ip_dns_port_default, geolite2_update_interval_default, geolite2_url_default,
-    in_routing_rules_default, stun_server_address_default, transparent_proxy_port_default,
+    fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
+    stun_server_address_default, transparent_proxy_address_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -28,32 +24,28 @@ pub struct InConfig {
 
 #[derive(serde::Deserialize)]
 pub struct InTransparentProxyConfig {
+    #[serde(default = "transparent_proxy_address_default")]
     pub listen: SocketAddr,
 }
 
 impl Default for InTransparentProxyConfig {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::LOCALHOST,
-                transparent_proxy_port_default(),
-            )),
+            listen: transparent_proxy_address_default(),
         }
     }
 }
 
 #[derive(serde::Deserialize)]
 pub struct InFakeIpDnsConfig {
+    #[serde(default = "fake_ip_dns_address_default")]
     pub listen: SocketAddr,
 }
 
 impl Default for InFakeIpDnsConfig {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::LOCALHOST,
-                fake_ip_dns_port_default(),
-            )),
+            listen: fake_ip_dns_address_default(),
         }
     }
 }

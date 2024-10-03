@@ -1,5 +1,5 @@
 use std::{
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -8,12 +8,12 @@ use plug2proxy::routing::config::InRuleConfig;
 
 pub const DATA_DIR: &str = ".plug2proxy";
 
-pub fn transparent_proxy_port_default() -> u16 {
-    12345
+pub fn transparent_proxy_address_default() -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 12345))
 }
 
-pub fn fake_ip_dns_port_default() -> u16 {
-    5353
+pub fn fake_ip_dns_address_default() -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 53))
 }
 
 pub fn fake_ipv4_net_default() -> ipnet::Ipv4Net {

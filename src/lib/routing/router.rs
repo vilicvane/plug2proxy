@@ -75,7 +75,7 @@ impl Router {
             .cloned()
             .collect_vec();
 
-        rules_cache.sort_by_key(|rule| -rule.priority());
+        rules_cache.sort_by_key(|rule| rule.priority().checked_neg().unwrap_or(i64::MAX));
 
         *self.rules_cache.lock().await = rules_cache;
     }
