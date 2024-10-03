@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     config::MatchServerConfig,
     punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
@@ -57,17 +55,26 @@ async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
 
     loop {
         match tunnel.accept().await {
-            Ok((typ, remote_addr, (tunnel_recv_stream, tunnel_send_stream))) => {
-                println!("accept {} connection to {}", typ, remote_addr);
+            Ok((
+                r#type,
+                (remote_hostname, remote_port),
+                (tunnel_recv_stream, tunnel_send_stream),
+            )) => {
+                log::info!(
+                    "accepted {} connection to {remote_hostname}:{remote_port}",
+                    r#type
+                );
 
-                match typ {
+                match r#type {
                     crate::tunnel::TransportType::Udp => tokio::spawn(handle_udp_stream(
-                        remote_addr,
+                        remote_hostname,
+                        remote_port,
                         tunnel_recv_stream,
                         tunnel_send_stream,
                     )),
                     crate::tunnel::TransportType::Tcp => tokio::spawn(handle_tcp_stream(
-                        remote_addr,
+                        remote_hostname,
+                        remote_port,
                         tunnel_recv_stream,
                         tunnel_send_stream,
                     )),
@@ -87,27 +94,21 @@ async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
 }
 
 async fn handle_udp_stream(
-    remote_addr: std::net::SocketAddr,
+    remote_hostname: String,
+    remote_port: u16,
     tunnel_recv_stream: Box<dyn tokio::io::AsyncRead + Send>,
     tunnel_send_stream: Box<dyn tokio::io::AsyncWrite + Send>,
 ) -> anyhow::Result<()> {
-    let socket = tokio::net::UdpSocket::bind("0:0").await?;
-
-    socket.connect(remote_addr).await?;
-
-    let socket = Arc::new(socket);
-
-    unimplemented!();
-
-    Ok(())
+    unimplemented!()
 }
 
 async fn handle_tcp_stream(
-    remote_addr: std::net::SocketAddr,
+    remote_hostname: String,
+    remote_port: u16,
     tunnel_recv_stream: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     tunnel_send_stream: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
 ) -> anyhow::Result<()> {
-    let stream = tokio::net::TcpStream::connect(remote_addr).await?;
+    let stream = tokio::net::TcpStream::connect(format!("{remote_hostname}:{remote_port}")).await?;
 
     let (remote_recv_stream, remote_send_stream) = stream.into_split();
 

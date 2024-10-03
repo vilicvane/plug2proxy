@@ -24,10 +24,15 @@ impl InTunnel for DirectInTunnel {
         unimplemented!()
     }
 
+    fn get_remote(&self, address: SocketAddr, _name: Option<String>) -> (String, u16) {
+        (address.ip().to_string(), address.port())
+    }
+
     async fn connect(
         &self,
         r#type: TransportType,
-        remote_address: SocketAddr,
+        remote_hostname: String,
+        remote_port: u16,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -37,7 +42,9 @@ impl InTunnel for DirectInTunnel {
                 unimplemented!()
             }
             TransportType::Tcp => {
-                let stream = tokio::net::TcpStream::connect(remote_address).await?;
+                let stream =
+                    tokio::net::TcpStream::connect(format!("{remote_hostname}:{remote_port}"))
+                        .await?;
 
                 let (read, write) = stream.into_split();
 

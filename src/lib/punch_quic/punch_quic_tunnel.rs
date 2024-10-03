@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt};
 
 use crate::tunnel::{InTunnel, OutTunnel, TransportType, TunnelId};
 
@@ -43,10 +43,18 @@ impl InTunnel for PunchQuicInTunnel {
         self.priority
     }
 
+    fn get_remote(&self, address: SocketAddr, name: Option<String>) -> (String, u16) {
+        (
+            name.unwrap_or_else(|| address.ip().to_string()),
+            address.port(),
+        )
+    }
+
     async fn connect(
         &self,
-        typ: TransportType,
-        remote_addr: SocketAddr,
+        r#type: TransportType,
+        remote_hostname: String,
+        remote_port: u16,
     ) -> anyhow::Result<(
         Box<dyn AsyncRead + Send + Unpin>,
         Box<dyn AsyncWrite + Send + Unpin>,
@@ -56,24 +64,20 @@ impl InTunnel for PunchQuicInTunnel {
         let head_buf = {
             let mut buf = Vec::new();
 
-            let type_bit = match typ {
+            buf.push(match r#type {
                 TransportType::Udp => 0b0000_0000,
                 TransportType::Tcp => 0b0000_0001,
-            };
+            });
 
-            match remote_addr {
-                SocketAddr::V4(addr) => {
-                    #[allow(clippy::identity_op)]
-                    buf.push(type_bit | 0b0000_0000);
-                    buf.extend_from_slice(&addr.ip().octets());
-                    buf.extend_from_slice(&addr.port().to_be_bytes());
-                }
-                SocketAddr::V6(addr) => {
-                    buf.push(type_bit | 0b0000_0010);
-                    buf.extend_from_slice(&addr.ip().octets());
-                    buf.extend_from_slice(&addr.port().to_be_bytes());
-                }
-            };
+            let remote_hostname = remote_hostname.as_bytes();
+
+            let remote_hostname_length = remote_hostname.len();
+
+            assert!(remote_hostname_length <= u8::MAX as usize);
+
+            buf.push(remote_hostname_length as u8);
+            buf.extend_from_slice(remote_hostname);
+            buf.extend_from_slice(&remote_port.to_be_bytes());
 
             buf
         };
@@ -113,7 +117,7 @@ impl OutTunnel for PunchQuicOutTunnel {
         &self,
     ) -> anyhow::Result<(
         TransportType,
-        SocketAddr,
+        (String, u16),
         (
             Box<dyn AsyncRead + Send + Unpin>,
             Box<dyn AsyncWrite + Send + Unpin>,
@@ -137,34 +141,32 @@ impl OutTunnel for PunchQuicOutTunnel {
             }
         };
 
-        let (typ, remote_addr) = {
-            let head_byte = recv_stream.read_u8().await?;
+        let (r#type, remote_hostname, remote_port) = {
+            let type_byte = recv_stream.read_u8().await?;
+
+            let remote_hostname_length = recv_stream.read_u8().await? as usize;
+            let remote_hostname = {
+                let mut buf = vec![0; remote_hostname_length];
+
+                recv_stream.read_exact(&mut buf).await?;
+
+                String::from_utf8(buf)?
+            };
+            let remote_port = recv_stream.read_u16().await?;
 
             (
-                match head_byte & 0b0000_0001 {
+                match type_byte & 0b0000_0001 {
                     0 => TransportType::Udp,
                     _ => TransportType::Tcp,
                 },
-                match head_byte & 0b0000_0010 {
-                    0 => {
-                        let ip = std::net::Ipv4Addr::from(recv_stream.read_u32().await?);
-                        let port = recv_stream.read_u16().await?;
-
-                        SocketAddr::new(ip.into(), port)
-                    }
-                    _ => {
-                        let ip = std::net::Ipv6Addr::from(recv_stream.read_u128().await?);
-                        let port = recv_stream.read_u16().await?;
-
-                        SocketAddr::new(ip.into(), port)
-                    }
-                },
+                remote_hostname,
+                remote_port,
             )
         };
 
         Ok((
-            typ,
-            remote_addr,
+            r#type,
+            (remote_hostname, remote_port),
             (Box::new(recv_stream), Box::new(send_stream)),
         ))
     }

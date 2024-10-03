@@ -225,7 +225,8 @@ async fn handle_in_tcp_stream(
     log::debug!(
         "routing {}{} with labels {}...",
         destination,
-        name.map_or_else(|| "".to_owned(), |name| format!(" ({})", name)),
+        name.as_ref()
+            .map_or_else(|| "".to_owned(), |name| format!(" ({})", name)),
         labels.join(",")
     );
 
@@ -237,6 +238,8 @@ async fn handle_in_tcp_stream(
         return Ok(());
     };
 
+    let (remote_hostname, remote_port) = tunnel.get_remote(destination, name);
+
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
 
     tokio::spawn({
@@ -244,7 +247,11 @@ async fn handle_in_tcp_stream(
 
         async move {
             let (mut tunnel_recv_stream, mut tunnel_send_stream) = tunnel
-                .connect(crate::tunnel::TransportType::Tcp, destination)
+                .connect(
+                    crate::tunnel::TransportType::Tcp,
+                    remote_hostname,
+                    remote_port,
+                )
                 .await?;
 
             copy_bidirectional(
