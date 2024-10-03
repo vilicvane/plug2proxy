@@ -47,15 +47,19 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn InTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        let peer_address = self.match_server.match_out(self.id, address).await?;
+        let match_out = self.match_server.match_out(self.id, address).await?;
 
-        punch(&socket, peer_address).await?;
+        punch(&socket, match_out.address).await?;
 
         let endpoint = create_client_endpoint(socket.into_std()?)?;
 
-        let conn = endpoint.connect(peer_address, "localhost")?.await?;
+        let conn = endpoint.connect(match_out.address, "localhost")?.await?;
 
-        return Ok(Box::new(PunchQuicInTunnel::new(conn)));
+        return Ok(Box::new(PunchQuicInTunnel::new(
+            match_out.tunnel_id,
+            match_out.tunnel_labels,
+            conn,
+        )));
     }
 }
 
@@ -87,9 +91,9 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_addr).await?;
 
-        let (in_id, in_address) = self.match_server.match_in(self.id, address).await?;
+        let match_in = self.match_server.match_in(self.id, address).await?;
 
-        punch(&socket, in_address).await?;
+        punch(&socket, match_in.address).await?;
 
         let endpoint = create_server_endpoint(socket.into_std()?)?;
 
@@ -102,7 +106,7 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
 
         let conn = Arc::new(conn);
 
-        self.match_server.register_in(in_id).await?;
+        self.match_server.register_in(match_in.id).await?;
 
         tokio::spawn({
             let conn = Arc::clone(&conn);
@@ -111,14 +115,14 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
             async move {
                 let _ = conn.closed().await;
 
-                match_server.unregister_in(&in_id).await?;
+                match_server.unregister_in(&match_in.id).await?;
 
                 anyhow::Ok(())
             }
             .inspect_err(|error| log::error!("{}", error))
         });
 
-        return Ok(Box::new(PunchQuicOutTunnel::new(conn)));
+        return Ok(Box::new(PunchQuicOutTunnel::new(match_in.tunnel_id, conn)));
     }
 }
 

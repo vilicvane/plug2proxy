@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, str::FromStr};
+use std::str::FromStr;
 
 use crate::tunnel::TunnelId;
 

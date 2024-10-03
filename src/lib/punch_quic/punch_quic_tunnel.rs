@@ -6,15 +6,13 @@ use crate::tunnel::{InTunnel, OutTunnel, TransportType, TunnelId};
 
 pub struct PunchQuicInTunnel {
     id: TunnelId,
+    labels: Vec<String>,
     conn: quinn::Connection,
 }
 
 impl PunchQuicInTunnel {
-    pub fn new(conn: quinn::Connection) -> Self {
-        PunchQuicInTunnel {
-            id: TunnelId::new(),
-            conn,
-        }
+    pub fn new(id: TunnelId, labels: Vec<String>, conn: quinn::Connection) -> Self {
+        PunchQuicInTunnel { id, labels, conn }
     }
 }
 
@@ -75,11 +73,8 @@ pub struct PunchQuicOutTunnel {
 }
 
 impl PunchQuicOutTunnel {
-    pub fn new(conn: Arc<quinn::Connection>) -> Self {
-        PunchQuicOutTunnel {
-            id: TunnelId::new(),
-            conn,
-        }
+    pub fn new(id: TunnelId, conn: Arc<quinn::Connection>) -> Self {
+        PunchQuicOutTunnel { id, conn }
     }
 }
 

@@ -2,7 +2,9 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use redis::AsyncCommands;
 
-use super::match_server::{InMatchServer, OutMatchServer};
+use crate::tunnel::TunnelId;
+
+use super::match_server::{InMatchServer, MatchIn, MatchOut, OutMatchServer};
 
 pub struct RedisInMatchServer {
     redis: redis::Client,
@@ -20,7 +22,7 @@ impl InMatchServer for RedisInMatchServer {
         &self,
         in_id: uuid::Uuid,
         in_address: SocketAddr,
-    ) -> anyhow::Result<SocketAddr> {
+    ) -> anyhow::Result<MatchOut> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let config = redis::aio::ConnectionManagerConfig::new().set_push_sender(sender);
@@ -39,10 +41,9 @@ impl InMatchServer for RedisInMatchServer {
                     continue;
                 };
 
-                let address: String = message.get_payload()?;
-                let address: SocketAddr = address.parse()?;
+                let r#match: Match = serde_json::from_slice(message.get_payload_bytes())?;
 
-                return Ok(address);
+                return Ok(r#match);
             }
 
             anyhow::bail!("failed to match a server.");
@@ -54,7 +55,7 @@ impl InMatchServer for RedisInMatchServer {
                     conn.publish(
                         IN_ANNOUNCEMENT_CHANNEL_NAME,
                         serde_json::to_string(&InAnnouncement {
-                            id: in_id.clone(),
+                            id: in_id,
                             address: in_address,
                         })?,
                     )
@@ -68,14 +69,24 @@ impl InMatchServer for RedisInMatchServer {
             }
         };
 
-        let address = tokio::select! {
-            address = match_task => address?,
+        let Match {
+            id,
+            tunnel_id,
+            tunnel_labels,
+            address,
+        } = tokio::select! {
+            r#match = match_task => r#match?,
             _ = announce_task => anyhow::bail!("failed to match a server."),
         };
 
         println!("matched: {:?}", address);
 
-        Ok(address)
+        Ok(MatchOut {
+            id,
+            tunnel_id,
+            tunnel_labels,
+            address,
+        })
     }
 }
 
@@ -137,9 +148,9 @@ impl RedisOutMatchServer {
 impl OutMatchServer for RedisOutMatchServer {
     async fn match_in(
         &self,
-        _out_id: uuid::Uuid,
+        out_id: uuid::Uuid,
         out_address: SocketAddr,
-    ) -> anyhow::Result<(uuid::Uuid, SocketAddr)> {
+    ) -> anyhow::Result<MatchIn> {
         loop {
             let in_announcement = self.in_announcement_receiver.lock().await.recv().await?;
 
@@ -168,19 +179,28 @@ impl OutMatchServer for RedisOutMatchServer {
                 continue;
             }
 
+            let tunnel_id = TunnelId::new();
+
             redis_conn
                 .publish(
                     match_channel_name(in_announcement.id, in_announcement.address),
-                    out_address.to_string(),
+                    serde_json::to_string(&Match {
+                        id: out_id,
+                        tunnel_id,
+                        tunnel_labels: vec![],
+                        address: out_address,
+                    })?,
                 )
                 .await?;
 
             println!("matched: {:?}", in_announcement.address);
 
-            return Ok((in_announcement.id, in_announcement.address));
+            break Ok(MatchIn {
+                id: in_announcement.id,
+                tunnel_id,
+                address: in_announcement.address,
+            });
         }
-
-        anyhow::bail!("failed to match an IN peer.");
     }
 
     async fn register_in(&self, in_id: uuid::Uuid) -> anyhow::Result<()> {
@@ -201,6 +221,14 @@ const IN_ANNOUNCEMENT_CHANNEL_NAME: &str = "in_announcement";
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct InAnnouncement {
     id: uuid::Uuid,
+    address: SocketAddr,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Match {
+    id: uuid::Uuid,
+    tunnel_id: TunnelId,
+    tunnel_labels: Vec<String>,
     address: SocketAddr,
 }
 

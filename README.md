@@ -16,12 +16,12 @@
             },
             {
                 "type": "domain",
-                "match": "*.hk",
+                "match": "\\.hk$",
                 "out": ["hk", "DIRECT"]
             },
             {
                 "type": "domain",
-                "match": "*.openai.com",
+                "match": "(^|\\.)openai\\.com$",
                 "out": "us"
             }
         ]
@@ -33,11 +33,11 @@
 {
     "role": "out",
     "tunneling": {
+        "label": "us",
         "stun_server": "",
         "match_server": "redis://xxx/"
     },
     "routing": {
-        "tag": "us",
         "priority": 100,
         "rules": [
             {
@@ -47,12 +47,12 @@
             },
             {
                 "type": "domain",
-                "match": "*.hk",
+                "match": "\\.hk$",
                 "priority": 200
             },
             {
                 "type": "domain",
-                "match": "*.openai.com"
+                "match": "(^|\\.)openai\\.com$"
             }
         ]
     }
