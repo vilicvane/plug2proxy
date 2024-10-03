@@ -37,6 +37,7 @@ futures = "0.3.30"
 hickory-client = "0.24.1"
 hickory-resolver = { version = "0.24.1", features = ["dns-over-native-tls"] }
 hickory-server = { version = "0.24.1", features = ["hickory-resolver"] }
+humantime = "2.1.0"
 imap = "2.4.1"
 ipnet = "2.10.0"
 itertools = "0.13.0"
@@ -50,6 +51,7 @@ rand = "0.8.5"
 rcgen = "0.13.1"
 redis = { version = "0.27.2", features = ["connection-manager", "tokio-comp", "tokio-rustls-comp"] }
 regex = "1.11.0"
+reqwest = "0.12.8"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 rustls = { version = "0.23.13", features = ["ring"] }
 rustls-native-certs = "0.8.0"

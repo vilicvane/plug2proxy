@@ -1,24 +1,32 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::{
+    default,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    time::Duration,
+};
 
 use plug2proxy::{
-    config::{MatchServerConfig, RedisMatchServerConfig},
+    config::MatchServerUrlOrConfig,
+    routing::config::{InRuleConfig, OutRuleConfig},
     utils::OneOrMany,
 };
 
 use crate::constants::{
-    fake_ip_dns_port_default, stun_server_address_default, transparent_proxy_port_default,
+    fake_ip_dns_port_default, geolite2_update_interval_default, geolite2_url_default,
+    in_routing_rules_default, stun_server_address_default, transparent_proxy_port_default,
 };
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct InConfig {
     #[serde(default)]
     pub transparent_proxy: InTransparentProxyConfig,
     #[serde(default)]
     pub fake_ip_dns: InFakeIpDnsConfig,
     pub tunneling: InTunnelingConfig,
+    #[serde(default)]
+    pub routing: InRoutingConfig,
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct InTransparentProxyConfig {
     pub listen: SocketAddr,
 }
@@ -34,7 +42,7 @@ impl Default for InTransparentProxyConfig {
     }
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct InFakeIpDnsConfig {
     pub listen: SocketAddr,
 }
@@ -50,47 +58,72 @@ impl Default for InFakeIpDnsConfig {
     }
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct InTunnelingConfig {
     #[serde(default = "stun_server_address_default")]
     pub stun_server: String,
     pub match_server: MatchServerUrlOrConfig,
 }
 
-#[derive(Clone, serde::Deserialize)]
-pub struct OutConfig {
-    pub tunneling: OutTunnelingConfig,
+#[derive(serde::Deserialize)]
+pub struct InRoutingConfig {
+    #[serde(default)]
+    pub geolite2: InRoutingGeoLite2Config,
+    #[serde(default = "in_routing_rules_default")]
+    pub rules: Vec<InRuleConfig>,
 }
 
-#[derive(Clone, serde::Deserialize)]
+impl Default for InRoutingConfig {
+    fn default() -> Self {
+        Self {
+            geolite2: Default::default(),
+            rules: in_routing_rules_default(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct InRoutingGeoLite2Config {
+    #[serde(default = "geolite2_url_default")]
+    pub url: String,
+    pub update_interval: Option<String>,
+}
+
+impl Default for InRoutingGeoLite2Config {
+    fn default() -> Self {
+        Self {
+            url: geolite2_url_default(),
+            update_interval: None,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct OutConfig {
+    pub tunneling: OutTunnelingConfig,
+    #[serde(default)]
+    pub routing: OutRoutingConfig,
+}
+
+#[derive(serde::Deserialize)]
 pub struct OutTunnelingConfig {
     pub label: Option<OneOrMany<String>>,
+    #[serde(default)]
+    pub priority: i64,
     #[serde(default = "stun_server_address_default")]
     pub stun_server: String,
     pub match_server: MatchServerUrlOrConfig,
 }
 
-#[derive(Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum MatchServerUrlOrConfig {
-    Url(String),
-    Config(MatchServerConfig),
+#[derive(serde::Deserialize)]
+pub struct OutRoutingConfig {
+    #[serde(default)]
+    pub rules: Vec<OutRuleConfig>,
 }
 
-impl MatchServerUrlOrConfig {
-    pub fn into_config(self) -> MatchServerConfig {
-        match self {
-            Self::Url(url) => {
-                let parsed_url = url::Url::parse(&url).expect("invalid match server url.");
-
-                let scheme = parsed_url.scheme();
-
-                match scheme {
-                    "redis" | "rediss" => MatchServerConfig::Redis(RedisMatchServerConfig { url }),
-                    _ => panic!("unsupported match server url."),
-                }
-            }
-            Self::Config(config) => config,
-        }
+#[allow(clippy::derivable_impls)]
+impl Default for OutRoutingConfig {
+    fn default() -> Self {
+        Self { rules: Vec::new() }
     }
 }

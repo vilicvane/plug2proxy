@@ -2,7 +2,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use redis::AsyncCommands;
 
-use crate::tunnel::TunnelId;
+use crate::{routing::config::OutRuleConfig, tunnel::TunnelId};
 
 use super::match_server::{InMatchServer, MatchIn, MatchOut, OutMatchServer};
 
@@ -73,6 +73,8 @@ impl InMatchServer for RedisInMatchServer {
             id,
             tunnel_id,
             tunnel_labels,
+            tunnel_priority,
+            routing_rules,
             address,
         } = tokio::select! {
             r#match = match_task => r#match?,
@@ -85,6 +87,8 @@ impl InMatchServer for RedisInMatchServer {
             id,
             tunnel_id,
             tunnel_labels,
+            tunnel_priority,
+            routing_rules,
             address,
         })
     }
@@ -95,7 +99,7 @@ pub struct RedisOutMatchServer {
     in_id_set: Arc<tokio::sync::Mutex<HashSet<uuid::Uuid>>>,
     redis_connection: redis::aio::ConnectionManager,
     in_announcement_receiver:
-        Arc<tokio::sync::Mutex<tokio::sync::broadcast::Receiver<InAnnouncement>>>,
+        Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<InAnnouncement>>>,
 }
 
 impl RedisOutMatchServer {
@@ -109,7 +113,7 @@ impl RedisOutMatchServer {
             connection.subscribe(IN_ANNOUNCEMENT_CHANNEL_NAME).await?;
 
             let (in_announcement_sender, in_announcement_receiver) =
-                tokio::sync::broadcast::channel(1);
+                tokio::sync::mpsc::unbounded_channel();
 
             tokio::spawn(async move {
                 loop {
@@ -152,9 +156,17 @@ impl OutMatchServer for RedisOutMatchServer {
         &self,
         out_id: uuid::Uuid,
         out_address: SocketAddr,
+        out_priority: i64,
+        out_routing_rules: &[OutRuleConfig],
     ) -> anyhow::Result<MatchIn> {
         loop {
-            let in_announcement = self.in_announcement_receiver.lock().await.recv().await?;
+            let in_announcement = self
+                .in_announcement_receiver
+                .lock()
+                .await
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("in announcement subscription ended."))?;
 
             if self.in_id_set.lock().await.contains(&in_announcement.id) {
                 continue;
@@ -190,6 +202,8 @@ impl OutMatchServer for RedisOutMatchServer {
                         id: out_id,
                         tunnel_id,
                         tunnel_labels: self.labels.clone(),
+                        tunnel_priority: out_priority,
+                        routing_rules: out_routing_rules.to_vec(),
                         address: out_address,
                     })?,
                 )
@@ -220,17 +234,19 @@ impl OutMatchServer for RedisOutMatchServer {
 
 const IN_ANNOUNCEMENT_CHANNEL_NAME: &str = "in_announcement";
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct InAnnouncement {
     id: uuid::Uuid,
     address: SocketAddr,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Match {
     id: uuid::Uuid,
     tunnel_id: TunnelId,
     tunnel_labels: Vec<String>,
+    tunnel_priority: i64,
+    routing_rules: Vec<OutRuleConfig>,
     address: SocketAddr,
 }
 

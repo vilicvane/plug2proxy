@@ -40,11 +40,11 @@
     "role": "out",
     "tunneling": {
         "label": "us",
+        "priority": 100,
         "stun_server": "",
         "match_server": "redis://xxx/"
     },
     "routing": {
-        "priority": 100,
         "rules": [
             {
                 "type": "geoip",

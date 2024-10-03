@@ -1,103 +1,111 @@
-use std::str::FromStr;
+use std::net::SocketAddr;
 
-use crate::tunnel::TunnelId;
+pub trait Rule: Send + Sync {
+    fn priority(&self) -> i64;
 
-use super::config::{InRuleConfig, OutRuleConfig};
-
-#[derive(Clone)]
-pub enum Rule {
-    GeoIp(GeoIpRule),
-    Domain(DomainRule),
+    fn r#match(
+        &self,
+        address: SocketAddr,
+        domain: &Option<String>,
+        region: &Option<String>,
+    ) -> Option<&[String]>;
 }
 
-impl Rule {
-    pub fn from_in_rule_config(config: InRuleConfig) -> Self {
-        match config {
-            InRuleConfig::GeoIp(config) => Rule::GeoIp(GeoIpRule {
-                match_: config.match_.into_vec(),
-                out: config.out.into_vec(),
-                priority: u32::MAX,
-                negate: config.negate,
-            }),
-            InRuleConfig::Domain(config) => Rule::Domain(DomainRule {
-                match_: config
-                    .match_
-                    .into_vec()
-                    .into_iter()
-                    .filter_map(|pattern| {
-                        regex::Regex::from_str(&pattern)
-                            .inspect_err(|_| {
-                                log::warn!("invalid domain rule match pattern: {}", pattern);
-                            })
-                            .ok()
-                    })
-                    .collect::<Vec<_>>(),
-                out: config.out.into_vec(),
-                priority: u32::MAX,
-                negate: config.negate,
-            }),
-        }
-    }
-
-    pub fn from_out_rule_config(
-        tunnel_id: TunnelId,
-        priority_default: u32,
-        config: OutRuleConfig,
-    ) -> Self {
-        match config {
-            OutRuleConfig::GeoIp(config) => Rule::GeoIp(GeoIpRule {
-                match_: config.match_.into_vec(),
-                out: vec![tunnel_id.to_string()],
-                priority: config.priority.unwrap_or(priority_default),
-                negate: config.negate,
-            }),
-            OutRuleConfig::Domain(config) => Rule::Domain(DomainRule {
-                match_: config
-                    .match_
-                    .into_vec()
-                    .into_iter()
-                    .filter_map(|pattern| {
-                        regex::Regex::from_str(&pattern)
-                            .inspect_err(|_| {
-                                log::warn!("invalid domain rule match pattern: {}", pattern);
-                            })
-                            .ok()
-                    })
-                    .collect::<Vec<_>>(),
-                out: vec![tunnel_id.to_string()],
-                priority: config.priority.unwrap_or(priority_default),
-                negate: config.negate,
-            }),
-        }
-    }
-
-    pub fn get_priority(&self) -> u32 {
-        match self {
-            Rule::GeoIp(rule) => rule.priority,
-            Rule::Domain(rule) => rule.priority,
-        }
-    }
-
-    pub fn get_out_tags(&self) -> Vec<String> {
-        match self {
-            Rule::GeoIp(rule) => rule.out.clone(),
-            Rule::Domain(rule) => rule.out.clone(),
-        }
-    }
-}
+pub type DynRuleBox = Box<dyn Rule>;
 
 #[derive(Clone)]
 pub struct GeoIpRule {
-    pub match_: Vec<String>,
-    pub out: Vec<String>,
-    pub priority: u32,
+    pub matches: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i64,
     pub negate: bool,
+}
+
+impl Rule for GeoIpRule {
+    fn priority(&self) -> i64 {
+        self.priority
+    }
+
+    fn r#match(
+        &self,
+        _address: SocketAddr,
+        _domain: &Option<String>,
+        region: &Option<String>,
+    ) -> Option<&[String]> {
+        if let Some(region) = region {
+            let mut condition = self
+                .matches
+                .iter()
+                .any(|match_region| match_region == region);
+
+            if self.negate {
+                condition = !condition;
+            }
+
+            if condition {
+                Some(&self.labels)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct DomainRule {
-    pub match_: Vec<regex::Regex>,
-    pub out: Vec<String>,
-    pub priority: u32,
+    pub matches: Vec<regex::Regex>,
+    pub labels: Vec<String>,
+    pub priority: i64,
     pub negate: bool,
+}
+
+impl Rule for DomainRule {
+    fn priority(&self) -> i64 {
+        self.priority
+    }
+
+    fn r#match(
+        &self,
+        _address: SocketAddr,
+        domain: &Option<String>,
+        _region: &Option<String>,
+    ) -> Option<&[String]> {
+        if let Some(domain) = domain {
+            let mut condition = self.matches.iter().any(|pattern| pattern.is_match(domain));
+
+            if self.negate {
+                condition = !condition;
+            }
+
+            if condition {
+                Some(&self.labels)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FallbackRule {
+    pub labels: Vec<String>,
+}
+
+impl Rule for FallbackRule {
+    fn priority(&self) -> i64 {
+        i64::MIN
+    }
+
+    fn r#match(
+        &self,
+        _address: SocketAddr,
+        _domain: &Option<String>,
+        _region: &Option<String>,
+    ) -> Option<&[String]> {
+        Some(&self.labels)
+    }
 }

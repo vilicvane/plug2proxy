@@ -40,7 +40,7 @@ pub struct FakeAuthority {
 }
 
 impl FakeAuthority {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: &PathBuf) -> Self {
         let resolver = {
             let mut config = hickory_resolver::config::ResolverConfig::new();
 

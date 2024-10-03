@@ -9,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut catalog = hickory_server::authority::Catalog::new();
 
-    let authority = FakeAuthority::new(PathBuf::from(".debug/test.db"));
+    let authority = FakeAuthority::new(&PathBuf::from(".debug/test.db"));
 
     let authority = Box::new(Arc::new(authority));
 

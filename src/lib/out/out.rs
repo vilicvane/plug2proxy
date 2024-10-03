@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::{
     config::MatchServerConfig,
     punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
+    routing::config::OutRuleConfig,
     tunnel::OutTunnel,
     tunnel_provider::OutTunnelProvider as _,
     utils::io::copy_bidirectional,
@@ -10,15 +11,19 @@ use crate::{
 
 pub struct Options {
     pub labels: Vec<String>,
+    pub priority: i64,
     pub stun_server_address: String,
     pub match_server_config: MatchServerConfig,
+    pub routing_rules: Vec<OutRuleConfig>,
 }
 
 pub async fn up(
     Options {
         labels,
+        priority,
         stun_server_address,
         match_server_config,
+        routing_rules,
     }: Options,
 ) -> anyhow::Result<()> {
     let match_server = match_server_config.new_out_match_server(labels).await?;
@@ -26,7 +31,9 @@ pub async fn up(
     let tunnel_provider = PunchQuicOutTunnelProvider::new(
         match_server,
         PunchQuicOutTunnelConfig {
+            priority,
             stun_server_address,
+            routing_rules,
         },
     );
 
@@ -46,7 +53,7 @@ pub async fn up(
 }
 
 async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
-    println!("tunnel accepted: {}", tunnel.get_id());
+    println!("tunnel accepted: {}", tunnel.id());
 
     loop {
         match tunnel.accept().await {

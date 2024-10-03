@@ -1,105 +1,59 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use itertools::Itertools as _;
 
 use crate::tunnel::TunnelId;
 
 use super::{
-    config::{InConfig, OutConfig},
-    rule::Rule,
+    config::{InRuleConfig, OutRuleConfig},
+    rule::DynRuleBox,
 };
 
 pub struct Router {
-    db: maxminddb::Reader<Vec<u8>>,
-    in_rules: Vec<Rule>,
-    out_rules_map: tokio::sync::Mutex<HashMap<TunnelId, Vec<Rule>>>,
-    rules_cache: tokio::sync::Mutex<Vec<Rule>>,
+    in_rules: Vec<Arc<DynRuleBox>>,
+    out_rules_map: tokio::sync::Mutex<HashMap<TunnelId, Vec<Arc<DynRuleBox>>>>,
+    rules_cache: tokio::sync::Mutex<Vec<Arc<DynRuleBox>>>,
 }
 
 impl Router {
-    pub fn new(db: maxminddb::Reader<Vec<u8>>, InConfig { rules }: InConfig) -> Self {
+    pub fn new(rules: Vec<InRuleConfig>) -> Self {
         let rules = rules
             .into_iter()
-            .map(Rule::from_in_rule_config)
-            .collect::<Vec<_>>();
+            .map(|config| Arc::new(config.into_rule()))
+            .collect_vec();
 
         Self {
-            db,
             in_rules: rules.clone(),
             out_rules_map: tokio::sync::Mutex::new(HashMap::new()),
             rules_cache: tokio::sync::Mutex::new(rules),
         }
     }
 
-    pub async fn get_matched_out_tags(
+    pub async fn r#match(
         &self,
         address: SocketAddr,
-        domain: Option<&str>,
+        domain: Option<String>,
+        region: Option<String>,
     ) -> Vec<String> {
         let rules = self.rules_cache.lock().await;
 
-        let region = if let Result::<maxminddb::geoip2::Country, _>::Ok(result) =
-            self.db.lookup(address.ip())
-        {
-            result.country.and_then(|country| country.iso_code)
-        } else {
-            None
-        };
-
-        let tags = rules
+        let labels = rules
             .iter()
-            .filter(|rule| match rule {
-                Rule::GeoIp(rule) => {
-                    if let Some(region) = region {
-                        let mut condition = rule
-                            .match_
-                            .iter()
-                            .any(|match_region| match_region == region);
-
-                        if rule.negate {
-                            condition = !condition;
-                        }
-
-                        condition
-                    } else {
-                        false
-                    }
-                }
-                Rule::Domain(rule) => {
-                    if let Some(domain) = domain {
-                        let mut condition =
-                            rule.match_.iter().any(|pattern| pattern.is_match(domain));
-
-                        if rule.negate {
-                            condition = !condition;
-                        }
-
-                        condition
-                    } else {
-                        false
-                    }
-                }
-            })
-            .flat_map(|rule| rule.get_out_tags())
+            .flat_map(|rule| rule.r#match(address, &domain, &region).unwrap_or_default())
             .unique()
+            .cloned()
             .collect_vec();
 
-        tags
+        labels
     }
 
-    pub async fn register_tunnel(
-        &self,
-        id: TunnelId,
-        OutConfig {
-            priority, rules, ..
-        }: OutConfig,
-    ) {
+    pub async fn register_tunnel(&self, id: TunnelId, rules: Vec<OutRuleConfig>, priority: i64) {
         self.out_rules_map.lock().await.insert(
             id,
             rules
                 .into_iter()
-                .map(|config| Rule::from_out_rule_config(id, priority, config))
-                .collect::<Vec<_>>(),
+                .map(|config| Arc::new(config.into_rule(id, priority)))
+                .collect_vec(),
         );
 
         self.update_rules_cache().await;
@@ -119,9 +73,9 @@ impl Router {
             .flatten()
             .chain(self.in_rules.iter())
             .cloned()
-            .collect::<Vec<_>>();
+            .collect_vec();
 
-        rules_cache.sort_by_key(|rule| rule.get_priority());
+        rules_cache.sort_by_key(|rule| -rule.priority());
 
         *self.rules_cache.lock().await = rules_cache;
     }

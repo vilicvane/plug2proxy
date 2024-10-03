@@ -1,4 +1,7 @@
-use crate::tunnel::{InTunnel, OutTunnel};
+use crate::{
+    routing::config::OutRuleConfig,
+    tunnel::{InTunnel, OutTunnel},
+};
 
 #[async_trait::async_trait]
 pub trait OutTunnelProvider {
@@ -7,5 +10,5 @@ pub trait OutTunnelProvider {
 
 #[async_trait::async_trait]
 pub trait InTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<Box<dyn InTunnel>>;
+    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, Vec<OutRuleConfig>)>;
 }

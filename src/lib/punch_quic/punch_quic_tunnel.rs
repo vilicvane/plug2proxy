@@ -7,19 +7,40 @@ use crate::tunnel::{InTunnel, OutTunnel, TransportType, TunnelId};
 pub struct PunchQuicInTunnel {
     id: TunnelId,
     labels: Vec<String>,
+    priority: i64,
     conn: quinn::Connection,
 }
 
 impl PunchQuicInTunnel {
-    pub fn new(id: TunnelId, labels: Vec<String>, conn: quinn::Connection) -> Self {
-        PunchQuicInTunnel { id, labels, conn }
+    pub fn new(
+        id: TunnelId,
+        mut labels: Vec<String>,
+        priority: i64,
+        conn: quinn::Connection,
+    ) -> Self {
+        labels.push(id.to_string());
+
+        PunchQuicInTunnel {
+            id,
+            labels,
+            priority,
+            conn,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl InTunnel for PunchQuicInTunnel {
-    fn get_id(&self) -> TunnelId {
+    fn id(&self) -> TunnelId {
         self.id
+    }
+
+    fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    fn priority(&self) -> i64 {
+        self.priority
     }
 
     async fn connect(
@@ -62,6 +83,10 @@ impl InTunnel for PunchQuicInTunnel {
         Ok((Box::new(recv_stream), Box::new(send_stream)))
     }
 
+    async fn closed(&self) {
+        self.conn.closed().await;
+    }
+
     fn is_closed(&self) -> bool {
         self.conn.close_reason().is_some()
     }
@@ -80,7 +105,7 @@ impl PunchQuicOutTunnel {
 
 #[async_trait::async_trait]
 impl OutTunnel for PunchQuicOutTunnel {
-    fn get_id(&self) -> TunnelId {
+    fn id(&self) -> TunnelId {
         self.id
     }
 

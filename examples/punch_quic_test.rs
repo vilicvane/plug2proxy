@@ -39,7 +39,9 @@ async fn main() -> anyhow::Result<()> {
         let provider = PunchQuicOutTunnelProvider::new(
             match_server,
             PunchQuicOutTunnelConfig {
+                priority: 0,
                 stun_server_address: STUN_SERVER_ADDR.to_string(),
+                routing_rules: vec![],
             },
         );
 
@@ -72,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
             },
         );
 
-        let tunnel = provider.accept().await?;
+        let (tunnel, _) = provider.accept().await?;
 
         let (mut recv_stream, mut send_stream) = tunnel
             .connect(TransportType::Tcp, "39.156.66.10:80".parse()?)

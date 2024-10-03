@@ -4,16 +4,16 @@ use hickory_server::authority::Authority as _;
 
 use super::FakeAuthority;
 
-pub struct Options {
+pub struct Options<'a> {
     pub listen_address: SocketAddr,
-    pub db_path: PathBuf,
+    pub db_path: &'a PathBuf,
 }
 
 pub async fn up(
     Options {
         listen_address,
         db_path,
-    }: Options,
+    }: Options<'_>,
 ) -> anyhow::Result<()> {
     let mut catalog = hickory_server::authority::Catalog::new();
 

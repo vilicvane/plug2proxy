@@ -5,15 +5,17 @@ use std::{
 
 use futures::TryFutureExt;
 use stun::message::Getter as _;
+use webrtc::ice::priority;
 use webrtc_util::Conn;
 
 use crate::{
+    routing::config::OutRuleConfig,
     tunnel::{InTunnel, OutTunnel},
     tunnel_provider::{InTunnelProvider, OutTunnelProvider},
 };
 
 use super::{
-    match_server::{InMatchServer, OutMatchServer},
+    match_server::{InMatchServer, MatchOut, OutMatchServer},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicInTunnel, PunchQuicOutTunnel,
@@ -25,13 +27,13 @@ pub struct PunchQuicInTunnelConfig {
 
 pub struct PunchQuicInTunnelProvider {
     id: uuid::Uuid,
-    match_server: Box<dyn InMatchServer + Sync>,
+    match_server: Box<dyn InMatchServer + Send + Sync>,
     config: PunchQuicInTunnelConfig,
 }
 
 impl PunchQuicInTunnelProvider {
     pub fn new(
-        match_server: Box<dyn InMatchServer + Sync>,
+        match_server: Box<dyn InMatchServer + Send + Sync>,
         config: PunchQuicInTunnelConfig,
     ) -> Self {
         Self {
@@ -44,7 +46,7 @@ impl PunchQuicInTunnelProvider {
 
 #[async_trait::async_trait]
 impl InTunnelProvider for PunchQuicInTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<Box<dyn InTunnel>> {
+    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, Vec<OutRuleConfig>)> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_address).await?;
 
         let match_out = self.match_server.match_out(self.id, address).await?;
@@ -55,16 +57,22 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
 
         let conn = endpoint.connect(match_out.address, "localhost")?.await?;
 
-        return Ok(Box::new(PunchQuicInTunnel::new(
-            match_out.tunnel_id,
-            match_out.tunnel_labels,
-            conn,
-        )));
+        return Ok((
+            Box::new(PunchQuicInTunnel::new(
+                match_out.tunnel_id,
+                match_out.tunnel_labels,
+                match_out.tunnel_priority,
+                conn,
+            )),
+            match_out.routing_rules,
+        ));
     }
 }
 
 pub struct PunchQuicOutTunnelConfig {
+    pub priority: i64,
     pub stun_server_address: String,
+    pub routing_rules: Vec<OutRuleConfig>,
 }
 
 pub struct PunchQuicOutTunnelProvider {
@@ -91,7 +99,15 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
         let (socket, address) = create_peer_socket(&self.config.stun_server_address).await?;
 
-        let match_in = self.match_server.match_in(self.id, address).await?;
+        let match_in = self
+            .match_server
+            .match_in(
+                self.id,
+                address,
+                self.config.priority,
+                &self.config.routing_rules,
+            )
+            .await?;
 
         punch(&socket, match_in.address).await?;
 

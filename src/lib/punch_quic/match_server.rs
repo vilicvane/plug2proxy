@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::tunnel::TunnelId;
+use crate::{routing::config::OutRuleConfig, tunnel::TunnelId};
 
 #[async_trait::async_trait]
 pub trait InMatchServer {
@@ -15,6 +15,8 @@ pub struct MatchOut {
     pub id: uuid::Uuid,
     pub tunnel_id: TunnelId,
     pub tunnel_labels: Vec<String>,
+    pub tunnel_priority: i64,
+    pub routing_rules: Vec<OutRuleConfig>,
     pub address: SocketAddr,
 }
 
@@ -24,6 +26,8 @@ pub trait OutMatchServer: Send {
         &self,
         out_id: uuid::Uuid,
         out_address: SocketAddr,
+        out_priority: i64,
+        out_routing_rules: &[OutRuleConfig],
     ) -> anyhow::Result<MatchIn>;
 
     async fn register_in(&self, in_id: uuid::Uuid) -> anyhow::Result<()>;
