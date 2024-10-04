@@ -8,7 +8,7 @@ use config::{InConfig, OutConfig};
 use constants::{
     dns_server_addresses_default, fake_ip_dns_db_path_default, fake_ipv4_net_default,
     fake_ipv6_net_default, geolite2_cache_path_default, geolite2_update_interval_default,
-    stun_server_addresses_default, DATA_DIR,
+    stun_server_addresses_default, DATA_DIR_DEFAULT,
 };
 use plug2proxy::{
     out,
@@ -19,8 +19,9 @@ use tokio::fs;
 
 #[derive(clap::Parser)]
 struct Cli {
-    #[clap(long, short)]
     config: String,
+    #[clap(long)]
+    data_dir: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -57,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
             tunneling,
             routing,
         }) => {
-            fs::create_dir_all(DATA_DIR).await?;
+            fs::create_dir_all(DATA_DIR_DEFAULT).await?;
 
             let dns_resolver = Arc::new(create_dns_resolver(
                 &dns_resolver
@@ -65,12 +66,12 @@ async fn main() -> anyhow::Result<()> {
                     .map_or_else(dns_server_addresses_default, |server| server.into_vec()),
             ));
 
-            let fake_ip_dns_db_path = fake_ip_dns_db_path_default();
+            let fake_ip_dns_db_path = fake_ip_dns_db_path_default(cli.data_dir.as_deref());
 
             // ensure db file exists.
             drop(rusqlite::Connection::open(&fake_ip_dns_db_path));
 
-            let geolite2_cache_path = geolite2_cache_path_default();
+            let geolite2_cache_path = geolite2_cache_path_default(cli.data_dir.as_deref());
 
             tokio::try_join!(
                 r#in::fake_ip_dns::up(

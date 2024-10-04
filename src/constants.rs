@@ -6,7 +6,7 @@ use std::{
 
 use plug2proxy::routing::config::{InFallbackRuleConfig, InRuleConfig};
 
-pub const DATA_DIR: &str = ".plug2proxy";
+pub const DATA_DIR_DEFAULT: &str = ".plug2proxy";
 
 pub fn dns_server_addresses_default() -> Vec<String> {
     vec!["119.29.29.29".to_string(), "119.28.28.28".to_string()]
@@ -35,12 +35,12 @@ pub fn stun_server_addresses_default() -> Vec<String> {
     ]
 }
 
-pub fn fake_ip_dns_db_path_default() -> PathBuf {
-    Path::new(DATA_DIR).join("fake_ip_dns.db")
+pub fn fake_ip_dns_db_path_default(data_dir: Option<&str>) -> PathBuf {
+    Path::new(data_dir.unwrap_or(DATA_DIR_DEFAULT)).join("fake_ip_dns.db")
 }
 
-pub fn geolite2_cache_path_default() -> PathBuf {
-    Path::new(DATA_DIR).join("geolite2.mmdb")
+pub fn geolite2_cache_path_default(data_dir: Option<&str>) -> PathBuf {
+    Path::new(data_dir.unwrap_or(DATA_DIR_DEFAULT)).join("geolite2.mmdb")
 }
 
 pub fn geolite2_url_default() -> String {

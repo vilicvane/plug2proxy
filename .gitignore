@@ -3,4 +3,4 @@
 .plug2proxy/
 .debug/
 
-debug.sh
+debug*
