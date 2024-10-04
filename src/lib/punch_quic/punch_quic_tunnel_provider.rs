@@ -5,7 +5,6 @@ use std::{
 
 use futures::TryFutureExt;
 use stun::message::Getter as _;
-use webrtc::ice::priority;
 use webrtc_util::Conn;
 
 use crate::{
@@ -15,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    match_server::{InMatchServer, MatchOut, OutMatchServer},
+    match_server::{InMatchServer, OutMatchServer},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicInTunnel, PunchQuicOutTunnel,
