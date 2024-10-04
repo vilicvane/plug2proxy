@@ -1,4 +1,5 @@
 mod fake_authority;
+#[allow(clippy::module_inception)]
 mod fake_ip_dns;
 
 pub use fake_authority::*;
