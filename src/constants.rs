@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use plug2proxy::routing::config::InRuleConfig;
+use plug2proxy::routing::config::{InFallbackRuleConfig, InRuleConfig};
 
 pub const DATA_DIR: &str = ".plug2proxy";
 
@@ -45,5 +45,7 @@ pub fn geolite2_update_interval_default() -> Duration {
 }
 
 pub fn in_routing_rules_default() -> Vec<InRuleConfig> {
-    vec![]
+    vec![InRuleConfig::Fallback(InFallbackRuleConfig {
+        out: "ANY".to_owned().into(),
+    })]
 }

@@ -1,4 +1,4 @@
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, derive_more::From, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum OneOrMany<T> {
     One(T),

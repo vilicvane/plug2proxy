@@ -86,7 +86,7 @@ impl FakeAuthority {
             )
         };
 
-        let sqlite_connection = rusqlite::Connection::open(&db_path).unwrap();
+        let sqlite_connection = rusqlite::Connection::open(db_path).unwrap();
 
         sqlite_connection
             .execute(
@@ -112,7 +112,7 @@ impl FakeAuthority {
             fake_ip_v4_start: Ipv4Addr::new(198, 18, 0, 0).to_bits(),
             fake_ip_v6_start: Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0).to_bits(),
             resolver,
-            sqlite_connection: Mutex::new(rusqlite::Connection::open(&db_path).unwrap()),
+            sqlite_connection: Mutex::new(rusqlite::Connection::open(db_path).unwrap()),
         }
     }
 

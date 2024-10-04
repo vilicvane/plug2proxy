@@ -90,13 +90,17 @@ impl TunnelManager {
     pub async fn select_tunnel(&self, labels: &[String]) -> Option<Arc<Box<dyn InTunnel>>> {
         let label_to_tunnels_map = self.label_to_tunnels_map.lock().await;
 
-        let mut proxy_label_exists = false;
+        let mut label_proxy_exists = false;
+        let mut label_any_exists = false;
 
         for label in labels {
             match label.as_str() {
                 "DIRECT" => return Some(self.direct_tunnel.clone()),
                 "PROXY" => {
-                    proxy_label_exists = true;
+                    label_proxy_exists = true;
+                }
+                "ANY" => {
+                    label_any_exists = true;
                 }
                 _ => {
                     if let Some(tunnels) = label_to_tunnels_map.get(label) {
@@ -108,10 +112,16 @@ impl TunnelManager {
             }
         }
 
-        if proxy_label_exists {
-            return label_to_tunnels_map
-                .get("PROXY")
-                .and_then(|tunnels| tunnels.first().cloned());
+        let proxy_tunnel = label_to_tunnels_map
+            .get("PROXY")
+            .and_then(|tunnels| tunnels.first().cloned());
+
+        if label_proxy_exists {
+            return proxy_tunnel;
+        }
+
+        if label_any_exists {
+            return proxy_tunnel.or_else(|| Some(self.direct_tunnel.clone()));
         }
 
         None
