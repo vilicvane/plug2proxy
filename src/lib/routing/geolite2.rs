@@ -5,6 +5,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct GeoLite2 {
     reader: Arc<tokio::sync::Mutex<Option<GeoLite2Reader>>>,
     update_handle: tokio::task::JoinHandle<()>,
@@ -74,7 +76,7 @@ impl GeoLite2 {
         tokio::time::sleep_until(next_update_time).await;
 
         loop {
-            async {
+            let updated = async {
                 log::info!("updating GeoLite2 database...");
 
                 log::debug!("downloading GeoLite2 database from: {}", url);
@@ -93,11 +95,20 @@ impl GeoLite2 {
                 anyhow::Ok(())
             }
             .await
-            .unwrap_or_else(|error| {
-                log::error!("failed to download GeoLite2 database: {:?}", error);
-            });
+            .map_or_else(
+                |error| {
+                    log::error!("failed to download GeoLite2 database: {:?}", error);
+                    false
+                },
+                |_| true,
+            );
 
-            tokio::time::sleep(update_interval).await;
+            tokio::time::sleep(if updated {
+                update_interval
+            } else {
+                RETRY_INTERVAL
+            })
+            .await;
         }
     }
 }
