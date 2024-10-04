@@ -44,38 +44,11 @@ impl FakeAuthority {
         let resolver = {
             let mut config = hickory_resolver::config::ResolverConfig::new();
 
-            // config.add_name_server(NameServerConfig::new(
-            //     "223.6.6.6:53".parse().unwrap(),
-            //     Protocol::Udp,
-            // ));
-
-            // config.add_name_server(NameServerConfig {
-            //     socket_addr: "223.6.6.6:853".parse().unwrap(),
-            //     protocol: Protocol::Tls,
-            //     tls_dns_name: Some("dns.alidns.com".to_owned()),
-            //     trust_negative_responses: true,
-            //     // tls_config: None,
-            //     bind_addr: None,
-            // });
-
-            // let mut roots = rustls::RootCertStore::empty();
-
-            // for cert in rustls_native_certs::load_native_certs().unwrap() {
-            //     roots.add(cert).unwrap();
-            // }
-
-            // let client_config = rustls::ClientConfig::builder()
-            //     .with_root_certificates(roots)
-            //     .with_no_client_auth();
-
-            // config.set_tls_client_config(Arc::new());
-
             config.add_name_server(NameServerConfig {
-                socket_addr: "8.8.8.8:853".parse().unwrap(),
+                socket_addr: "223.6.6.6:853".parse().unwrap(),
                 protocol: Protocol::Tls,
-                tls_dns_name: Some("8.8.8.8".to_owned()),
+                tls_dns_name: Some("223.6.6.6".to_owned()),
                 trust_negative_responses: true,
-                // tls_config: None,
                 bind_addr: None,
             });
 
