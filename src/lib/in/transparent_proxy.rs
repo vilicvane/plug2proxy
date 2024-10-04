@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as _},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     config::MatchServerConfig,
     punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
+    r#in::dns_resolver::convert_to_socket_addresses,
     routing::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
     utils::{io::copy_bidirectional, net::get_tokio_tcp_stream_original_dst},
 };
@@ -33,6 +34,7 @@ pub struct Options<'a> {
 }
 
 pub async fn up(
+    dns_resolver: Arc<hickory_resolver::TokioAsyncResolver>,
     Options {
         listen_address,
         fake_ip_dns_db_path,
@@ -56,10 +58,16 @@ pub async fn up(
 
     let match_server = match_server_config.new_in_match_server()?;
 
-    let stun_server_addresses = stun_server_addresses
-        .iter()
-        .flat_map(|address| address.to_socket_addrs().unwrap_or_default())
-        .collect_vec();
+    let stun_server_addresses = {
+        let mut resolved_addresses = Vec::new();
+
+        for address in stun_server_addresses {
+            resolved_addresses
+                .extend(convert_to_socket_addresses(address, &dns_resolver, None).await?);
+        }
+
+        resolved_addresses
+    };
 
     let tunnel_provider = PunchQuicInTunnelProvider::new(
         match_server,

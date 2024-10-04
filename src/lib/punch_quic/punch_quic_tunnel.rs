@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
 use crate::tunnel::{InTunnel, OutTunnel, TransportType, TunnelId};
 

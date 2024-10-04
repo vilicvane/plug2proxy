@@ -10,6 +10,7 @@ pub struct Options<'a> {
 }
 
 pub async fn up(
+    resolver: Arc<hickory_resolver::TokioAsyncResolver>,
     Options {
         listen_address,
         db_path,
@@ -19,7 +20,7 @@ pub async fn up(
 
     let mut catalog = hickory_server::authority::Catalog::new();
 
-    let authority = FakeAuthority::new(db_path);
+    let authority = FakeAuthority::new(resolver, db_path);
 
     let authority = Box::new(Arc::new(authority));
 

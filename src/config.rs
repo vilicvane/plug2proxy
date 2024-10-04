@@ -14,25 +14,25 @@ use crate::constants::{
 #[derive(serde::Deserialize)]
 pub struct InConfig {
     #[serde(default)]
-    pub transparent_proxy: InTransparentProxyConfig,
+    pub dns_resolver: InDnsResolverConfig,
     #[serde(default)]
     pub fake_ip_dns: InFakeIpDnsConfig,
+    #[serde(default)]
+    pub transparent_proxy: InTransparentProxyConfig,
     pub tunneling: InTunnelingConfig,
     #[serde(default)]
     pub routing: InRoutingConfig,
 }
 
 #[derive(serde::Deserialize)]
-pub struct InTransparentProxyConfig {
-    #[serde(default = "transparent_proxy_address_default")]
-    pub listen: SocketAddr,
+pub struct InDnsResolverConfig {
+    pub server: Option<OneOrMany<String>>,
 }
 
-impl Default for InTransparentProxyConfig {
+#[allow(clippy::derivable_impls)]
+impl Default for InDnsResolverConfig {
     fn default() -> Self {
-        Self {
-            listen: transparent_proxy_address_default(),
-        }
+        Self { server: None }
     }
 }
 
@@ -46,6 +46,20 @@ impl Default for InFakeIpDnsConfig {
     fn default() -> Self {
         Self {
             listen: fake_ip_dns_address_default(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct InTransparentProxyConfig {
+    #[serde(default = "transparent_proxy_address_default")]
+    pub listen: SocketAddr,
+}
+
+impl Default for InTransparentProxyConfig {
+    fn default() -> Self {
+        Self {
+            listen: transparent_proxy_address_default(),
         }
     }
 }

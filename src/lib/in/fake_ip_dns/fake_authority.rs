@@ -13,11 +13,7 @@ use hickory_client::{
         DNSClass, RData, Record, RecordType,
     },
 };
-use hickory_resolver::{
-    config::{NameServerConfig, Protocol},
-    lookup::Lookup,
-    TokioAsyncResolver,
-};
+use hickory_resolver::{lookup::Lookup, TokioAsyncResolver};
 use hickory_server::{
     authority::{Authority, LookupError, LookupOptions, MessageRequest, UpdateResult, ZoneType},
     server::RequestInfo,
@@ -35,30 +31,12 @@ pub struct FakeAuthority {
     origin: LowerName,
     fake_ip_v4_start: u32,
     fake_ip_v6_start: u128,
-    resolver: TokioAsyncResolver,
+    resolver: Arc<TokioAsyncResolver>,
     sqlite_connection: Mutex<rusqlite::Connection>,
 }
 
 impl FakeAuthority {
-    pub fn new(db_path: &PathBuf) -> Self {
-        let resolver = {
-            let mut config = hickory_resolver::config::ResolverConfig::new();
-
-            config.add_name_server(NameServerConfig {
-                socket_addr: "223.6.6.6:853".parse().unwrap(),
-                protocol: Protocol::Tls,
-                tls_dns_name: Some("223.6.6.6".to_owned()),
-                trust_negative_responses: true,
-                bind_addr: None,
-            });
-
-            hickory_resolver::TokioAsyncResolver::new(
-                config,
-                hickory_resolver::config::ResolverOpts::default(),
-                hickory_resolver::name_server::TokioConnectionProvider::default(),
-            )
-        };
-
+    pub fn new(resolver: Arc<TokioAsyncResolver>, db_path: &PathBuf) -> Self {
         let sqlite_connection = rusqlite::Connection::open(db_path).unwrap();
 
         sqlite_connection

@@ -1,5 +1,5 @@
 use std::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -8,20 +8,24 @@ use plug2proxy::routing::config::{InFallbackRuleConfig, InRuleConfig};
 
 pub const DATA_DIR: &str = ".plug2proxy";
 
-pub fn transparent_proxy_address_default() -> SocketAddr {
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 12345))
+pub fn dns_server_addresses_default() -> Vec<String> {
+    vec!["119.29.29.29".to_string(), "119.28.28.28".to_string()]
 }
 
 pub fn fake_ip_dns_address_default() -> SocketAddr {
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 53))
+    "127.0.0.124:53".parse().unwrap()
 }
 
 pub fn fake_ipv4_net_default() -> ipnet::Ipv4Net {
-    ipnet::Ipv4Net::new(Ipv4Addr::new(198, 18, 0, 0), 15).unwrap()
+    "198.18.0.0/15".parse().unwrap()
 }
 
 pub fn fake_ipv6_net_default() -> ipnet::Ipv6Net {
-    ipnet::Ipv6Net::new(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0), 32).unwrap()
+    "2001:db8::/32".parse().unwrap()
+}
+
+pub fn transparent_proxy_address_default() -> SocketAddr {
+    "127.0.0.1:12345".parse().unwrap()
 }
 
 pub fn stun_server_addresses_default() -> Vec<String> {
