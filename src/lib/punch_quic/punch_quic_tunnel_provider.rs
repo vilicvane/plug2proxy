@@ -1,6 +1,7 @@
 use std::{
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use futures::TryFutureExt;
@@ -8,20 +9,21 @@ use stun::message::Getter as _;
 use webrtc_util::Conn;
 
 use crate::{
+    punch_quic::match_server::MatchOut,
     routing::config::OutRuleConfig,
     tunnel::{InTunnel, OutTunnel},
     tunnel_provider::{InTunnelProvider, OutTunnelProvider},
 };
 
 use super::{
-    match_server::{InMatchServer, OutMatchServer},
+    match_server::{InMatchServer, MatchIn, OutMatchServer},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicInTunnel, PunchQuicOutTunnel,
 };
 
 pub struct PunchQuicInTunnelConfig {
-    pub stun_server_address: String,
+    pub stun_server_addresses: Vec<SocketAddr>,
 }
 
 pub struct PunchQuicInTunnelProvider {
@@ -46,31 +48,42 @@ impl PunchQuicInTunnelProvider {
 #[async_trait::async_trait]
 impl InTunnelProvider for PunchQuicInTunnelProvider {
     async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, Vec<OutRuleConfig>)> {
-        let (socket, address) = create_peer_socket(&self.config.stun_server_address).await?;
+        let (socket, in_address) = create_peer_socket(&self.config.stun_server_addresses).await?;
 
-        let match_out = self.match_server.match_out(self.id, address).await?;
+        let MatchOut {
+            tunnel_id,
+            tunnel_labels,
+            tunnel_priority,
+            routing_rules,
+            address,
+            ..
+        } = self.match_server.match_out(self.id, in_address).await?;
 
-        punch(&socket, match_out.address).await?;
+        log::info!("matched OUT {address} as tunnel {tunnel_id}.");
+
+        punch(&socket, address).await?;
 
         let endpoint = create_client_endpoint(socket.into_std()?)?;
 
-        let conn = endpoint.connect(match_out.address, "localhost")?.await?;
+        let connection = endpoint.connect(address, "localhost")?.await?;
+
+        log::info!("tunnel {tunnel_id} established.");
 
         return Ok((
             Box::new(PunchQuicInTunnel::new(
-                match_out.tunnel_id,
-                match_out.tunnel_labels,
-                match_out.tunnel_priority,
-                conn,
+                tunnel_id,
+                tunnel_labels,
+                tunnel_priority,
+                connection,
             )),
-            match_out.routing_rules,
+            routing_rules,
         ));
     }
 }
 
 pub struct PunchQuicOutTunnelConfig {
     pub priority: i64,
-    pub stun_server_address: String,
+    pub stun_server_addresses: Vec<SocketAddr>,
     pub routing_rules: Vec<OutRuleConfig>,
 }
 
@@ -96,19 +109,25 @@ impl PunchQuicOutTunnelProvider {
 #[async_trait::async_trait]
 impl OutTunnelProvider for PunchQuicOutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
-        let (socket, address) = create_peer_socket(&self.config.stun_server_address).await?;
+        let (socket, out_address) = create_peer_socket(&self.config.stun_server_addresses).await?;
 
-        let match_in = self
+        let MatchIn {
+            id,
+            tunnel_id,
+            address,
+        } = self
             .match_server
             .match_in(
                 self.id,
-                address,
+                out_address,
                 self.config.priority,
                 &self.config.routing_rules,
             )
             .await?;
 
-        punch(&socket, match_in.address).await?;
+        log::info!("matched IN {address} as tunnel {tunnel_id}.");
+
+        punch(&socket, address).await?;
 
         let endpoint = create_server_endpoint(socket.into_std()?)?;
 
@@ -117,46 +136,46 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
             .await
             .ok_or_else(|| anyhow::anyhow!("incoming not available"))?;
 
-        let conn = incoming.accept()?.await?;
+        let connection = incoming.accept()?.await?;
 
-        let conn = Arc::new(conn);
+        log::info!("tunnel {tunnel_id} established.");
 
-        self.match_server.register_in(match_in.id).await?;
+        let connection = Arc::new(connection);
+
+        self.match_server.register_in(id).await?;
 
         tokio::spawn({
-            let conn = Arc::clone(&conn);
+            let conn = Arc::clone(&connection);
             let match_server = Arc::clone(&self.match_server);
 
             async move {
                 let _ = conn.closed().await;
 
-                match_server.unregister_in(&match_in.id).await?;
+                match_server.unregister_in(&id).await?;
 
                 anyhow::Ok(())
             }
             .inspect_err(|error| log::error!("{}", error))
         });
 
-        return Ok(Box::new(PunchQuicOutTunnel::new(match_in.tunnel_id, conn)));
+        return Ok(Box::new(PunchQuicOutTunnel::new(tunnel_id, connection)));
     }
 }
 
+const STUN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
+
 async fn create_peer_socket(
-    stun_server_address: &str,
+    stun_server_addresses: &[SocketAddr],
 ) -> anyhow::Result<(tokio::net::UdpSocket, SocketAddr)> {
     async fn inner(
-        stun_server_address: &str,
+        stun_server_addresses: &[SocketAddr],
     ) -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
-        let stun_server_addr = stun_server_address.to_socket_addrs()?.next().unwrap();
-
         let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
 
-        let stun_client_conn = ConnWrapper::new(socket.clone());
-
-        stun_client_conn.connect(stun_server_addr).await?;
+        let stun_client_conn = Arc::new(ConnWrapper::new(socket.clone()));
 
         let mut stun_client = stun::client::ClientBuilder::new()
-            .with_conn(Arc::new(stun_client_conn))
+            .with_conn(stun_client_conn.clone())
             .build()?;
 
         let address = {
@@ -169,17 +188,34 @@ async fn create_peer_socket(
                 Box::new(stun::message::BINDING_REQUEST),
             ])?;
 
-            stun_client
-                .send(&message, Some(Arc::new(response_sender)))
-                .await?;
+            let response_sender = Arc::new(response_sender);
 
-            let body = response_receiver.recv().await.unwrap().event_body?;
+            let mut address = None;
 
-            let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
+            for stun_server_address in stun_server_addresses {
+                stun_client_conn.connect(*stun_server_address).await?;
 
-            xor_addr.get_from(&body)?;
+                stun_client
+                    .send(&message, Some(response_sender.clone()))
+                    .await?;
 
-            SocketAddr::new(xor_addr.ip, xor_addr.port)
+                let body = tokio::select! {
+                    Some(response) = response_receiver.recv() => response.event_body?,
+                    _ = tokio::time::sleep(STUN_RESPONSE_TIMEOUT) => continue,
+                    else => continue,
+                };
+
+                let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
+
+                xor_addr.get_from(&body)?;
+
+                address = Some(SocketAddr::new(xor_addr.ip, xor_addr.port));
+
+                break;
+            }
+
+            address
+                .ok_or_else(|| anyhow::anyhow!("failed to get public address from stun server."))?
         };
 
         stun_client.close().await?;
@@ -187,7 +223,7 @@ async fn create_peer_socket(
         Ok((socket, address))
     }
 
-    let (socket, address) = inner(stun_server_address).await?;
+    let (socket, address) = inner(stun_server_addresses).await?;
 
     // `stun_client` does a spawn internally, and loops till close, so yield now
     // and give it a chance to drop the socket reference.

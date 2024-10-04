@@ -1,3 +1,7 @@
+use std::net::ToSocketAddrs as _;
+
+use itertools::Itertools as _;
+
 use crate::{
     config::MatchServerConfig,
     punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
@@ -10,7 +14,7 @@ use crate::{
 pub struct Options {
     pub labels: Vec<String>,
     pub priority: i64,
-    pub stun_server_address: String,
+    pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
     pub routing_rules: Vec<OutRuleConfig>,
 }
@@ -19,18 +23,25 @@ pub async fn up(
     Options {
         labels,
         priority,
-        stun_server_address,
+        stun_server_addresses,
         match_server_config,
         routing_rules,
     }: Options,
 ) -> anyhow::Result<()> {
+    log::info!("starting OUT...");
+
     let match_server = match_server_config.new_out_match_server(labels).await?;
+
+    let stun_server_addresses = stun_server_addresses
+        .iter()
+        .flat_map(|address| address.to_socket_addrs().unwrap_or_default())
+        .collect_vec();
 
     let tunnel_provider = PunchQuicOutTunnelProvider::new(
         match_server,
         PunchQuicOutTunnelConfig {
             priority,
-            stun_server_address,
+            stun_server_addresses,
             routing_rules,
         },
     );
@@ -51,8 +62,6 @@ pub async fn up(
 }
 
 async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
-    println!("tunnel accepted: {}", tunnel.id());
-
     loop {
         match tunnel.accept().await {
             Ok((

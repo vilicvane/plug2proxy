@@ -8,7 +8,7 @@ use plug2proxy::{
 
 use crate::constants::{
     fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
-    stun_server_address_default, transparent_proxy_address_default,
+    transparent_proxy_address_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -52,8 +52,7 @@ impl Default for InFakeIpDnsConfig {
 
 #[derive(serde::Deserialize)]
 pub struct InTunnelingConfig {
-    #[serde(default = "stun_server_address_default")]
-    pub stun_server: String,
+    pub stun_server: Option<OneOrMany<String>>,
     pub match_server: MatchServerUrlOrConfig,
 }
 
@@ -102,8 +101,7 @@ pub struct OutTunnelingConfig {
     pub label: Option<OneOrMany<String>>,
     #[serde(default)]
     pub priority: i64,
-    #[serde(default = "stun_server_address_default")]
-    pub stun_server: String,
+    pub stun_server: Option<OneOrMany<String>>,
     pub match_server: MatchServerUrlOrConfig,
 }
 

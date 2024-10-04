@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as _},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -24,7 +24,7 @@ pub struct Options<'a> {
     pub fake_ip_dns_db_path: &'a PathBuf,
     pub fake_ipv4_net: ipnet::Ipv4Net,
     pub fake_ipv6_net: ipnet::Ipv6Net,
-    pub stun_server_address: String,
+    pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
     pub routing_rules: Vec<InRuleConfig>,
     pub geolite2_cache_path: &'a PathBuf,
@@ -38,7 +38,7 @@ pub async fn up(
         fake_ip_dns_db_path,
         fake_ipv4_net,
         fake_ipv6_net,
-        stun_server_address,
+        stun_server_addresses,
         match_server_config,
         routing_rules,
         geolite2_cache_path,
@@ -46,6 +46,8 @@ pub async fn up(
         geolite2_update_interval,
     }: Options<'_>,
 ) -> anyhow::Result<()> {
+    log::info!("starting IN transparent proxy...");
+
     let sqlite_connection = rusqlite::Connection::open_with_flags(
         fake_ip_dns_db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -54,10 +56,15 @@ pub async fn up(
 
     let match_server = match_server_config.new_in_match_server()?;
 
+    let stun_server_addresses = stun_server_addresses
+        .iter()
+        .flat_map(|address| address.to_socket_addrs().unwrap_or_default())
+        .collect_vec();
+
     let tunnel_provider = PunchQuicInTunnelProvider::new(
         match_server,
         PunchQuicInTunnelConfig {
-            stun_server_address,
+            stun_server_addresses,
         },
     );
 
@@ -97,6 +104,8 @@ pub async fn up(
 
             tcp_listener.bind(&socket2::SockAddr::from(listen_address))?;
             tcp_listener.listen(1024)?;
+
+            log::info!("transparent proxy listening on {listen_address}...");
 
             let tcp_listener = std::net::TcpListener::from(tcp_listener);
 

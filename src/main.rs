@@ -5,7 +5,8 @@ use clap::Parser as _;
 use config::{InConfig, OutConfig};
 use constants::{
     fake_ip_dns_db_path_default, fake_ipv4_net_default, fake_ipv6_net_default,
-    geolite2_cache_path_default, geolite2_update_interval_default, DATA_DIR,
+    geolite2_cache_path_default, geolite2_update_interval_default, stun_server_addresses_default,
+    DATA_DIR,
 };
 use plug2proxy::{
     out, r#in,
@@ -20,7 +21,7 @@ struct Cli {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(tag = "role")]
+#[serde(tag = "mode")]
 enum Config {
     #[serde(rename = "in")]
     In(InConfig),
@@ -67,7 +68,9 @@ async fn main() -> anyhow::Result<()> {
                     fake_ip_dns_db_path: &fake_ip_dns_db_path,
                     fake_ipv4_net: fake_ipv4_net_default(),
                     fake_ipv6_net: fake_ipv6_net_default(),
-                    stun_server_address: tunneling.stun_server,
+                    stun_server_addresses: tunneling
+                        .stun_server
+                        .map_or_else(stun_server_addresses_default, |address| address.into_vec()),
                     match_server_config: tunneling.match_server.into_config(),
                     routing_rules: routing.rules,
                     geolite2_cache_path: &geolite2_cache_path,
@@ -90,7 +93,9 @@ async fn main() -> anyhow::Result<()> {
             out::up(out::Options {
                 labels: tunneling.label.map_or_else(Vec::new, OneOrMany::into_vec),
                 priority: tunneling.priority,
-                stun_server_address: tunneling.stun_server,
+                stun_server_addresses: tunneling
+                    .stun_server
+                    .map_or_else(stun_server_addresses_default, |address| address.into_vec()),
                 match_server_config: tunneling.match_server.into_config(),
                 routing_rules: routing.rules,
             })

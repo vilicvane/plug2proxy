@@ -15,6 +15,8 @@ pub async fn up(
         db_path,
     }: Options<'_>,
 ) -> anyhow::Result<()> {
+    log::info!("starting IN fake-ip dns...");
+
     let mut catalog = hickory_server::authority::Catalog::new();
 
     let authority = FakeAuthority::new(db_path);
@@ -28,6 +30,8 @@ pub async fn up(
     let mut server = hickory_server::server::ServerFuture::new(catalog);
 
     server.register_socket(udp_socket);
+
+    log::info!("fake-ip dns listening on {listen_address}...");
 
     server.block_until_done().await?;
 

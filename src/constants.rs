@@ -24,8 +24,11 @@ pub fn fake_ipv6_net_default() -> ipnet::Ipv6Net {
     ipnet::Ipv6Net::new(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0), 32).unwrap()
 }
 
-pub fn stun_server_address_default() -> String {
-    "stun.l.google.com:19302".to_string()
+pub fn stun_server_addresses_default() -> Vec<String> {
+    vec![
+        "stun.l.google.com:19302".to_string(),
+        "stun.miwifi.com:3478".to_string(),
+    ]
 }
 
 pub fn fake_ip_dns_db_path_default() -> PathBuf {
