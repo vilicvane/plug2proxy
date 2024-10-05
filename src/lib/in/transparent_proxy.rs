@@ -15,7 +15,10 @@ use crate::{
     punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
     r#in::dns_resolver::convert_to_socket_addresses,
     routing::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
-    utils::{io::copy_bidirectional, net::get_tokio_tcp_stream_original_dst},
+    utils::{
+        io::copy_bidirectional,
+        net::{get_tokio_tcp_stream_original_destination, IpFamily},
+    },
 };
 
 use super::tunnel_manager::TunnelManager;
@@ -50,12 +53,6 @@ pub async fn up(
 ) -> anyhow::Result<()> {
     log::info!("starting IN transparent proxy...");
 
-    let sqlite_connection = rusqlite::Connection::open_with_flags(
-        fake_ip_dns_db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-
     let match_server = match_server_config.new_in_match_server()?;
 
     let stun_server_addresses = {
@@ -83,8 +80,6 @@ pub async fn up(
         router.clone(),
     ));
 
-    let geolite2 = GeoLite2::new(geolite2_cache_path, geolite2_url, geolite2_update_interval).await;
-
     let tunnel_task = {
         let tunnel_manager = Arc::clone(&tunnel_manager);
 
@@ -99,31 +94,48 @@ pub async fn up(
     };
 
     let listen_task = {
+        let sqlite_connection = rusqlite::Connection::open_with_flags(
+            fake_ip_dns_db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+
+        let geolite2 =
+            GeoLite2::new(geolite2_cache_path, geolite2_url, geolite2_update_interval).await;
+
         let tunnel_manager = Arc::clone(&tunnel_manager);
 
         async move {
-            let tcp_listener = socket2::Socket::new(
-                socket2::Domain::for_address(listen_address),
-                socket2::Type::STREAM,
-                Some(socket2::Protocol::TCP),
-            )?;
+            let tcp_listener = {
+                let socket = tokio::net::TcpSocket::new_v4()?;
 
-            tcp_listener.set_ip_transparent(true)?;
+                nix::sys::socket::setsockopt(
+                    &socket,
+                    nix::sys::socket::sockopt::IpTransparent,
+                    &true,
+                )?;
 
-            tcp_listener.bind(&socket2::SockAddr::from(listen_address))?;
-            tcp_listener.listen(1024)?;
+                nix::sys::socket::setsockopt(
+                    &socket,
+                    nix::sys::socket::sockopt::IpFreebind,
+                    &true,
+                )?;
+
+                socket.set_reuseport(true)?;
+
+                socket.bind(listen_address)?;
+
+                socket.listen(64)?
+            };
 
             log::info!("transparent proxy listening on {listen_address}...");
 
-            let tcp_listener = std::net::TcpListener::from(tcp_listener);
-
-            tcp_listener.set_nonblocking(true)?;
-
-            let tcp_listener = tokio::net::TcpListener::from_std(tcp_listener)?;
-
             while let Ok((stream, _)) = tcp_listener.accept().await {
+                let destination = get_tokio_tcp_stream_original_destination(&stream, IpFamily::V4)?;
+
                 handle_in_tcp_stream(
                     stream,
+                    destination,
                     &tunnel_manager,
                     &fake_ipv4_net,
                     &fake_ipv6_net,
@@ -149,6 +161,7 @@ pub async fn up(
 
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
+    destination: SocketAddr,
     tunnel_manager: &TunnelManager,
     fake_ipv4_net: &ipnet::Ipv4Net,
     fake_ipv6_net: &ipnet::Ipv6Net,
@@ -156,8 +169,6 @@ async fn handle_in_tcp_stream(
     geolite2: &GeoLite2,
     router: &Router,
 ) -> anyhow::Result<()> {
-    let destination = get_tokio_tcp_stream_original_dst(&stream)?;
-
     let fake_ip_type_and_id = match destination.ip() {
         IpAddr::V4(ipv4) => {
             if fake_ipv4_net.contains(&ipv4) {
