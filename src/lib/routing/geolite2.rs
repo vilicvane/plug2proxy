@@ -30,7 +30,8 @@ impl GeoLite2 {
         let next_update_time =
             modified_time.map_or_else(tokio::time::Instant::now, |modified_time| {
                 tokio::time::Instant::now()
-                    + (update_interval - SystemTime::now().duration_since(modified_time).unwrap())
+                    + (update_interval
+                        .saturating_sub(SystemTime::now().duration_since(modified_time).unwrap()))
             });
 
         let reader = modified_time.map(|_| {
