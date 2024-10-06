@@ -151,7 +151,7 @@ impl TunnelManager {
         }
 
         for (_, tunnels) in label_to_tunnels_map.iter_mut() {
-            tunnels.sort_by_key(|tunnel| tunnel.priority().checked_neg().unwrap_or(i64::MAX));
+            tunnels.sort_by_key(|tunnel| tunnel.priority());
         }
     }
 }

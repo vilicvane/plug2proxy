@@ -22,7 +22,7 @@ impl InRuleConfig {
             InRuleConfig::GeoIp(config) => Box::new(GeoIpRule {
                 matches: config.r#match.into_vec(),
                 labels: config.out.into_vec(),
-                priority: i64::MAX,
+                priority: i64::MIN,
                 negate: config.negate,
             }),
             InRuleConfig::Domain(config) => Box::new(DomainRule {
@@ -39,7 +39,7 @@ impl InRuleConfig {
                     })
                     .collect::<Vec<_>>(),
                 labels: config.out.into_vec(),
-                priority: i64::MAX,
+                priority: i64::MIN,
                 negate: config.negate,
             }),
             InRuleConfig::Fallback(config) => Box::new(FallbackRule {
