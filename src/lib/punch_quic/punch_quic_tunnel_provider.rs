@@ -77,17 +77,11 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
 
         let connection = endpoint.connect(address, "localhost")?.await?;
 
-        log::info!("tunnel {tunnel_id} established.");
+        let tunnel = PunchQuicInTunnel::new(tunnel_id, tunnel_labels, tunnel_priority, connection);
 
-        return Ok((
-            Box::new(PunchQuicInTunnel::new(
-                tunnel_id,
-                tunnel_labels,
-                tunnel_priority,
-                connection,
-            )),
-            routing_rules,
-        ));
+        log::info!("tunnel {tunnel} established.");
+
+        return Ok((Box::new(tunnel), routing_rules));
     }
 }
 

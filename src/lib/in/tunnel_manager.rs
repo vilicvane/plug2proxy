@@ -65,6 +65,8 @@ impl TunnelManager {
                             async move {
                                 tunnel.closed().await;
 
+                                log::info!("tunnel {tunnel_id} closed.");
+
                                 let mut tunnel_map = tunnel_map.lock().await;
 
                                 tunnel_map.remove(&tunnel_id);

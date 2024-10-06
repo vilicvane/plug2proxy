@@ -1,7 +1,7 @@
-use std::net::SocketAddr;
+use std::{fmt::Display, net::SocketAddr};
 
 #[async_trait::async_trait]
-pub trait InTunnel: Send + Sync {
+pub trait InTunnel: Display + Send + Sync {
     fn id(&self) -> TunnelId;
 
     fn labels(&self) -> &[String];

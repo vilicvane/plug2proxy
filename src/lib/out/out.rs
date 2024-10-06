@@ -92,7 +92,7 @@ async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
                 };
             }
             Err(error) => {
-                eprintln!("error accepting connection: {:?}", error);
+                log::warn!("error accepting connection: {error}");
 
                 if tunnel.is_closed() {
                     break;

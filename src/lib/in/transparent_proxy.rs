@@ -258,16 +258,21 @@ async fn handle_in_tcp_stream(
         (destination, None, labels)
     };
 
-    log::debug!(
-        "routing {}{} with labels {}...",
+    let destination_string = format!(
+        "{}{}",
         destination,
         name.as_ref()
-            .map_or_else(|| "".to_owned(), |name| format!(" ({})", name)),
+            .map_or_else(|| "".to_owned(), |name| format!(" ({})", name))
+    );
+
+    log::debug!(
+        "routing {} with labels {}...",
+        destination_string,
         labels.join(",")
     );
 
     let Some(tunnel) = tunnel_manager.select_tunnel(&labels).await else {
-        log::warn!("no tunnel available.");
+        log::warn!("no tunnel available for labels {}.", labels.join(","));
 
         stream.shutdown().await?;
 
@@ -275,6 +280,8 @@ async fn handle_in_tcp_stream(
     };
 
     let destination_hostname = name.unwrap_or(destination.ip().to_string());
+
+    log::info!("connecting {destination_string} via {tunnel}...");
 
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
 
@@ -298,7 +305,9 @@ async fn handle_in_tcp_stream(
 
             anyhow::Ok(())
         }
-        .inspect_err(|error| log::error!("tunnel error: {:?}", error))
+        .inspect_err(move |error| {
+            log::debug!("connection to {destination_string} errored: {error}",)
+        })
     });
 
     Ok(())

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 use crate::tunnel::{InTunnel, TransportType, TunnelId};
 
@@ -9,6 +9,12 @@ pub struct DirectInTunnel {
 impl DirectInTunnel {
     pub fn new(traffic_mark: u32) -> Self {
         Self { traffic_mark }
+    }
+}
+
+impl fmt::Display for DirectInTunnel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "DIRECT")
     }
 }
 

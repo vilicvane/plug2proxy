@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{fmt, net::SocketAddr, sync::Arc};
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
@@ -23,6 +23,16 @@ impl PunchQuicInTunnel {
             labels,
             priority,
             connection,
+        }
+    }
+}
+
+impl fmt::Display for PunchQuicInTunnel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.labels.is_empty() {
+            write!(formatter, "{}", self.id)
+        } else {
+            write!(formatter, "{} ({})", self.id, self.labels.join(","))
         }
     }
 }
@@ -121,7 +131,7 @@ impl OutTunnel for PunchQuicOutTunnel {
                     Err(error) => match error {
                         quinn::ConnectionError::TimedOut => {
                             if self.is_closed() {
-                                return Err(anyhow::anyhow!("connection closed."));
+                                return Err(anyhow::anyhow!("quic connection closed."));
                             }
 
                             continue;
