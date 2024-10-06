@@ -10,9 +10,8 @@ pub trait InTunnel: Display + Send + Sync {
 
     async fn connect(
         &self,
-        r#type: TransportType,
-        destination_hostname: String,
         destination_address: SocketAddr,
+        destination_name: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -30,8 +29,7 @@ pub trait OutTunnel: Send + Sync {
     async fn accept(
         &self,
     ) -> anyhow::Result<(
-        TransportType,
-        (String, u16),
+        (SocketAddr, Option<String>),
         (
             Box<dyn tokio::io::AsyncRead + Send + Unpin>,
             Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -39,14 +37,6 @@ pub trait OutTunnel: Send + Sync {
     )>;
 
     fn is_closed(&self) -> bool;
-}
-
-#[derive(Debug, derive_more::Display)]
-pub enum TransportType {
-    #[display("UDP")]
-    Udp,
-    #[display("TCP")]
-    Tcp,
 }
 
 #[derive(

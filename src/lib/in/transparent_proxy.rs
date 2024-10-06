@@ -11,6 +11,7 @@ use rusqlite::OptionalExtension;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
+    common::get_destination_string,
     config::MatchServerConfig,
     punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
     r#in::dns_resolver::convert_to_socket_addresses,
@@ -258,12 +259,7 @@ async fn handle_in_tcp_stream(
         (destination, None, labels)
     };
 
-    let destination_string = format!(
-        "{}{}",
-        destination,
-        name.as_ref()
-            .map_or_else(|| "".to_owned(), |name| format!(" ({})", name))
-    );
+    let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
         "routing {} with labels {}...",
@@ -279,8 +275,6 @@ async fn handle_in_tcp_stream(
         return Ok(());
     };
 
-    let destination_hostname = name.unwrap_or(destination.ip().to_string());
-
     log::info!("connecting {destination_string} via {tunnel}...");
 
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
@@ -289,13 +283,8 @@ async fn handle_in_tcp_stream(
         let tunnel = Arc::clone(&tunnel);
 
         async move {
-            let (mut tunnel_recv_stream, mut tunnel_send_stream) = tunnel
-                .connect(
-                    crate::tunnel::TransportType::Tcp,
-                    destination_hostname,
-                    destination,
-                )
-                .await?;
+            let (mut tunnel_recv_stream, mut tunnel_send_stream) =
+                tunnel.connect(destination, name).await?;
 
             copy_bidirectional(
                 (&mut in_recv_stream, &mut tunnel_send_stream),

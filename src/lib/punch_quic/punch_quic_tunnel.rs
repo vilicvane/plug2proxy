@@ -1,8 +1,12 @@
-use std::{fmt, net::SocketAddr, sync::Arc};
+use std::{
+    fmt,
+    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    sync::Arc,
+};
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
-use crate::tunnel::{InTunnel, OutTunnel, TransportType, TunnelId};
+use crate::tunnel::{InTunnel, OutTunnel, TunnelId};
 
 pub struct PunchQuicInTunnel {
     id: TunnelId,
@@ -53,37 +57,41 @@ impl InTunnel for PunchQuicInTunnel {
 
     async fn connect(
         &self,
-        r#type: TransportType,
-        destination_hostname: String,
         destination_address: SocketAddr,
+        destination_name: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn AsyncRead + Send + Unpin>,
         Box<dyn AsyncWrite + Send + Unpin>,
     )> {
         let (mut send_stream, recv_stream) = self.connection.open_bi().await?;
 
-        let head_buf = {
-            let mut buf = Vec::new();
+        let head = {
+            let mut head = Vec::<u8>::new();
 
-            buf.push(match r#type {
-                TransportType::Udp => 0b0000_0000,
-                TransportType::Tcp => 0b0000_0001,
-            });
+            match destination_address {
+                SocketAddr::V4(address) => {
+                    head.push(0b_0000_0000);
+                    head.extend_from_slice(&address.ip().octets());
+                }
+                SocketAddr::V6(address) => {
+                    head.push(0b_1000_0000);
+                    head.extend_from_slice(&address.ip().octets());
+                }
+            }
 
-            let destination_hostname = destination_hostname.as_bytes();
+            head.extend_from_slice(&destination_address.port().to_be_bytes());
 
-            let destination_hostname_length = destination_hostname.len();
+            let destination_name = destination_name.unwrap_or_else(|| "".to_owned());
 
-            assert!(destination_hostname_length <= u8::MAX as usize);
+            let destination_name_length: u8 = destination_name.len().try_into()?;
 
-            buf.push(destination_hostname_length as u8);
-            buf.extend_from_slice(destination_hostname);
-            buf.extend_from_slice(&destination_address.port().to_be_bytes());
+            head.push(destination_name_length);
+            head.extend_from_slice(destination_name.as_bytes());
 
-            buf
+            head
         };
 
-        send_stream.write_all(&head_buf).await?;
+        send_stream.write_all(&head).await?;
 
         Ok((Box::new(recv_stream), Box::new(send_stream)))
     }
@@ -117,8 +125,7 @@ impl OutTunnel for PunchQuicOutTunnel {
     async fn accept(
         &self,
     ) -> anyhow::Result<(
-        TransportType,
-        (String, u16),
+        (SocketAddr, Option<String>),
         (
             Box<dyn AsyncRead + Send + Unpin>,
             Box<dyn AsyncWrite + Send + Unpin>,
@@ -142,32 +149,38 @@ impl OutTunnel for PunchQuicOutTunnel {
             }
         };
 
-        let (r#type, destination_hostname, destination_port) = {
-            let type_byte = recv_stream.read_u8().await?;
+        let destination_tuple = {
+            let option_byte = recv_stream.read_u8().await?;
 
-            let destination_hostname_length = recv_stream.read_u8().await? as usize;
-            let destination_hostname = {
-                let mut buf = vec![0; destination_hostname_length];
-
-                recv_stream.read_exact(&mut buf).await?;
-
-                String::from_utf8(buf)?
+            let destination_address = match option_byte & 0b_1000_0000 {
+                0 => SocketAddr::V4(SocketAddrV4::new(
+                    recv_stream.read_u32().await?.into(),
+                    recv_stream.read_u16().await?,
+                )),
+                _ => SocketAddr::V6(SocketAddrV6::new(
+                    recv_stream.read_u128().await?.into(),
+                    recv_stream.read_u16().await?,
+                    0,
+                    0,
+                )),
             };
-            let destination_port = recv_stream.read_u16().await?;
 
-            (
-                match type_byte & 0b0000_0001 {
-                    0 => TransportType::Udp,
-                    _ => TransportType::Tcp,
-                },
-                destination_hostname,
-                destination_port,
-            )
+            let destination_name_length = recv_stream.read_u8().await? as usize;
+            let destination_name = if destination_name_length == 0 {
+                None
+            } else {
+                let mut buffer = vec![0; destination_name_length];
+
+                recv_stream.read_exact(&mut buffer).await?;
+
+                Some(String::from_utf8(buffer)?)
+            };
+
+            (destination_address, destination_name)
         };
 
         Ok((
-            r#type,
-            (destination_hostname, destination_port),
+            destination_tuple,
             (Box::new(recv_stream), Box::new(send_stream)),
         ))
     }

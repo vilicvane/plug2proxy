@@ -1,6 +1,6 @@
 use std::{fmt, net::SocketAddr};
 
-use crate::tunnel::{InTunnel, TransportType, TunnelId};
+use crate::tunnel::{InTunnel, TunnelId};
 
 pub struct DirectInTunnel {
     traffic_mark: u32,
@@ -34,48 +34,40 @@ impl InTunnel for DirectInTunnel {
 
     async fn connect(
         &self,
-        r#type: TransportType,
-        _destination_hostname: String,
         destination_address: SocketAddr,
+        _destination_name: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     )> {
-        match r#type {
-            TransportType::Udp => {
-                unimplemented!()
+        let stream = match destination_address {
+            SocketAddr::V4(_) => {
+                let socket = tokio::net::TcpSocket::new_v4()?;
+
+                nix::sys::socket::setsockopt(
+                    &socket,
+                    nix::sys::socket::sockopt::Mark,
+                    &self.traffic_mark,
+                )?;
+
+                socket.connect(destination_address).await?
             }
-            TransportType::Tcp => {
-                let stream = match destination_address {
-                    SocketAddr::V4(_) => {
-                        let socket = tokio::net::TcpSocket::new_v4()?;
+            SocketAddr::V6(_) => {
+                let socket = tokio::net::TcpSocket::new_v6()?;
 
-                        nix::sys::socket::setsockopt(
-                            &socket,
-                            nix::sys::socket::sockopt::Mark,
-                            &self.traffic_mark,
-                        )?;
+                nix::sys::socket::setsockopt(
+                    &socket,
+                    nix::sys::socket::sockopt::Mark,
+                    &self.traffic_mark,
+                )?;
 
-                        socket.connect(destination_address).await?
-                    }
-                    SocketAddr::V6(_) => {
-                        let socket = tokio::net::TcpSocket::new_v6()?;
-
-                        nix::sys::socket::setsockopt(
-                            &socket,
-                            nix::sys::socket::sockopt::Mark,
-                            &self.traffic_mark,
-                        )?;
-
-                        socket.connect(destination_address).await?
-                    }
-                };
-
-                let (read, write) = stream.into_split();
-
-                Ok((Box::new(read), Box::new(write)))
+                socket.connect(destination_address).await?
             }
-        }
+        };
+
+        let (read, write) = stream.into_split();
+
+        Ok((Box::new(read), Box::new(write)))
     }
 
     async fn closed(&self) {
