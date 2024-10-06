@@ -6,7 +6,6 @@ use std::{
 };
 
 use futures::TryFutureExt;
-use itertools::Itertools;
 use rusqlite::OptionalExtension;
 use tokio::io::AsyncWriteExt;
 
@@ -231,17 +230,15 @@ async fn handle_in_tcp_stream(
                 name
             );
 
-            let real_address = SocketAddr::new(real_ip, destination.port());
+            let real_destination = SocketAddr::new(real_ip, destination.port());
 
             let region = geolite2.lookup(real_ip).await;
 
             let labels = router
-                .r#match(real_address, Some(name.clone()), region)
-                .await
-                .into_iter()
-                .collect_vec();
+                .r#match(real_destination, Some(name.clone()), region)
+                .await;
 
-            (real_address, Some(name), labels)
+            (real_destination, Some(name), labels)
         } else {
             log::warn!("fake ip {} not found.", destination.ip());
 
@@ -250,11 +247,7 @@ async fn handle_in_tcp_stream(
     } else {
         let region = geolite2.lookup(destination.ip()).await;
 
-        let labels = router
-            .r#match(destination, None, region)
-            .await
-            .into_iter()
-            .collect_vec();
+        let labels = router.r#match(destination, None, region).await;
 
         (destination, None, labels)
     };
@@ -262,13 +255,15 @@ async fn handle_in_tcp_stream(
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
-        "routing {} with labels {}...",
-        destination_string,
+        "routing {destination_string} with labels {}...",
         labels.join(",")
     );
 
     let Some(tunnel) = tunnel_manager.select_tunnel(&labels).await else {
-        log::warn!("no tunnel available for labels {}.", labels.join(","));
+        log::warn!(
+            "connection to {destination_string} via {} rejected cause no matching tunnel.",
+            labels.join(",")
+        );
 
         stream.shutdown().await?;
 

@@ -37,14 +37,21 @@ impl Router {
     ) -> Vec<String> {
         let rules = self.rules_cache.lock().await;
 
-        let labels = rules
+        rules
             .iter()
-            .flat_map(|rule| rule.r#match(address, &domain, &region).unwrap_or_default())
+            .fold(Vec::new(), |mut labels, rule| {
+                if let Some(matching_labels) =
+                    rule.r#match(address, &domain, &region, !labels.is_empty())
+                {
+                    labels.extend_from_slice(matching_labels);
+                }
+
+                labels
+            })
+            .iter()
             .unique()
             .cloned()
-            .collect_vec();
-
-        labels
+            .collect_vec()
     }
 
     pub async fn register_tunnel(&self, id: TunnelId, rules: Vec<OutRuleConfig>, priority: i64) {

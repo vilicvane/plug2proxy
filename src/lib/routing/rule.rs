@@ -8,6 +8,7 @@ pub trait Rule: Send + Sync {
         address: SocketAddr,
         domain: &Option<String>,
         region: &Option<String>,
+        any_matched: bool,
     ) -> Option<&[String]>;
 }
 
@@ -31,6 +32,7 @@ impl Rule for GeoIpRule {
         _address: SocketAddr,
         _domain: &Option<String>,
         region: &Option<String>,
+        _any_matched: bool,
     ) -> Option<&[String]> {
         if let Some(region) = region {
             let mut condition = self
@@ -71,6 +73,7 @@ impl Rule for DomainRule {
         _address: SocketAddr,
         domain: &Option<String>,
         _region: &Option<String>,
+        _any_matched: bool,
     ) -> Option<&[String]> {
         if let Some(domain) = domain {
             let mut condition = self.matches.iter().any(|pattern| pattern.is_match(domain));
@@ -105,7 +108,12 @@ impl Rule for FallbackRule {
         _address: SocketAddr,
         _domain: &Option<String>,
         _region: &Option<String>,
+        any_matched: bool,
     ) -> Option<&[String]> {
-        Some(&self.labels)
+        if any_matched {
+            None
+        } else {
+            Some(&self.labels)
+        }
     }
 }
