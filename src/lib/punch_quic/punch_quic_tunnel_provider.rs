@@ -175,72 +175,66 @@ async fn configure_peer_socket(
     socket: tokio::net::UdpSocket,
     stun_server_addresses: &[SocketAddr],
 ) -> anyhow::Result<(tokio::net::UdpSocket, SocketAddr)> {
-    async fn inner(
-        socket: tokio::net::UdpSocket,
-        stun_server_addresses: &[SocketAddr],
-    ) -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
-        let socket = Arc::new(socket);
+    let socket = Arc::new(socket);
 
+    let address = {
         let stun_client_conn = Arc::new(ConnWrapper::new(socket.clone()));
 
         let mut stun_client = stun::client::ClientBuilder::new()
             .with_conn(stun_client_conn.clone())
             .build()?;
 
-        let address = {
-            let (response_sender, mut response_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (response_sender, mut response_receiver) = tokio::sync::mpsc::unbounded_channel();
 
-            let mut message = stun::message::Message::new();
+        let mut message = stun::message::Message::new();
 
-            message.build(&[
-                Box::new(stun::agent::TransactionId::new()),
-                Box::new(stun::message::BINDING_REQUEST),
-            ])?;
+        message.build(&[
+            Box::new(stun::agent::TransactionId::new()),
+            Box::new(stun::message::BINDING_REQUEST),
+        ])?;
 
-            let response_sender = Arc::new(response_sender);
+        let response_sender = Arc::new(response_sender);
 
-            let mut address = None;
+        let mut address = None;
 
-            for stun_server_address in stun_server_addresses {
-                stun_client_conn.connect(*stun_server_address).await?;
+        for stun_server_address in stun_server_addresses {
+            stun_client_conn.connect(*stun_server_address).await?;
 
-                stun_client
-                    .send(&message, Some(response_sender.clone()))
-                    .await?;
+            stun_client
+                .send(&message, Some(response_sender.clone()))
+                .await?;
 
-                let body = tokio::select! {
-                    Some(response) = response_receiver.recv() => response.event_body?,
-                    _ = tokio::time::sleep(STUN_RESPONSE_TIMEOUT) => continue,
-                    else => continue,
-                };
+            let body = tokio::select! {
+                Some(response) = response_receiver.recv() => response.event_body?,
+                _ = tokio::time::sleep(STUN_RESPONSE_TIMEOUT) => continue,
+                else => continue,
+            };
 
-                let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
+            let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
 
-                xor_addr.get_from(&body)?;
+            xor_addr.get_from(&body)?;
 
-                address = Some(SocketAddr::new(xor_addr.ip, xor_addr.port));
+            address = Some(SocketAddr::new(xor_addr.ip, xor_addr.port));
 
-                break;
-            }
-
-            address
-                .ok_or_else(|| anyhow::anyhow!("failed to get public address from stun server."))?
-        };
+            break;
+        }
 
         stun_client.close().await?;
 
-        Ok((socket, address))
-    }
+        address.ok_or_else(|| anyhow::anyhow!("failed to get public address from stun server."))?
+    };
 
-    let (socket, address) = inner(socket, stun_server_addresses).await?;
+    let mut socket = socket;
 
-    // `stun_client` does a spawn internally, and loops till close, so yield now
-    // and give it a chance to drop the socket reference.
-    //
-    // But I don't know why I have to put this after `inner()` call.
-    tokio::task::yield_now().await;
-
-    let socket = Arc::try_unwrap(socket).unwrap();
+    let socket = loop {
+        match Arc::try_unwrap(socket) {
+            Ok(socket) => break socket,
+            Err(socket_arc) => {
+                socket = socket_arc;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+    };
 
     Ok((socket, address))
 }
