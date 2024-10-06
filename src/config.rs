@@ -8,7 +8,7 @@ use plug2proxy::{
 
 use crate::constants::{
     fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
-    transparent_proxy_address_default,
+    transparent_proxy_address_default, transparent_proxy_traffic_mark_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -54,12 +54,15 @@ impl Default for InFakeIpDnsConfig {
 pub struct InTransparentProxyConfig {
     #[serde(default = "transparent_proxy_address_default")]
     pub listen: SocketAddr,
+    #[serde(default = "transparent_proxy_traffic_mark_default")]
+    pub traffic_mark: u32,
 }
 
 impl Default for InTransparentProxyConfig {
     fn default() -> Self {
         Self {
             listen: transparent_proxy_address_default(),
+            traffic_mark: transparent_proxy_traffic_mark_default(),
         }
     }
 }

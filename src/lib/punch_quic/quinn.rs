@@ -2,7 +2,7 @@ use std::{net::UdpSocket, sync::Arc, time::Duration};
 
 use quinn::{
     crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, EndpointConfig, IdleTimeout,
-    ServerConfig, TokioRuntime, TransportConfig,
+    ServerConfig, TokioRuntime, TransportConfig, VarInt,
 };
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
@@ -60,6 +60,7 @@ fn create_transport_config() -> TransportConfig {
     let mut transport_config = TransportConfig::default();
 
     transport_config
+        .max_concurrent_bidi_streams(VarInt::from_u32(1024))
         .keep_alive_interval(Some(Duration::from_secs(5)))
         .max_idle_timeout(Some(
             IdleTimeout::try_from(Duration::from_secs(30)).unwrap(),

@@ -21,7 +21,11 @@ pub struct TunnelManager {
 }
 
 impl TunnelManager {
-    pub fn new(tunnel_provider: Box<dyn InTunnelProvider + Send>, router: Arc<Router>) -> Self {
+    pub fn new(
+        tunnel_provider: Box<dyn InTunnelProvider + Send>,
+        router: Arc<Router>,
+        traffic_mark: u32,
+    ) -> Self {
         let label_to_tunnels_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let accept_handle = tokio::spawn({
@@ -82,7 +86,7 @@ impl TunnelManager {
 
         Self {
             accept_handle: Mutex::new(Some(accept_handle)),
-            direct_tunnel: Arc::new(Box::new(DirectInTunnel::new())),
+            direct_tunnel: Arc::new(Box::new(DirectInTunnel::new(traffic_mark))),
             label_to_tunnels_map,
         }
     }
@@ -134,9 +138,9 @@ impl TunnelManager {
         label_to_tunnels_map.clear();
 
         for (_, tunnel) in tunnel_map.iter() {
-            let single_proxy_label_array = ["PROXY".to_owned()];
+            let extra_labels = ["PROXY".to_owned(), tunnel.id().to_string()];
 
-            let labels = tunnel.labels().iter().chain(&single_proxy_label_array);
+            let labels = tunnel.labels().iter().chain(&extra_labels);
 
             for label in labels {
                 label_to_tunnels_map

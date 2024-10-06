@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
                     dns_resolver,
                     r#in::transparent_proxy::Options {
                         listen_address: transparent_proxy.listen,
+                        traffic_mark: transparent_proxy.traffic_mark,
                         fake_ip_dns_db_path: &fake_ip_dns_db_path,
                         fake_ipv4_net: fake_ipv4_net_default(),
                         fake_ipv6_net: fake_ipv6_net_default(),

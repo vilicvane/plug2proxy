@@ -28,6 +28,10 @@ pub fn transparent_proxy_address_default() -> SocketAddr {
     "127.0.0.1:12345".parse().unwrap()
 }
 
+pub fn transparent_proxy_traffic_mark_default() -> u32 {
+    0xff
+}
+
 pub fn stun_server_addresses_default() -> Vec<String> {
     vec![
         "stun.l.google.com:19302".to_string(),

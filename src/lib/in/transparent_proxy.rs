@@ -25,6 +25,7 @@ use super::tunnel_manager::TunnelManager;
 
 pub struct Options<'a> {
     pub listen_address: SocketAddr,
+    pub traffic_mark: u32,
     pub fake_ip_dns_db_path: &'a PathBuf,
     pub fake_ipv4_net: ipnet::Ipv4Net,
     pub fake_ipv6_net: ipnet::Ipv6Net,
@@ -40,6 +41,7 @@ pub async fn up(
     dns_resolver: Arc<hickory_resolver::TokioAsyncResolver>,
     Options {
         listen_address,
+        traffic_mark,
         fake_ip_dns_db_path,
         fake_ipv4_net,
         fake_ipv6_net,
@@ -70,6 +72,7 @@ pub async fn up(
         match_server,
         PunchQuicInTunnelConfig {
             stun_server_addresses,
+            traffic_mark,
         },
     );
 
@@ -78,6 +81,7 @@ pub async fn up(
     let tunnel_manager = Arc::new(TunnelManager::new(
         Box::new(tunnel_provider),
         router.clone(),
+        traffic_mark,
     ));
 
     let tunnel_task = {
@@ -131,7 +135,8 @@ pub async fn up(
             log::info!("transparent proxy listening on {listen_address}...");
 
             while let Ok((stream, _)) = tcp_listener.accept().await {
-                let destination = get_tokio_tcp_stream_original_destination(&stream, IpFamily::V4)?;
+                let destination = get_tokio_tcp_stream_original_destination(&stream, IpFamily::V4)
+                    .unwrap_or_else(|_| stream.local_addr().unwrap());
 
                 handle_in_tcp_stream(
                     stream,
@@ -152,8 +157,11 @@ pub async fn up(
     };
 
     tokio::select! {
-        _ = tunnel_task => panic!("unexpected completion of tunnel task."),
-        _ = listen_task => Err(anyhow::anyhow!("listening ended unexpectedly.")),
+        _ = tunnel_task => Err(anyhow::anyhow!("unexpected completion of tunnel task.")),
+        result = listen_task => {
+            result?;
+            Err(anyhow::anyhow!("listening ended unexpectedly."))
+        },
     }?;
 
     Ok(())
@@ -266,7 +274,7 @@ async fn handle_in_tcp_stream(
         return Ok(());
     };
 
-    let (remote_hostname, remote_port) = tunnel.get_remote(destination, name);
+    let destination_hostname = name.unwrap_or(destination.ip().to_string());
 
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
 
@@ -277,8 +285,8 @@ async fn handle_in_tcp_stream(
             let (mut tunnel_recv_stream, mut tunnel_send_stream) = tunnel
                 .connect(
                     crate::tunnel::TransportType::Tcp,
-                    remote_hostname,
-                    remote_port,
+                    destination_hostname,
+                    destination,
                 )
                 .await?;
 

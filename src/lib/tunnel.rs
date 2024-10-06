@@ -8,13 +8,11 @@ pub trait InTunnel: Send + Sync {
 
     fn priority(&self) -> i64;
 
-    fn get_remote(&self, address: SocketAddr, name: Option<String>) -> (String, u16);
-
     async fn connect(
         &self,
         r#type: TransportType,
-        remote_hostname: String,
-        remote_port: u16,
+        destination_hostname: String,
+        destination_address: SocketAddr,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,

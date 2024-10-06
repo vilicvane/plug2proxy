@@ -49,6 +49,8 @@ pub async fn up(
     loop {
         match tunnel_provider.accept().await {
             Ok(tunnel) => {
+                log::info!("tunnel {} established.", tunnel.id());
+
                 tokio::spawn(handle_tunnel(tunnel));
             }
             Err(error) => {

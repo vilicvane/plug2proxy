@@ -24,11 +24,19 @@ iptables -t mangle -A REDSOCKS -p udp -j TPROXY --on-ip 127.0.0.1 --on-port 1234
 iptables -t mangle -A REDSOCKS -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 12345 --tproxy-mark 1 # 给 TCP 打标记 1，转发至 12345 端口
 iptables -t mangle -A PREROUTING -j REDSOCKS                                                      # 应用规则
 
-nft add table p2p
-nft add chain p2p prerouting { type filter hook prerouting priority 0 \; }
-nft add rule p2p prerouting ip daddr {127.0.0.1/32, 224.0.0.0/4, 255.255.255.255/32} return
-nft add rule p2p prerouting meta l4proto tcp ip daddr 192.168.0.0/16 return
-nft add rule p2p prerouting ip daddr 192.168.0.0/16 udp dport != 53 return
-nft add rule p2p prerouting mark 0xff return # 直连 0xff 流量
+nft add table plug2proxy
 
-nft add rule p2p prerouting ip daddr 198.18.0.0/15 tcp tproxy to 127.0.0.1:12345 mark set 1 accept
+nft add chain plug2proxy prerouting { type filter hook prerouting priority 0 \; }
+nft add rule plug2proxy prerouting ip daddr {127.0.0.1/32, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32} return
+nft add rule plug2proxy prerouting mark 0xff return # 直连 0xff 流量
+
+nft add rule plug2proxy prerouting ip daddr 198.18.0.0/15 meta l4proto tcp tproxy to 127.0.0.1:12345 mark set 1 accept
+
+nft add table plug2proxy
+nft add chain plug2proxy output { type route hook output priority 0 \; }
+nft add rule plug2proxy output ip daddr {127.0.0.1/32, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32} return
+nft add rule plug2proxy output mark 0xff return                   # 直连 0xff 流量
+nft add rule plug2proxy output meta l4proto tcp mark set 1 accept # 重路由至 prerouting
+
+nft add chain plug2proxy divert { type filter hook prerouting priority -150 \; }
+nft add rule plug2proxy divert meta l4proto tcp socket transparent 1 meta mark set 1 accept

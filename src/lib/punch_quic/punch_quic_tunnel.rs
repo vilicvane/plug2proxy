@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
@@ -8,23 +8,21 @@ pub struct PunchQuicInTunnel {
     id: TunnelId,
     labels: Vec<String>,
     priority: i64,
-    conn: quinn::Connection,
+    connection: quinn::Connection,
 }
 
 impl PunchQuicInTunnel {
     pub fn new(
         id: TunnelId,
-        mut labels: Vec<String>,
+        labels: Vec<String>,
         priority: i64,
-        conn: quinn::Connection,
+        connection: quinn::Connection,
     ) -> Self {
-        labels.push(id.to_string());
-
         PunchQuicInTunnel {
             id,
             labels,
             priority,
-            conn,
+            connection,
         }
     }
 }
@@ -43,23 +41,16 @@ impl InTunnel for PunchQuicInTunnel {
         self.priority
     }
 
-    fn get_remote(&self, address: SocketAddr, name: Option<String>) -> (String, u16) {
-        (
-            name.unwrap_or_else(|| address.ip().to_string()),
-            address.port(),
-        )
-    }
-
     async fn connect(
         &self,
         r#type: TransportType,
-        remote_hostname: String,
-        remote_port: u16,
+        destination_hostname: String,
+        destination_address: SocketAddr,
     ) -> anyhow::Result<(
         Box<dyn AsyncRead + Send + Unpin>,
         Box<dyn AsyncWrite + Send + Unpin>,
     )> {
-        let (mut send_stream, recv_stream) = self.conn.open_bi().await?;
+        let (mut send_stream, recv_stream) = self.connection.open_bi().await?;
 
         let head_buf = {
             let mut buf = Vec::new();
@@ -69,15 +60,15 @@ impl InTunnel for PunchQuicInTunnel {
                 TransportType::Tcp => 0b0000_0001,
             });
 
-            let remote_hostname = remote_hostname.as_bytes();
+            let destination_hostname = destination_hostname.as_bytes();
 
-            let remote_hostname_length = remote_hostname.len();
+            let destination_hostname_length = destination_hostname.len();
 
-            assert!(remote_hostname_length <= u8::MAX as usize);
+            assert!(destination_hostname_length <= u8::MAX as usize);
 
-            buf.push(remote_hostname_length as u8);
-            buf.extend_from_slice(remote_hostname);
-            buf.extend_from_slice(&remote_port.to_be_bytes());
+            buf.push(destination_hostname_length as u8);
+            buf.extend_from_slice(destination_hostname);
+            buf.extend_from_slice(&destination_address.port().to_be_bytes());
 
             buf
         };
@@ -88,11 +79,11 @@ impl InTunnel for PunchQuicInTunnel {
     }
 
     async fn closed(&self) {
-        self.conn.closed().await;
+        self.connection.closed().await;
     }
 
     fn is_closed(&self) -> bool {
-        self.conn.close_reason().is_some()
+        self.connection.close_reason().is_some()
     }
 }
 
@@ -141,32 +132,32 @@ impl OutTunnel for PunchQuicOutTunnel {
             }
         };
 
-        let (r#type, remote_hostname, remote_port) = {
+        let (r#type, destination_hostname, destination_port) = {
             let type_byte = recv_stream.read_u8().await?;
 
-            let remote_hostname_length = recv_stream.read_u8().await? as usize;
-            let remote_hostname = {
-                let mut buf = vec![0; remote_hostname_length];
+            let destination_hostname_length = recv_stream.read_u8().await? as usize;
+            let destination_hostname = {
+                let mut buf = vec![0; destination_hostname_length];
 
                 recv_stream.read_exact(&mut buf).await?;
 
                 String::from_utf8(buf)?
             };
-            let remote_port = recv_stream.read_u16().await?;
+            let destination_port = recv_stream.read_u16().await?;
 
             (
                 match type_byte & 0b0000_0001 {
                     0 => TransportType::Udp,
                     _ => TransportType::Tcp,
                 },
-                remote_hostname,
-                remote_port,
+                destination_hostname,
+                destination_port,
             )
         };
 
         Ok((
             r#type,
-            (remote_hostname, remote_port),
+            (destination_hostname, destination_port),
             (Box::new(recv_stream), Box::new(send_stream)),
         ))
     }

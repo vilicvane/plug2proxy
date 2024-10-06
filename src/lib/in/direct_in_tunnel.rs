@@ -2,11 +2,13 @@ use std::net::SocketAddr;
 
 use crate::tunnel::{InTunnel, TransportType, TunnelId};
 
-pub struct DirectInTunnel {}
+pub struct DirectInTunnel {
+    traffic_mark: u32,
+}
 
 impl DirectInTunnel {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(traffic_mark: u32) -> Self {
+        Self { traffic_mark }
     }
 }
 
@@ -24,15 +26,11 @@ impl InTunnel for DirectInTunnel {
         unimplemented!()
     }
 
-    fn get_remote(&self, address: SocketAddr, _name: Option<String>) -> (String, u16) {
-        (address.ip().to_string(), address.port())
-    }
-
     async fn connect(
         &self,
         r#type: TransportType,
-        remote_hostname: String,
-        remote_port: u16,
+        _destination_hostname: String,
+        destination_address: SocketAddr,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -42,9 +40,30 @@ impl InTunnel for DirectInTunnel {
                 unimplemented!()
             }
             TransportType::Tcp => {
-                let stream =
-                    tokio::net::TcpStream::connect(format!("{remote_hostname}:{remote_port}"))
-                        .await?;
+                let stream = match destination_address {
+                    SocketAddr::V4(_) => {
+                        let socket = tokio::net::TcpSocket::new_v4()?;
+
+                        nix::sys::socket::setsockopt(
+                            &socket,
+                            nix::sys::socket::sockopt::Mark,
+                            &self.traffic_mark,
+                        )?;
+
+                        socket.connect(destination_address).await?
+                    }
+                    SocketAddr::V6(_) => {
+                        let socket = tokio::net::TcpSocket::new_v6()?;
+
+                        nix::sys::socket::setsockopt(
+                            &socket,
+                            nix::sys::socket::sockopt::Mark,
+                            &self.traffic_mark,
+                        )?;
+
+                        socket.connect(destination_address).await?
+                    }
+                };
 
                 let (read, write) = stream.into_split();
 

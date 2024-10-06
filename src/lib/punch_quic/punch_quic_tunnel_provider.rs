@@ -24,6 +24,7 @@ use super::{
 
 pub struct PunchQuicInTunnelConfig {
     pub stun_server_addresses: Vec<SocketAddr>,
+    pub traffic_mark: u32,
 }
 
 pub struct PunchQuicInTunnelProvider {
@@ -48,7 +49,16 @@ impl PunchQuicInTunnelProvider {
 #[async_trait::async_trait]
 impl InTunnelProvider for PunchQuicInTunnelProvider {
     async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, Vec<OutRuleConfig>)> {
-        let (socket, in_address) = create_peer_socket(&self.config.stun_server_addresses).await?;
+        let socket = tokio::net::UdpSocket::bind("0:0").await?;
+
+        nix::sys::socket::setsockopt(
+            &socket,
+            nix::sys::socket::sockopt::Mark,
+            &self.config.traffic_mark,
+        )?;
+
+        let (socket, in_address) =
+            configure_peer_socket(socket, &self.config.stun_server_addresses).await?;
 
         let MatchOut {
             tunnel_id,
@@ -109,7 +119,10 @@ impl PunchQuicOutTunnelProvider {
 #[async_trait::async_trait]
 impl OutTunnelProvider for PunchQuicOutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
-        let (socket, out_address) = create_peer_socket(&self.config.stun_server_addresses).await?;
+        let socket = tokio::net::UdpSocket::bind("0:0").await?;
+
+        let (socket, out_address) =
+            configure_peer_socket(socket, &self.config.stun_server_addresses).await?;
 
         let MatchIn {
             id,
@@ -164,13 +177,15 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
 
 const STUN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-async fn create_peer_socket(
+async fn configure_peer_socket(
+    socket: tokio::net::UdpSocket,
     stun_server_addresses: &[SocketAddr],
 ) -> anyhow::Result<(tokio::net::UdpSocket, SocketAddr)> {
     async fn inner(
+        socket: tokio::net::UdpSocket,
         stun_server_addresses: &[SocketAddr],
     ) -> anyhow::Result<(Arc<tokio::net::UdpSocket>, SocketAddr)> {
-        let socket = Arc::new(tokio::net::UdpSocket::bind("0:0").await?);
+        let socket = Arc::new(socket);
 
         let stun_client_conn = Arc::new(ConnWrapper::new(socket.clone()));
 
@@ -223,7 +238,7 @@ async fn create_peer_socket(
         Ok((socket, address))
     }
 
-    let (socket, address) = inner(stun_server_addresses).await?;
+    let (socket, address) = inner(socket, stun_server_addresses).await?;
 
     // `stun_client` does a spawn internally, and loops till close, so yield now
     // and give it a chance to drop the socket reference.
