@@ -33,10 +33,13 @@ impl PunchQuicInTunnel {
 
 impl fmt::Display for PunchQuicInTunnel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.id.to_string();
+        let id_short = id.split('-').next().unwrap();
+
         if self.labels.is_empty() {
-            write!(formatter, "{}", self.id)
+            write!(formatter, "{id_short}",)
         } else {
-            write!(formatter, "{} ({})", self.id, self.labels.join(","))
+            write!(formatter, "{id_short} ({})", self.labels.join(","))
         }
     }
 }

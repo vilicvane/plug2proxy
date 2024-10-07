@@ -255,7 +255,7 @@ async fn handle_in_tcp_stream(
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
-        "routing {destination_string} with labels {}...",
+        "route {destination_string} with labels {}...",
         labels.join(",")
     );
 
@@ -270,7 +270,7 @@ async fn handle_in_tcp_stream(
         return Ok(());
     };
 
-    log::info!("connecting {destination_string} via {tunnel}...");
+    log::info!("connect {destination_string} via {tunnel}...");
 
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
 
