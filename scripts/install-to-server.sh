@@ -1,13 +1,9 @@
 #!/bin/bash
 
-build=false
 target=""
 
-while getopts "t::m:c:d:b" flag; do
+while getopts "t::m:c:d:" flag; do
     case $flag in
-    b)
-        build=true
-        ;;
     t)
         target=$OPTARG
         ;;
@@ -21,19 +17,11 @@ while getopts "t::m:c:d:b" flag; do
         destination=$OPTARG
         ;;
     ?)
-        echo "Usage: [-t target] -m <mode> -c <resource,...> -d <destination> [-b]"
+        echo "Usage: [-t target] -m <mode> -c <resource,...> -d <destination>"
         exit 1
         ;;
     esac
 done
-
-if [ "$build" = true ]; then
-    if [ -n "$target" ]; then
-        cargo build --target $target --release
-    else
-        cargo build --release
-    fi
-fi
 
 if [ -n "$target" ]; then
     target_path="target/$target/release"

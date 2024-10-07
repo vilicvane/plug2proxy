@@ -2,6 +2,9 @@
     "editor.tabSize": 4,
     "rust-analyzer.check.command": "clippy",
     "prettier.tabWidth": 4,
+    "markdownlint.config": {
+        "MD030": false
+    },
     "cSpell.words": [
         "addrs",
         "AUTOINCREMENT",
