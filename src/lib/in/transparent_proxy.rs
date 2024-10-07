@@ -247,22 +247,24 @@ async fn handle_in_tcp_stream(
 
             let real_destination = SocketAddr::new(real_ip, destination.port());
 
-            let region = geolite2.lookup(real_ip).await;
+            let domain = Some(name);
+
+            let region_codes = geolite2.lookup(real_ip).await;
 
             let labels_groups = router
-                .r#match(real_destination, Some(name.clone()), region)
+                .r#match(real_destination, &domain, &region_codes)
                 .await;
 
-            (real_destination, Some(name), labels_groups)
+            (real_destination, domain, labels_groups)
         } else {
             log::warn!("fake ip {} not found.", destination.ip());
 
             (destination, None, Vec::new())
         }
     } else {
-        let region = geolite2.lookup(destination.ip()).await;
+        let region_codes = geolite2.lookup(destination.ip()).await;
 
-        let labels_groups = router.r#match(destination, None, region).await;
+        let labels_groups = router.r#match(destination, &None, &region_codes).await;
 
         (destination, None, labels_groups)
     };

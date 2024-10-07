@@ -54,14 +54,26 @@ impl GeoLite2 {
         }
     }
 
-    pub async fn lookup(&self, ip: IpAddr) -> Option<String> {
+    pub async fn lookup(&self, ip: IpAddr) -> Option<Vec<String>> {
         let reader = self.reader.lock().await;
         let reader = reader.as_ref()?;
 
         if let Result::<maxminddb::geoip2::Country, _>::Ok(result) = reader.lookup(ip) {
-            result
-                .country
-                .and_then(|country| country.iso_code.map(|code| code.to_owned()))
+            let mut codes = Vec::new();
+
+            if let Some(country) = result.country {
+                if let Some(iso_code) = country.iso_code {
+                    codes.push(iso_code.to_owned());
+                }
+            }
+
+            if let Some(continent) = result.continent {
+                if let Some(code) = continent.code {
+                    codes.push(code.to_owned());
+                }
+            }
+
+            Some(codes)
         } else {
             None
         }

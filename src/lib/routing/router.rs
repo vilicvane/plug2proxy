@@ -32,8 +32,8 @@ impl Router {
     pub async fn r#match(
         &self,
         address: SocketAddr,
-        domain: Option<String>,
-        region: Option<String>,
+        domain: &Option<String>,
+        region_codes: &Option<Vec<String>>,
     ) -> Vec<Vec<String>> {
         let rules_groups = self.rules_groups_cache.lock().await;
 
@@ -45,8 +45,8 @@ impl Router {
                 let labels = rules.iter().fold(Vec::new(), |mut labels, rule| {
                     if let Some(matching_labels) = rule.r#match(
                         address,
-                        &domain,
-                        &region,
+                        domain,
+                        region_codes,
                         already_matched || !labels.is_empty(),
                     ) {
                         labels.extend_from_slice(matching_labels);

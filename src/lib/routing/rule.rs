@@ -7,7 +7,7 @@ pub trait Rule: Send + Sync {
         &self,
         address: SocketAddr,
         domain: &Option<String>,
-        region: &Option<String>,
+        region_codes: &Option<Vec<String>>,
         any_matched: bool,
     ) -> Option<&[String]>;
 }
@@ -31,27 +31,25 @@ impl Rule for GeoIpRule {
         &self,
         _address: SocketAddr,
         _domain: &Option<String>,
-        region: &Option<String>,
+        region_codes: &Option<Vec<String>>,
         _any_matched: bool,
     ) -> Option<&[String]> {
-        if let Some(region) = region {
+        region_codes.as_ref().and_then(|region_codes| {
             let mut condition = self
                 .matches
                 .iter()
-                .any(|match_region| match_region == region);
+                .any(|match_region| region_codes.iter().any(|region| region == match_region));
 
             if self.negate {
                 condition = !condition;
             }
 
             if condition {
-                Some(&self.labels)
+                Some(self.labels.as_slice())
             } else {
                 None
             }
-        } else {
-            None
-        }
+        })
     }
 }
 
@@ -73,7 +71,7 @@ impl Rule for AddressRule {
         &self,
         address: SocketAddr,
         _domain: &Option<String>,
-        _region: &Option<String>,
+        _region_codes: &Option<Vec<String>>,
         _any_matched: bool,
     ) -> Option<&[String]> {
         let port_matched = if let Some(match_ports) = &self.match_ports {
@@ -119,14 +117,14 @@ impl Rule for DomainRule {
         &self,
         _address: SocketAddr,
         domain: &Option<String>,
-        _region: &Option<String>,
+        _region_codes: &Option<Vec<String>>,
         _any_matched: bool,
     ) -> Option<&[String]> {
         if let Some(domain) = domain {
-            let mut condition = self.matches.iter().any(|condition_domain| {
-                domain == condition_domain
-                    || domain.ends_with(condition_domain)
-                        && domain[..domain.len() - condition_domain.len()].ends_with('.')
+            let mut condition = self.matches.iter().any(|match_domain| {
+                domain == match_domain
+                    || domain.ends_with(match_domain)
+                        && domain[..domain.len() - match_domain.len()].ends_with('.')
             });
 
             if self.negate {
@@ -161,7 +159,7 @@ impl Rule for DomainPatternRule {
         &self,
         _address: SocketAddr,
         domain: &Option<String>,
-        _region: &Option<String>,
+        _region_codes: &Option<Vec<String>>,
         _any_matched: bool,
     ) -> Option<&[String]> {
         if let Some(domain) = domain {
@@ -196,7 +194,7 @@ impl Rule for FallbackRule {
         &self,
         _address: SocketAddr,
         _domain: &Option<String>,
-        _region: &Option<String>,
+        _region_codes: &Option<Vec<String>>,
         any_matched: bool,
     ) -> Option<&[String]> {
         if any_matched {
