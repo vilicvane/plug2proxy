@@ -9,7 +9,7 @@ use plug2proxy::routing::config::{InFallbackRuleConfig, InRuleConfig};
 pub const DATA_DIR_DEFAULT: &str = ".plug2proxy";
 
 pub fn dns_server_addresses_default() -> Vec<String> {
-    vec!["119.29.29.29".to_string(), "119.28.28.28".to_string()]
+    vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]
 }
 
 pub fn fake_ip_dns_address_default() -> SocketAddr {
