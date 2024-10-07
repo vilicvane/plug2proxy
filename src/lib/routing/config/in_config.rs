@@ -1,7 +1,7 @@
 use std::str::FromStr as _;
 
 use crate::{
-    routing::rule::{DomainRule, DynRuleBox, FallbackRule, GeoIpRule},
+    routing::rule::{DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule},
     utils::OneOrMany,
 };
 
@@ -12,6 +12,8 @@ pub enum InRuleConfig {
     GeoIp(InGeoIpRuleConfig),
     #[serde(rename = "domain")]
     Domain(InDomainRuleConfig),
+    #[serde(rename = "domain_pattern")]
+    DomainPattern(InDomainPatternRuleConfig),
     #[serde(rename = "fallback")]
     Fallback(InFallbackRuleConfig),
 }
@@ -26,6 +28,12 @@ impl InRuleConfig {
                 negate: config.negate,
             }),
             InRuleConfig::Domain(config) => Box::new(DomainRule {
+                matches: config.r#match.into_vec(),
+                labels: config.out.into_vec(),
+                priority: i64::MIN,
+                negate: config.negate,
+            }),
+            InRuleConfig::DomainPattern(config) => Box::new(DomainPatternRule {
                 matches: config
                     .r#match
                     .into_vec()
@@ -33,7 +41,10 @@ impl InRuleConfig {
                     .filter_map(|pattern| {
                         regex::Regex::from_str(&pattern)
                             .inspect_err(|_| {
-                                log::warn!("invalid domain rule match pattern: {}", pattern);
+                                log::warn!(
+                                    "invalid domain_pattern rule match pattern: {}",
+                                    pattern
+                                );
                             })
                             .ok()
                     })
@@ -59,6 +70,14 @@ pub struct InGeoIpRuleConfig {
 
 #[derive(Clone, serde::Deserialize)]
 pub struct InDomainRuleConfig {
+    pub r#match: OneOrMany<String>,
+    #[serde(default)]
+    pub negate: bool,
+    pub out: OneOrMany<String>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub struct InDomainPatternRuleConfig {
     pub r#match: OneOrMany<String>,
     #[serde(default)]
     pub negate: bool,

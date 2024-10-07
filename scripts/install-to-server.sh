@@ -24,6 +24,12 @@ while getopts "t::m:c:d:" flag; do
 done
 
 if [ -n "$target" ]; then
+    cargo build --target $target --release
+else
+    cargo build --release
+fi
+
+if [ -n "$target" ]; then
     target_path="target/$target/release"
 else
     target_path="target/release"

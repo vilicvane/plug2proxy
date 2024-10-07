@@ -57,13 +57,55 @@ impl Rule for GeoIpRule {
 
 #[derive(Clone)]
 pub struct DomainRule {
-    pub matches: Vec<regex::Regex>,
+    pub matches: Vec<String>,
     pub labels: Vec<String>,
     pub priority: i64,
     pub negate: bool,
 }
 
 impl Rule for DomainRule {
+    fn priority(&self) -> i64 {
+        self.priority
+    }
+
+    fn r#match(
+        &self,
+        _address: SocketAddr,
+        domain: &Option<String>,
+        _region: &Option<String>,
+        _any_matched: bool,
+    ) -> Option<&[String]> {
+        if let Some(domain) = domain {
+            let mut condition = self.matches.iter().any(|condition_domain| {
+                domain == condition_domain
+                    || domain.ends_with(condition_domain)
+                        && domain[..domain.len() - condition_domain.len()].ends_with('.')
+            });
+
+            if self.negate {
+                condition = !condition;
+            }
+
+            if condition {
+                Some(&self.labels)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DomainPatternRule {
+    pub matches: Vec<regex::Regex>,
+    pub labels: Vec<String>,
+    pub priority: i64,
+    pub negate: bool,
+}
+
+impl Rule for DomainPatternRule {
     fn priority(&self) -> i64 {
         self.priority
     }
