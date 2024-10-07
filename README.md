@@ -1,5 +1,5 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-0969da?style=flat-square)](./LICENSE)
-[![Discord](https://img.shields.io/badge/chat-discord-5662f6?style=flat-square)](https://discord.gg/wEVn2qcf8h)
+[![Discord](https://img.shields.io/badge/chat-discord-5662f6?style=flat-square)](https://discord.com/invite/vanVrDwSkS)
 
 # Plug2Proxy
 
@@ -29,6 +29,8 @@ Currently only IPv4 TCP is supported, will probably add UDP support soon and the
 The configuration file provided by the installation template is located at `/etc/plug2proxy/config.json`.
 
 If you are using the binary directly, just do `plug2proxy config.json`.
+
+Checkout [src/config.rs](src/config.rs) for the complete configuration options available.
 
 ### IN Server
 
