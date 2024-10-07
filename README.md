@@ -3,6 +3,8 @@
 
 # Plug2Proxy
 
+> Checkout the original Node.js version at branch [nodejs](https://github.com/vilicvane/plug2proxy/tree/nodejs).
+
 Plug2Proxy is a transparent proxy **currently in development** that:
 
 -   Connects IN to OUT with punched UDP (QUIC) tunnels.
