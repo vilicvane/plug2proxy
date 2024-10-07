@@ -1,8 +1,12 @@
 use std::str::FromStr as _;
 
+use itertools::Itertools;
+
 use crate::{
-    routing::rule::{DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule},
-    utils::OneOrMany,
+    routing::rule::{
+        AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule,
+    },
+    utils::{net::parse_ip_net, OneOrMany},
 };
 
 #[derive(Clone, serde::Deserialize)]
@@ -10,6 +14,8 @@ use crate::{
 pub enum InRuleConfig {
     #[serde(rename = "geoip")]
     GeoIp(InGeoIpRuleConfig),
+    #[serde(rename = "address")]
+    Address(InAddressRuleConfig),
     #[serde(rename = "domain")]
     Domain(InDomainRuleConfig),
     #[serde(rename = "domain_pattern")]
@@ -27,6 +33,21 @@ impl InRuleConfig {
                 priority: i64::MIN,
                 negate: config.negate,
             }),
+            InRuleConfig::Address(config) => Box::new(AddressRule {
+                match_ips: config.match_ip.map(|match_ip| {
+                    match_ip
+                        .into_vec()
+                        .iter()
+                        .map(|ip| {
+                            parse_ip_net(ip).unwrap_or_else(|_| panic!("invalid ip address: {ip}"))
+                        })
+                        .collect_vec()
+                }),
+                match_ports: config.match_port.map(|match_port| match_port.into_vec()),
+                labels: config.out.into_vec(),
+                priority: i64::MIN,
+                negate: config.negate,
+            }),
             InRuleConfig::Domain(config) => Box::new(DomainRule {
                 matches: config.r#match.into_vec(),
                 labels: config.out.into_vec(),
@@ -38,15 +59,10 @@ impl InRuleConfig {
                     .r#match
                     .into_vec()
                     .into_iter()
-                    .filter_map(|pattern| {
-                        regex::Regex::from_str(&pattern)
-                            .inspect_err(|_| {
-                                log::warn!(
-                                    "invalid domain_pattern rule match pattern: {}",
-                                    pattern
-                                );
-                            })
-                            .ok()
+                    .map(|pattern| {
+                        regex::Regex::from_str(&pattern).unwrap_or_else(|_| {
+                            panic!("invalid domain_pattern rule match pattern: {pattern}")
+                        })
                     })
                     .collect::<Vec<_>>(),
                 labels: config.out.into_vec(),
@@ -63,6 +79,15 @@ impl InRuleConfig {
 #[derive(Clone, serde::Deserialize)]
 pub struct InGeoIpRuleConfig {
     pub r#match: OneOrMany<String>,
+    #[serde(default)]
+    pub negate: bool,
+    pub out: OneOrMany<String>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub struct InAddressRuleConfig {
+    pub match_ip: Option<OneOrMany<String>>,
+    pub match_port: Option<OneOrMany<u16>>,
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<String>,
