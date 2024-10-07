@@ -1,0 +1,11 @@
+#!/bin/sh
+
+table=100
+
+if [ -z "$(ip route list table $table)" ]; then
+  ip route add local default dev lo table $table
+fi
+
+if [ -z "$(ip rule list table $table)" ]; then
+  ip rule add fwmark 1 table $table
+fi

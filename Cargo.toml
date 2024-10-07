@@ -12,14 +12,6 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
-# don't known why this isn't working, have to use environment variable.
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-
-[target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-musl-gcc"
-
 [lints.clippy]
 collapsible_else_if = "allow"
 disallowed_macros = "warn"

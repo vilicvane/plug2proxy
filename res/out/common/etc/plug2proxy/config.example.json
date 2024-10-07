@@ -1,0 +1,6 @@
+{
+    "mode": "out",
+    "tunneling": {
+        "match_server": "redis://example/"
+    }
+}
