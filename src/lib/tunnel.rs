@@ -4,6 +4,8 @@ use std::{fmt::Display, net::SocketAddr};
 pub trait InTunnel: Display + Send + Sync {
     fn id(&self) -> TunnelId;
 
+    fn out_id(&self) -> uuid::Uuid;
+
     fn labels(&self) -> &[String];
 
     fn priority(&self) -> i64;

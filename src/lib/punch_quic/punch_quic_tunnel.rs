@@ -10,6 +10,7 @@ use crate::tunnel::{InTunnel, OutTunnel, TunnelId};
 
 pub struct PunchQuicInTunnel {
     id: TunnelId,
+    out_id: uuid::Uuid,
     labels: Vec<String>,
     priority: i64,
     connection: quinn::Connection,
@@ -18,12 +19,14 @@ pub struct PunchQuicInTunnel {
 impl PunchQuicInTunnel {
     pub fn new(
         id: TunnelId,
+        out_id: uuid::Uuid,
         labels: Vec<String>,
         priority: i64,
         connection: quinn::Connection,
     ) -> Self {
         PunchQuicInTunnel {
             id,
+            out_id,
             labels,
             priority,
             connection,
@@ -48,6 +51,10 @@ impl fmt::Display for PunchQuicInTunnel {
 impl InTunnel for PunchQuicInTunnel {
     fn id(&self) -> TunnelId {
         self.id
+    }
+
+    fn out_id(&self) -> uuid::Uuid {
+        self.out_id
     }
 
     fn labels(&self) -> &[String] {

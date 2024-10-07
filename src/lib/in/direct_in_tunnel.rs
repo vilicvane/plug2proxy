@@ -24,6 +24,10 @@ impl InTunnel for DirectInTunnel {
         unimplemented!()
     }
 
+    fn out_id(&self) -> uuid::Uuid {
+        unimplemented!()
+    }
+
     fn labels(&self) -> &[String] {
         unimplemented!()
     }

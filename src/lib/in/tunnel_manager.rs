@@ -171,7 +171,7 @@ impl TunnelManager {
         label_to_tunnels_map.clear();
 
         for (_, tunnel) in tunnel_map.iter() {
-            let extra_labels = ["PROXY".to_owned(), tunnel.id().to_string()];
+            let extra_labels = ["PROXY".to_owned(), tunnel.out_id().to_string()];
 
             let labels = tunnel.labels().iter().chain(&extra_labels);
 

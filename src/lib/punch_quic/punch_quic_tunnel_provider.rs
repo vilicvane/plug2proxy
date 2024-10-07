@@ -61,12 +61,12 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             configure_peer_socket(socket, &self.config.stun_server_addresses).await?;
 
         let MatchOut {
+            id,
             tunnel_id,
             tunnel_labels,
             tunnel_priority,
             routing_rules,
             address,
-            ..
         } = self.match_server.match_out(self.id, in_address).await?;
 
         log::info!("matched OUT {address} as tunnel {tunnel_id}.");
@@ -77,7 +77,8 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
 
         let connection = endpoint.connect(address, "localhost")?.await?;
 
-        let tunnel = PunchQuicInTunnel::new(tunnel_id, tunnel_labels, tunnel_priority, connection);
+        let tunnel =
+            PunchQuicInTunnel::new(tunnel_id, id, tunnel_labels, tunnel_priority, connection);
 
         log::info!("tunnel {tunnel} established.");
 
