@@ -41,7 +41,7 @@ else
     target_path="target/release"
 fi
 
-rsync --mkpath --verbose $target_path/plug2proxy $destination:/usr/sbin/
+rsync --mkpath --times --verbose $target_path/plug2proxy $destination:/usr/sbin/
 
 expanded_resources=()
 
@@ -50,5 +50,5 @@ for resource in "${resources[@]}"; do
 done
 
 for resource in "${expanded_resources[@]}"; do
-    rsync --recursive --relative --mkpath --verbose $resource $destination:/
+    rsync --recursive --relative --mkpath --times --verbose $resource $destination:/
 done

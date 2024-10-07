@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
                             .map_or_else(stun_server_addresses_default, |address| address
                                 .into_vec()),
                         match_server_config: tunneling.match_server.into_config(),
+                        tunnel_connections: tunneling.connections,
                         routing_rules: routing.rules,
                         geolite2_cache_path: &geolite2_cache_path,
                         geolite2_url: routing.geolite2.url,

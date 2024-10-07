@@ -5,7 +5,8 @@ use std::{
     time::Duration,
 };
 
-use futures::TryFutureExt;
+use futures::{future::try_join_all, TryFutureExt};
+use itertools::Itertools;
 use rusqlite::OptionalExtension;
 use tokio::io::AsyncWriteExt;
 
@@ -15,6 +16,7 @@ use crate::{
     punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
     r#in::dns_resolver::convert_to_socket_addresses,
     routing::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
+    tunnel_provider::InTunnelProvider,
     utils::{
         io::copy_bidirectional,
         net::{get_tokio_tcp_stream_original_destination, IpFamily},
@@ -31,6 +33,7 @@ pub struct Options<'a> {
     pub fake_ipv6_net: ipnet::Ipv6Net,
     pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
+    pub tunnel_connections: usize,
     pub routing_rules: Vec<InRuleConfig>,
     pub geolite2_cache_path: &'a PathBuf,
     pub geolite2_url: String,
@@ -47,6 +50,7 @@ pub async fn up(
         fake_ipv6_net,
         stun_server_addresses,
         match_server_config,
+        tunnel_connections,
         routing_rules,
         geolite2_cache_path,
         geolite2_url,
@@ -55,31 +59,37 @@ pub async fn up(
 ) -> anyhow::Result<()> {
     log::info!("starting IN transparent proxy...");
 
-    let match_server = match_server_config.new_in_match_server()?;
+    let tunnel_providers = {
+        let match_server = Arc::new(match_server_config.new_in_match_server()?);
 
-    let stun_server_addresses = {
-        let mut resolved_addresses = Vec::new();
+        let stun_server_addresses = {
+            let mut resolved_addresses = Vec::new();
 
-        for address in stun_server_addresses {
+            for address in stun_server_addresses {
+                resolved_addresses
+                    .extend(convert_to_socket_addresses(address, &dns_resolver, None).await?);
+            }
+
             resolved_addresses
-                .extend(convert_to_socket_addresses(address, &dns_resolver, None).await?);
-        }
+        };
 
-        resolved_addresses
+        (0..tunnel_connections)
+            .map(|_| {
+                Box::new(PunchQuicInTunnelProvider::new(
+                    match_server.clone(),
+                    PunchQuicInTunnelConfig {
+                        stun_server_addresses: stun_server_addresses.clone(),
+                        traffic_mark,
+                    },
+                )) as Box<dyn InTunnelProvider + Send>
+            })
+            .collect_vec()
     };
-
-    let tunnel_provider = PunchQuicInTunnelProvider::new(
-        match_server,
-        PunchQuicInTunnelConfig {
-            stun_server_addresses,
-            traffic_mark,
-        },
-    );
 
     let router = Arc::new(Router::new(routing_rules));
 
     let tunnel_manager = Arc::new(TunnelManager::new(
-        Box::new(tunnel_provider),
+        tunnel_providers,
         router.clone(),
         traffic_mark,
     ));
@@ -88,9 +98,14 @@ pub async fn up(
         let tunnel_manager = Arc::clone(&tunnel_manager);
 
         async move {
-            let join_handle = tunnel_manager.accept_handle.lock().unwrap().take().unwrap();
+            let accept_handles = tunnel_manager
+                .accept_handles
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap();
 
-            join_handle.await?;
+            try_join_all(accept_handles).await?;
 
             #[allow(unreachable_code)]
             anyhow::Ok(())
@@ -200,7 +215,7 @@ async fn handle_in_tcp_stream(
         }
     };
 
-    let (destination, name, labels) = if let Some((r#type, id)) = fake_ip_type_and_id {
+    let (destination, name, labels_groups) = if let Some((r#type, id)) = fake_ip_type_and_id {
         let record: Option<(String, Vec<u8>)> = sqlite_connection
             .query_row(
                 "SELECT name, real_ip FROM records WHERE type = ? AND id = ?",
@@ -234,11 +249,11 @@ async fn handle_in_tcp_stream(
 
             let region = geolite2.lookup(real_ip).await;
 
-            let labels = router
+            let labels_groups = router
                 .r#match(real_destination, Some(name.clone()), region)
                 .await;
 
-            (real_destination, Some(name), labels)
+            (real_destination, Some(name), labels_groups)
         } else {
             log::warn!("fake ip {} not found.", destination.ip());
 
@@ -247,22 +262,22 @@ async fn handle_in_tcp_stream(
     } else {
         let region = geolite2.lookup(destination.ip()).await;
 
-        let labels = router.r#match(destination, None, region).await;
+        let labels_groups = router.r#match(destination, None, region).await;
 
-        (destination, None, labels)
+        (destination, None, labels_groups)
     };
 
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
         "route {destination_string} with labels {}...",
-        labels.join(",")
+        stringify_labels_groups(&labels_groups)
     );
 
-    let Some(tunnel) = tunnel_manager.select_tunnel(&labels).await else {
+    let Some(tunnel) = tunnel_manager.select_tunnel(&labels_groups).await else {
         log::warn!(
             "connection to {destination_string} via {} rejected cause no matching tunnel.",
-            labels.join(",")
+            stringify_labels_groups(&labels_groups)
         );
 
         stream.shutdown().await?;
@@ -295,4 +310,11 @@ async fn handle_in_tcp_stream(
     });
 
     Ok(())
+}
+
+fn stringify_labels_groups(labels_groups: &[Vec<String>]) -> String {
+    labels_groups
+        .iter()
+        .map(|labels| labels.join(","))
+        .join(";")
 }

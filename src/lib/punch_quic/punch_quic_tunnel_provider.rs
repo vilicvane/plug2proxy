@@ -29,13 +29,13 @@ pub struct PunchQuicInTunnelConfig {
 
 pub struct PunchQuicInTunnelProvider {
     id: uuid::Uuid,
-    match_server: Box<dyn InMatchServer + Send + Sync>,
+    match_server: Arc<Box<dyn InMatchServer + Send + Sync>>,
     config: PunchQuicInTunnelConfig,
 }
 
 impl PunchQuicInTunnelProvider {
     pub fn new(
-        match_server: Box<dyn InMatchServer + Send + Sync>,
+        match_server: Arc<Box<dyn InMatchServer + Send + Sync>>,
         config: PunchQuicInTunnelConfig,
     ) -> Self {
         Self {

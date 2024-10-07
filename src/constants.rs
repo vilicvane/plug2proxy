@@ -39,6 +39,10 @@ pub fn stun_server_addresses_default() -> Vec<String> {
     ]
 }
 
+pub fn tunnel_connections_default() -> usize {
+    1
+}
+
 pub fn fake_ip_dns_db_path_default(data_dir: Option<&str>) -> PathBuf {
     Path::new(data_dir.unwrap_or(DATA_DIR_DEFAULT)).join("fake_ip_dns.db")
 }

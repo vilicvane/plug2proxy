@@ -9,6 +9,7 @@ use plug2proxy::{
 use crate::constants::{
     fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
     transparent_proxy_address_default, transparent_proxy_traffic_mark_default,
+    tunnel_connections_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -71,6 +72,8 @@ impl Default for InTransparentProxyConfig {
 pub struct InTunnelingConfig {
     pub stun_server: Option<OneOrMany<String>>,
     pub match_server: MatchServerUrlOrConfig,
+    #[serde(default = "tunnel_connections_default")]
+    pub connections: usize,
 }
 
 #[derive(serde::Deserialize)]
