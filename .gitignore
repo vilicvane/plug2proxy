@@ -1,5 +1,7 @@
 /target
 
+/examples/*_test.rs
+
 .plug2proxy/
 .debug/
 

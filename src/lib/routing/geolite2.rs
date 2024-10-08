@@ -58,16 +58,16 @@ impl GeoLite2 {
         let reader = self.reader.lock().await;
         let reader = reader.as_ref()?;
 
-        if let Result::<maxminddb::geoip2::Country, _>::Ok(result) = reader.lookup(ip) {
+        if let Result::<maxminddb::geoip2::Country, _>::Ok(record) = reader.lookup(ip) {
             let mut codes = Vec::new();
 
-            if let Some(country) = result.country {
+            if let Some(country) = record.country {
                 if let Some(iso_code) = country.iso_code {
                     codes.push(iso_code.to_owned());
                 }
             }
 
-            if let Some(continent) = result.continent {
+            if let Some(continent) = record.continent {
                 if let Some(code) = continent.code {
                     codes.push(code.to_owned());
                 }
