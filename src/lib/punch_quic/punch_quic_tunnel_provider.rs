@@ -9,14 +9,16 @@ use stun::message::Getter as _;
 use webrtc_util::Conn;
 
 use crate::{
-    punch_quic::match_server::MatchOut,
+    match_server::{
+        punch_quic::{PunchQuicInData, PunchQuicOutData},
+        InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, OutMatchServer,
+    },
     routing::config::OutRuleConfig,
     tunnel::{InTunnel, OutTunnel},
     tunnel_provider::{InTunnelProvider, OutTunnelProvider},
 };
 
 use super::{
-    match_server::{InMatchServer, MatchIn, OutMatchServer},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicInTunnel, PunchQuicOutTunnel,
@@ -28,18 +30,15 @@ pub struct PunchQuicInTunnelConfig {
 }
 
 pub struct PunchQuicInTunnelProvider {
-    id: uuid::Uuid,
-    match_server: Arc<Box<dyn InMatchServer + Send + Sync>>,
+    id: MatchInId,
+    match_server: Arc<InMatchServer>,
     config: PunchQuicInTunnelConfig,
 }
 
 impl PunchQuicInTunnelProvider {
-    pub fn new(
-        match_server: Arc<Box<dyn InMatchServer + Send + Sync>>,
-        config: PunchQuicInTunnelConfig,
-    ) -> Self {
+    pub fn new(match_server: Arc<InMatchServer>, config: PunchQuicInTunnelConfig) -> Self {
         Self {
-            id: uuid::Uuid::new_v4(),
+            id: MatchInId::new(),
             match_server,
             config,
         }
@@ -66,8 +65,16 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             tunnel_labels,
             tunnel_priority,
             routing_rules,
-            address,
-        } = self.match_server.match_out(self.id, in_address).await?;
+            data: PunchQuicOutData { address },
+        } = self
+            .match_server
+            .match_out(
+                self.id,
+                PunchQuicInData {
+                    address: in_address,
+                },
+            )
+            .await?;
 
         log::info!("matched OUT {address} as tunnel {tunnel_id}.");
 
@@ -93,18 +100,15 @@ pub struct PunchQuicOutTunnelConfig {
 }
 
 pub struct PunchQuicOutTunnelProvider {
-    id: uuid::Uuid,
-    match_server: Arc<Box<dyn OutMatchServer + Sync>>,
+    id: MatchOutId,
+    match_server: Arc<OutMatchServer>,
     config: PunchQuicOutTunnelConfig,
 }
 
 impl PunchQuicOutTunnelProvider {
-    pub fn new(
-        match_server: Box<dyn OutMatchServer + Sync>,
-        config: PunchQuicOutTunnelConfig,
-    ) -> Self {
+    pub fn new(match_server: OutMatchServer, config: PunchQuicOutTunnelConfig) -> Self {
         Self {
-            id: uuid::Uuid::new_v4(),
+            id: MatchOutId::new(),
             match_server: Arc::new(match_server),
             config,
         }
@@ -122,12 +126,14 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
         let MatchIn {
             id,
             tunnel_id,
-            address,
+            data: PunchQuicInData { address },
         } = self
             .match_server
             .match_in(
                 self.id,
-                out_address,
+                PunchQuicOutData {
+                    address: out_address,
+                },
                 self.config.priority,
                 &self.config.routing_rules,
             )

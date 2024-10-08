@@ -1,6 +1,7 @@
 pub mod common;
 pub mod config;
 pub mod r#in;
+pub mod match_server;
 pub mod out;
 pub mod punch_quic;
 pub mod routing;

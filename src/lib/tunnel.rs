@@ -1,10 +1,12 @@
 use std::{fmt::Display, net::SocketAddr};
 
+use crate::match_server::MatchOutId;
+
 #[async_trait::async_trait]
 pub trait InTunnel: Display + Send + Sync {
     fn id(&self) -> TunnelId;
 
-    fn out_id(&self) -> uuid::Uuid;
+    fn out_id(&self) -> MatchOutId;
 
     fn labels(&self) -> &[String];
 

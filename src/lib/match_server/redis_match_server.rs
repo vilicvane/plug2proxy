@@ -1,10 +1,13 @@
-use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use redis::AsyncCommands;
 
 use crate::{routing::config::OutRuleConfig, tunnel::TunnelId};
 
-use super::match_server::{InMatchServer, MatchIn, MatchOut, OutMatchServer};
+use super::{
+    match_server::{InMatchServerTrait, MatchIn, MatchOut, OutMatchServerTrait},
+    MatchCodec, MatchInId, MatchOutId,
+};
 
 pub struct RedisInMatchServer {
     redis: redis::Client,
@@ -16,13 +19,19 @@ impl RedisInMatchServer {
     }
 }
 
+#[allow(dependency_on_unit_never_type_fallback)]
 #[async_trait::async_trait]
-impl InMatchServer for RedisInMatchServer {
-    async fn match_out(
+impl InMatchServerTrait for RedisInMatchServer {
+    async fn match_out<TInData, TOutData>(
         &self,
-        in_id: uuid::Uuid,
-        in_address: SocketAddr,
-    ) -> anyhow::Result<MatchOut> {
+        in_id: MatchInId,
+        in_data: TInData,
+    ) -> anyhow::Result<MatchOut<TOutData>>
+    where
+        TInData: serde::Serialize + Send,
+        TOutData: serde::de::DeserializeOwned + Send,
+        (TInData, TOutData): MatchCodec<TInData, TOutData>,
+    {
         let (push_sender, mut push_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let mut connection = self
@@ -32,9 +41,10 @@ impl InMatchServer for RedisInMatchServer {
             )
             .await?;
 
-        connection
-            .subscribe(match_channel_name(in_id, in_address))
-            .await?;
+        let match_channel_name =
+            <(TInData, TOutData)>::get_redis_match_channel_name(in_id, &in_data);
+
+        connection.subscribe(match_channel_name).await?;
 
         let match_task = async {
             while let Some(push) = push_receiver.recv().await {
@@ -42,61 +52,47 @@ impl InMatchServer for RedisInMatchServer {
                     continue;
                 };
 
-                let r#match: Match = serde_json::from_slice(message.get_payload_bytes())?;
+                let match_out: MatchOut<TOutData> =
+                    serde_json::from_slice(message.get_payload_bytes())?;
 
-                return Ok(r#match);
+                return Ok(match_out);
             }
 
             anyhow::bail!("failed to match a server.");
         };
 
-        let announce_task = {
-            async move {
-                loop {
-                    connection
-                        .publish(
-                            IN_ANNOUNCEMENT_CHANNEL_NAME,
-                            serde_json::to_string(&InAnnouncement {
-                                id: in_id,
-                                address: in_address,
-                            })?,
-                        )
-                        .await?;
+        let announce_task = async move {
+            let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name();
 
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+            let announcement = InAnnouncement {
+                id: in_id,
+                data: in_data,
+            };
 
-                #[allow(unreachable_code)]
-                anyhow::Ok(())
+            loop {
+                connection
+                    .publish(&channel_name, serde_json::to_string(&announcement)?)
+                    .await?;
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
+
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
         };
 
-        let Match {
-            id,
-            tunnel_id,
-            tunnel_labels,
-            tunnel_priority,
-            routing_rules,
-            address,
-        } = tokio::select! {
-            r#match = match_task => r#match?,
+        let match_out = tokio::select! {
+            match_out = match_task => match_out?,
             _ = announce_task => anyhow::bail!("failed to match a server."),
         };
 
-        Ok(MatchOut {
-            id,
-            tunnel_id,
-            tunnel_labels,
-            tunnel_priority,
-            routing_rules,
-            address,
-        })
+        Ok(match_out)
     }
 }
 
 pub struct RedisOutMatchServer {
     labels: Vec<String>,
-    matched_in_id_set: Arc<tokio::sync::Mutex<HashSet<uuid::Uuid>>>,
+    matched_in_id_set: Arc<tokio::sync::Mutex<HashSet<MatchInId>>>,
     redis: redis::Client,
 }
 
@@ -110,15 +106,21 @@ impl RedisOutMatchServer {
     }
 }
 
+#[allow(dependency_on_unit_never_type_fallback)]
 #[async_trait::async_trait]
-impl OutMatchServer for RedisOutMatchServer {
-    async fn match_in(
+impl OutMatchServerTrait for RedisOutMatchServer {
+    async fn match_in<TInData, TOutData>(
         &self,
-        out_id: uuid::Uuid,
-        out_address: SocketAddr,
+        out_id: MatchOutId,
+        out_data: TOutData,
         out_priority: i64,
         out_routing_rules: &[OutRuleConfig],
-    ) -> anyhow::Result<MatchIn> {
+    ) -> anyhow::Result<MatchIn<TInData>>
+    where
+        TInData: serde::de::DeserializeOwned + Send,
+        TOutData: serde::Serialize + Send,
+        (TInData, TOutData): MatchCodec<TInData, TOutData>,
+    {
         let (push_sender, mut push_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let mut connection = self
@@ -128,7 +130,9 @@ impl OutMatchServer for RedisOutMatchServer {
             )
             .await?;
 
-        connection.subscribe(IN_ANNOUNCEMENT_CHANNEL_NAME).await?;
+        let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name();
+
+        connection.subscribe(&channel_name).await?;
 
         loop {
             let push = push_receiver
@@ -140,11 +144,7 @@ impl OutMatchServer for RedisOutMatchServer {
                 continue;
             };
 
-            if message.get_channel_name() != IN_ANNOUNCEMENT_CHANNEL_NAME {
-                continue;
-            }
-
-            let Ok(InAnnouncement { id, address }) =
+            let Ok(InAnnouncement::<TInData> { id, data }) =
                 serde_json::from_slice(message.get_payload_bytes())
             else {
                 continue;
@@ -154,15 +154,15 @@ impl OutMatchServer for RedisOutMatchServer {
                 continue;
             }
 
-            let match_key = match_key(id, address);
+            let match_key = <(TInData, TOutData)>::get_redis_match_lock_key(id, &data);
 
-            log::debug!("locking IN {address}...");
+            log::debug!("locking IN {match_key}...");
 
             let match_key_locking = connection
                 .send_packed_command(
                     redis::cmd("SET")
                         .arg(&match_key)
-                        .arg(out_address.to_string())
+                        .arg(serde_json::to_string(&out_data)?)
                         .arg("NX")
                         .arg("EX")
                         .arg(MATCH_TIMEOUT_SECONDS),
@@ -170,25 +170,25 @@ impl OutMatchServer for RedisOutMatchServer {
                 .await?;
 
             if !matches!(match_key_locking, redis::Value::Okay) {
-                log::debug!("missed IN {address}...");
+                log::debug!("missed IN {match_key}...");
 
                 continue;
             }
 
             let tunnel_id = TunnelId::new();
 
-            log::debug!("matching IN {address}...");
+            log::debug!("matching IN {match_key}...");
 
             connection
                 .publish(
-                    match_channel_name(id, address),
-                    serde_json::to_string(&Match {
+                    <(TInData, TOutData)>::get_redis_match_channel_name(id, &data),
+                    serde_json::to_string(&MatchOut {
                         id: out_id,
                         tunnel_id,
                         tunnel_labels: self.labels.clone(),
                         tunnel_priority: out_priority,
                         routing_rules: out_routing_rules.to_vec(),
-                        address: out_address,
+                        data: out_data,
                     })?,
                 )
                 .await?;
@@ -196,48 +196,28 @@ impl OutMatchServer for RedisOutMatchServer {
             break Ok(MatchIn {
                 id,
                 tunnel_id,
-                address,
+                data,
             });
         }
     }
 
-    async fn register_in(&self, in_id: uuid::Uuid) -> anyhow::Result<()> {
+    async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()> {
         self.matched_in_id_set.lock().await.insert(in_id);
 
         Ok(())
     }
 
-    async fn unregister_in(&self, in_id: &uuid::Uuid) -> anyhow::Result<()> {
+    async fn unregister_in(&self, in_id: &MatchInId) -> anyhow::Result<()> {
         self.matched_in_id_set.lock().await.remove(in_id);
 
         Ok(())
     }
 }
 
-const IN_ANNOUNCEMENT_CHANNEL_NAME: &str = "in_announcement";
-
 #[derive(serde::Serialize, serde::Deserialize)]
-struct InAnnouncement {
-    id: uuid::Uuid,
-    address: SocketAddr,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Match {
-    id: uuid::Uuid,
-    tunnel_id: TunnelId,
-    tunnel_labels: Vec<String>,
-    tunnel_priority: i64,
-    routing_rules: Vec<OutRuleConfig>,
-    address: SocketAddr,
+struct InAnnouncement<TInData> {
+    id: MatchInId,
+    data: TInData,
 }
 
 const MATCH_TIMEOUT_SECONDS: u64 = 30;
-
-fn match_key(id: uuid::Uuid, address: SocketAddr) -> String {
-    format!("{}/{}", id, address)
-}
-
-fn match_channel_name(id: uuid::Uuid, address: SocketAddr) -> String {
-    format!("match/{}", match_key(id, address))
-}

@@ -1,6 +1,9 @@
 use std::{fmt, net::SocketAddr};
 
-use crate::tunnel::{InTunnel, TunnelId};
+use crate::{
+    match_server::MatchOutId,
+    tunnel::{InTunnel, TunnelId},
+};
 
 pub struct DirectInTunnel {
     traffic_mark: u32,
@@ -24,7 +27,7 @@ impl InTunnel for DirectInTunnel {
         unimplemented!()
     }
 
-    fn out_id(&self) -> uuid::Uuid {
+    fn out_id(&self) -> MatchOutId {
         unimplemented!()
     }
 

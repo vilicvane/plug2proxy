@@ -1,6 +1,6 @@
-use crate::punch_quic::{
-    match_server::{InMatchServer, OutMatchServer},
+use crate::match_server::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
+    InMatchServer, OutMatchServer,
 };
 
 #[derive(Clone, serde::Deserialize)]
@@ -11,25 +11,21 @@ pub enum MatchServerConfig {
 }
 
 impl MatchServerConfig {
-    pub fn new_in_match_server(&self) -> anyhow::Result<Box<dyn InMatchServer + Send + Sync>> {
-        let server = match self {
-            Self::Redis(config) => RedisInMatchServer::new(new_redis_client(config)?),
-        };
-
-        Ok(Box::new(server))
+    pub fn new_in_match_server(&self) -> anyhow::Result<InMatchServer> {
+        Ok(match self {
+            Self::Redis(config) => RedisInMatchServer::new(new_redis_client(config)?).into(),
+        })
     }
 
     pub async fn new_out_match_server(
         &self,
         labels: Vec<String>,
-    ) -> anyhow::Result<Box<dyn OutMatchServer + Sync>> {
-        let server = match self {
-            Self::Redis(config) => {
-                RedisOutMatchServer::new(new_redis_client(config)?, labels).await?
-            }
-        };
-
-        Ok(Box::new(server))
+    ) -> anyhow::Result<OutMatchServer> {
+        Ok(match self {
+            Self::Redis(config) => RedisOutMatchServer::new(new_redis_client(config)?, labels)
+                .await?
+                .into(),
+        })
     }
 }
 

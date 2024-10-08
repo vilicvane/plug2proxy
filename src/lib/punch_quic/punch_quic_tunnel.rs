@@ -6,11 +6,14 @@ use std::{
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
-use crate::tunnel::{InTunnel, OutTunnel, TunnelId};
+use crate::{
+    match_server::MatchOutId,
+    tunnel::{InTunnel, OutTunnel, TunnelId},
+};
 
 pub struct PunchQuicInTunnel {
     id: TunnelId,
-    out_id: uuid::Uuid,
+    out_id: MatchOutId,
     labels: Vec<String>,
     priority: i64,
     connection: quinn::Connection,
@@ -19,7 +22,7 @@ pub struct PunchQuicInTunnel {
 impl PunchQuicInTunnel {
     pub fn new(
         id: TunnelId,
-        out_id: uuid::Uuid,
+        out_id: MatchOutId,
         labels: Vec<String>,
         priority: i64,
         connection: quinn::Connection,
@@ -53,7 +56,7 @@ impl InTunnel for PunchQuicInTunnel {
         self.id
     }
 
-    fn out_id(&self) -> uuid::Uuid {
+    fn out_id(&self) -> MatchOutId {
         self.out_id
     }
 
