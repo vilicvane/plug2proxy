@@ -9,10 +9,7 @@ use stun::message::Getter as _;
 use webrtc_util::Conn;
 
 use crate::{
-    match_server::{
-        punch_quic::{PunchQuicInData, PunchQuicOutData},
-        InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, OutMatchServer,
-    },
+    match_server::{InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, OutMatchServer},
     route::config::OutRuleConfig,
     tunnel::{
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
@@ -21,6 +18,7 @@ use crate::{
 };
 
 use super::{
+    match_pair::{PunchQuicInData, PunchQuicOutData},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
     PunchQuicInTunnel, PunchQuicOutTunnel,

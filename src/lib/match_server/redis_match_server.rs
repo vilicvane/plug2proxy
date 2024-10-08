@@ -6,7 +6,7 @@ use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
 
 use super::{
     match_server::{InMatchServerTrait, MatchIn, MatchOut, OutMatchServerTrait},
-    MatchCodec, MatchInId, MatchOutId,
+    MatchPair, MatchInId, MatchOutId,
 };
 
 pub struct RedisInMatchServer {
@@ -30,7 +30,7 @@ impl InMatchServerTrait for RedisInMatchServer {
     where
         TInData: serde::Serialize + Send,
         TOutData: serde::de::DeserializeOwned + Send,
-        (TInData, TOutData): MatchCodec<TInData, TOutData>,
+        (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         let (push_sender, mut push_receiver) = tokio::sync::mpsc::unbounded_channel();
 
@@ -119,7 +119,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
     where
         TInData: serde::de::DeserializeOwned + Send,
         TOutData: serde::Serialize + Send,
-        (TInData, TOutData): MatchCodec<TInData, TOutData>,
+        (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         let (push_sender, mut push_receiver) = tokio::sync::mpsc::unbounded_channel();
 

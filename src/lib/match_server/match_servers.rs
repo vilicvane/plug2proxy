@@ -2,7 +2,7 @@ use crate::route::config::OutRuleConfig;
 
 use super::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
-    InMatchServerTrait as _, MatchCodec, MatchIn, MatchInId, MatchOut, MatchOutId,
+    InMatchServerTrait as _, MatchPair, MatchIn, MatchInId, MatchOut, MatchOutId,
     OutMatchServerTrait as _,
 };
 
@@ -20,7 +20,7 @@ impl InMatchServer {
     where
         TInData: serde::Serialize + Send,
         TOutData: serde::de::DeserializeOwned + Send,
-        (TInData, TOutData): MatchCodec<TInData, TOutData>,
+        (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         match self {
             Self::Redis(redis) => redis.match_out(in_id, in_data).await,
@@ -44,7 +44,7 @@ impl OutMatchServer {
     where
         TInData: serde::de::DeserializeOwned + Send,
         TOutData: serde::Serialize + Send,
-        (TInData, TOutData): MatchCodec<TInData, TOutData>,
+        (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         match self {
             Self::Redis(redis) => {

@@ -1,3 +1,4 @@
+mod match_pair;
 mod punch;
 mod punch_quic_tunnel;
 mod punch_quic_tunnel_provider;

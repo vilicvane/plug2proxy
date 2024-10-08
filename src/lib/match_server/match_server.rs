@@ -10,7 +10,7 @@ pub trait InMatchServerTrait {
     where
         TInData: serde::Serialize + Send,
         TOutData: serde::de::DeserializeOwned + Send,
-        (TInData, TOutData): MatchCodec<TInData, TOutData>;
+        (TInData, TOutData): MatchPair<TInData, TOutData>;
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -35,7 +35,7 @@ pub trait OutMatchServerTrait: Send {
     where
         TInData: serde::de::DeserializeOwned + Send,
         TOutData: serde::Serialize + Send,
-        (TInData, TOutData): MatchCodec<TInData, TOutData>;
+        (TInData, TOutData): MatchPair<TInData, TOutData>;
 
     async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()>;
 
@@ -90,7 +90,7 @@ impl MatchOutId {
     }
 }
 
-pub trait MatchCodec<TInData, TOutData> {
+pub trait MatchPair<TInData, TOutData> {
     fn get_redis_match_channel_name(in_id: MatchInId, in_data: &TInData) -> String;
     fn get_redis_match_lock_key(in_id: MatchInId, in_data: &TInData) -> String;
     fn get_redis_in_announcement_channel_name() -> String;
