@@ -7,17 +7,18 @@ use itertools::Itertools;
 
 use crate::{
     route::router::Router,
-    tunnel::{InTunnel, InTunnelProvider, TunnelId},
+    tunnel::{
+        direct_tunnel::DirectInTunnel, AnyInTunnelLikeArc, InTunnel, InTunnelLike,
+        InTunnelProvider, TunnelId,
+    },
 };
-
-use super::direct_in_tunnel::DirectInTunnel;
 
 type TunnelMap = HashMap<TunnelId, Arc<Box<dyn InTunnel>>>;
 type LabelToTunnelsMap = HashMap<String, Vec<Arc<Box<dyn InTunnel>>>>;
 
 pub struct TunnelManager {
     pub accept_handles: Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
-    direct_tunnel: Arc<Box<dyn InTunnel>>,
+    direct_tunnel: Arc<Box<dyn InTunnelLike>>,
     label_to_tunnels_map: Arc<tokio::sync::Mutex<LabelToTunnelsMap>>,
     select_index: AtomicUsize,
 }
@@ -110,10 +111,7 @@ impl TunnelManager {
         }
     }
 
-    pub async fn select_tunnel(
-        &self,
-        labels_groups: &[Vec<String>],
-    ) -> Option<Arc<Box<dyn InTunnel>>> {
+    pub async fn select_tunnel(&self, labels_groups: &[Vec<String>]) -> Option<AnyInTunnelLikeArc> {
         let index = self
             .select_index
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -127,7 +125,7 @@ impl TunnelManager {
             for label in labels {
                 match label.as_str() {
                     "DIRECT" => {
-                        return Some(self.direct_tunnel.clone());
+                        return Some(self.direct_tunnel.clone().into());
                     }
                     "PROXY" => {
                         label_proxy_exists = true;
@@ -156,7 +154,7 @@ impl TunnelManager {
             }
 
             if label_any_exists {
-                return proxy_tunnel.or_else(|| Some(self.direct_tunnel.clone()));
+                return proxy_tunnel.or_else(|| Some(self.direct_tunnel.clone().into()));
             }
         }
 
@@ -201,7 +199,7 @@ impl Drop for TunnelManager {
 fn select_from_tunnels(
     tunnels: &[Arc<Box<dyn InTunnel>>],
     index: usize,
-) -> Option<Arc<Box<dyn InTunnel>>> {
+) -> Option<AnyInTunnelLikeArc> {
     if tunnels.is_empty() {
         return None;
     }
@@ -213,7 +211,5 @@ fn select_from_tunnels(
         .take_while(|tunnel| tunnel.priority() == top_priority)
         .collect_vec();
 
-    Some(Arc::clone(
-        tunnels_with_top_priority[index % tunnels_with_top_priority.len()],
-    ))
+    Some(Arc::clone(tunnels_with_top_priority[index % tunnels_with_top_priority.len()]).into())
 }

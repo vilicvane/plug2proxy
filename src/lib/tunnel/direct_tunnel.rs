@@ -1,9 +1,6 @@
 use std::{fmt, net::SocketAddr};
 
-use crate::{
-    match_server::MatchOutId,
-    tunnel::{InTunnel, TunnelId},
-};
+use super::InTunnelLike;
 
 pub struct DirectInTunnel {
     traffic_mark: u32,
@@ -15,30 +12,8 @@ impl DirectInTunnel {
     }
 }
 
-impl fmt::Display for DirectInTunnel {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "DIRECT")
-    }
-}
-
 #[async_trait::async_trait]
-impl InTunnel for DirectInTunnel {
-    fn id(&self) -> TunnelId {
-        unimplemented!()
-    }
-
-    fn out_id(&self) -> MatchOutId {
-        unimplemented!()
-    }
-
-    fn labels(&self) -> &[String] {
-        unimplemented!()
-    }
-
-    fn priority(&self) -> i64 {
-        unimplemented!()
-    }
-
+impl InTunnelLike for DirectInTunnel {
     async fn connect(
         &self,
         destination_address: SocketAddr,
@@ -72,16 +47,14 @@ impl InTunnel for DirectInTunnel {
             }
         };
 
-        let (read, write) = stream.into_split();
+        let (read_stream, write_stream) = stream.into_split();
 
-        Ok((Box::new(read), Box::new(write)))
+        Ok((Box::new(read_stream), Box::new(write_stream)))
     }
+}
 
-    async fn closed(&self) {
-        unimplemented!()
-    }
-
-    fn is_closed(&self) -> bool {
-        unimplemented!()
+impl fmt::Display for DirectInTunnel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "DIRECT")
     }
 }

@@ -2,17 +2,17 @@ use crate::route::config::OutRuleConfig;
 
 use super::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
-    InMatchServerTrait as _, MatchPair, MatchIn, MatchInId, MatchOut, MatchOutId,
-    OutMatchServerTrait as _,
+    InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, MatchPair, OutMatchServerTrait,
 };
 
 #[derive(derive_more::From)]
-pub enum InMatchServer {
+pub enum AnyInMatchServer {
     Redis(RedisInMatchServer),
 }
 
-impl InMatchServer {
-    pub async fn match_out<TInData, TOutData>(
+#[async_trait::async_trait]
+impl InMatchServer for AnyInMatchServer {
+    async fn match_out<TInData, TOutData>(
         &self,
         in_id: MatchInId,
         in_data: TInData,
@@ -33,8 +33,9 @@ pub enum OutMatchServer {
     Redis(RedisOutMatchServer),
 }
 
-impl OutMatchServer {
-    pub async fn match_in<TInData, TOutData>(
+#[async_trait::async_trait]
+impl OutMatchServerTrait for OutMatchServer {
+    async fn match_in<TInData, TOutData>(
         &self,
         out_id: MatchOutId,
         out_data: TOutData,
@@ -55,13 +56,13 @@ impl OutMatchServer {
         }
     }
 
-    pub async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()> {
+    async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()> {
         match self {
             Self::Redis(redis) => redis.register_in(in_id).await,
         }
     }
 
-    pub async fn unregister_in(&self, in_id: &MatchInId) -> anyhow::Result<()> {
+    async fn unregister_in(&self, in_id: &MatchInId) -> anyhow::Result<()> {
         match self {
             Self::Redis(redis) => redis.unregister_in(in_id).await,
         }

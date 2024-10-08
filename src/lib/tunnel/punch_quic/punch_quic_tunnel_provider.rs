@@ -9,9 +9,13 @@ use stun::message::Getter as _;
 use webrtc_util::Conn;
 
 use crate::{
-    match_server::{InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, OutMatchServer},
+    match_server::{
+        AnyInMatchServer, InMatchServer as _, MatchIn, MatchInId, MatchOut, MatchOutId,
+        OutMatchServer, OutMatchServerTrait as _,
+    },
     route::config::OutRuleConfig,
     tunnel::{
+        byte_stream_tunnel::{ByteStreamInTunnel, ByteStreamOutTunnel},
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel,
     },
@@ -21,7 +25,7 @@ use super::{
     match_pair::{PunchQuicInData, PunchQuicOutData},
     punch::punch,
     quinn::{create_client_endpoint, create_server_endpoint},
-    PunchQuicInTunnel, PunchQuicOutTunnel,
+    PunchQuicInTunnelConnection, PunchQuicOutTunnelConnection,
 };
 
 pub struct PunchQuicInTunnelConfig {
@@ -31,12 +35,12 @@ pub struct PunchQuicInTunnelConfig {
 
 pub struct PunchQuicInTunnelProvider {
     id: MatchInId,
-    match_server: Arc<InMatchServer>,
+    match_server: Arc<AnyInMatchServer>,
     config: PunchQuicInTunnelConfig,
 }
 
 impl PunchQuicInTunnelProvider {
-    pub fn new(match_server: Arc<InMatchServer>, config: PunchQuicInTunnelConfig) -> Self {
+    pub fn new(match_server: Arc<AnyInMatchServer>, config: PunchQuicInTunnelConfig) -> Self {
         Self {
             id: MatchInId::new(),
             match_server,
@@ -84,8 +88,13 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
 
         let connection = endpoint.connect(address, "localhost")?.await?;
 
-        let tunnel =
-            PunchQuicInTunnel::new(tunnel_id, id, tunnel_labels, tunnel_priority, connection);
+        let tunnel = ByteStreamInTunnel::new(
+            tunnel_id,
+            id,
+            tunnel_labels,
+            tunnel_priority,
+            PunchQuicInTunnelConnection::new(connection),
+        );
 
         log::info!("tunnel {tunnel} established.");
 
@@ -159,11 +168,11 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
         self.match_server.register_in(id).await?;
 
         tokio::spawn({
-            let conn = Arc::clone(&connection);
+            let connection = Arc::clone(&connection);
             let match_server = Arc::clone(&self.match_server);
 
             async move {
-                let _ = conn.closed().await;
+                let _ = connection.closed().await;
 
                 match_server.unregister_in(&id).await?;
 
@@ -172,7 +181,10 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
             .inspect_err(|error| log::error!("{}", error))
         });
 
-        return Ok(Box::new(PunchQuicOutTunnel::new(tunnel_id, connection)));
+        return Ok(Box::new(ByteStreamOutTunnel::new(
+            tunnel_id,
+            PunchQuicOutTunnelConnection::new(connection),
+        )));
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
 
 #[async_trait::async_trait]
-pub trait InMatchServerTrait {
+pub trait InMatchServer {
     async fn match_out<TInData, TOutData>(
         &self,
         in_id: MatchInId,

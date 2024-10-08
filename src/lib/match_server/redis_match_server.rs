@@ -5,8 +5,8 @@ use redis::AsyncCommands;
 use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
 
 use super::{
-    match_server::{InMatchServerTrait, MatchIn, MatchOut, OutMatchServerTrait},
-    MatchPair, MatchInId, MatchOutId,
+    match_server::{InMatchServer, MatchIn, MatchOut, OutMatchServerTrait},
+    MatchInId, MatchOutId, MatchPair,
 };
 
 pub struct RedisInMatchServer {
@@ -21,7 +21,7 @@ impl RedisInMatchServer {
 
 #[allow(dependency_on_unit_never_type_fallback)]
 #[async_trait::async_trait]
-impl InMatchServerTrait for RedisInMatchServer {
+impl InMatchServer for RedisInMatchServer {
     async fn match_out<TInData, TOutData>(
         &self,
         in_id: MatchInId,

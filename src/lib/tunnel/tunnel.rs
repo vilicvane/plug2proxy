@@ -1,17 +1,9 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{fmt, net::SocketAddr};
 
 use crate::match_server::MatchOutId;
 
 #[async_trait::async_trait]
-pub trait InTunnel: Display + Send + Sync {
-    fn id(&self) -> TunnelId;
-
-    fn out_id(&self) -> MatchOutId;
-
-    fn labels(&self) -> &[String];
-
-    fn priority(&self) -> i64;
-
+pub trait InTunnelLike: fmt::Display + Send + Sync {
     async fn connect(
         &self,
         destination_address: SocketAddr,
@@ -20,6 +12,17 @@ pub trait InTunnel: Display + Send + Sync {
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     )>;
+}
+
+#[async_trait::async_trait]
+pub trait InTunnel: InTunnelLike {
+    fn id(&self) -> TunnelId;
+
+    fn out_id(&self) -> MatchOutId;
+
+    fn labels(&self) -> &[String];
+
+    fn priority(&self) -> i64;
 
     async fn closed(&self);
 
@@ -27,7 +30,7 @@ pub trait InTunnel: Display + Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub trait OutTunnel: Send + Sync {
+pub trait OutTunnel: Send {
     fn id(&self) -> TunnelId;
 
     async fn accept(

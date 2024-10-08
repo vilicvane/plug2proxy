@@ -17,7 +17,7 @@ use crate::{
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
     tunnel::{
         punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
-        InTunnelProvider,
+        InTunnelLike as _, InTunnelProvider,
     },
     utils::{
         io::copy_bidirectional,
@@ -294,8 +294,6 @@ async fn handle_in_tcp_stream(
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
 
     tokio::spawn({
-        let tunnel = Arc::clone(&tunnel);
-
         async move {
             let (mut tunnel_recv_stream, mut tunnel_send_stream) =
                 tunnel.connect(destination, name).await?;

@@ -1,4 +1,3 @@
-mod direct_in_tunnel;
 pub mod dns_resolver;
 pub mod fake_ip_dns;
 pub mod transparent_proxy;

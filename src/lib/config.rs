@@ -1,6 +1,6 @@
 use crate::match_server::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
-    InMatchServer, OutMatchServer,
+    AnyInMatchServer, OutMatchServer,
 };
 
 #[derive(Clone, serde::Deserialize)]
@@ -11,7 +11,7 @@ pub enum MatchServerConfig {
 }
 
 impl MatchServerConfig {
-    pub fn new_in_match_server(&self) -> anyhow::Result<InMatchServer> {
+    pub fn new_in_match_server(&self) -> anyhow::Result<AnyInMatchServer> {
         Ok(match self {
             Self::Redis(config) => RedisInMatchServer::new(new_redis_client(config)?).into(),
         })
