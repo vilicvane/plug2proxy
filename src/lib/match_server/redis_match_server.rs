@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use redis::AsyncCommands;
 
-use crate::{routing::config::OutRuleConfig, tunnel::TunnelId};
+use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
 
 use super::{
     match_server::{InMatchServerTrait, MatchIn, MatchOut, OutMatchServerTrait},

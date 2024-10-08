@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use plug2proxy::routing::config::{InFallbackRuleConfig, InRuleConfig};
+use plug2proxy::route::config::{InFallbackRuleConfig, InRuleConfig};
 
 pub const DATA_DIR_DEFAULT: &str = ".plug2proxy";
 

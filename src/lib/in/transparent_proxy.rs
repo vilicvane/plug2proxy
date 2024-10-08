@@ -13,10 +13,12 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
-    punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
     r#in::dns_resolver::convert_to_socket_addresses,
-    routing::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
-    tunnel_provider::InTunnelProvider,
+    route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
+    tunnel::{
+        punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
+        InTunnelProvider,
+    },
     utils::{
         io::copy_bidirectional,
         net::{get_tokio_tcp_stream_original_destination, IpFamily},

@@ -6,9 +6,8 @@ use std::{
 use itertools::Itertools;
 
 use crate::{
-    routing::router::Router,
-    tunnel::{InTunnel, TunnelId},
-    tunnel_provider::InTunnelProvider,
+    route::router::Router,
+    tunnel::{InTunnel, InTunnelProvider, TunnelId},
 };
 
 use super::direct_in_tunnel::DirectInTunnel;

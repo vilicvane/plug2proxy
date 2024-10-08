@@ -5,10 +5,11 @@ use itertools::Itertools as _;
 use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
-    punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
-    routing::config::OutRuleConfig,
-    tunnel::OutTunnel,
-    tunnel_provider::OutTunnelProvider as _,
+    route::config::OutRuleConfig,
+    tunnel::{
+        punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
+        OutTunnel, OutTunnelProvider as _,
+    },
     utils::io::copy_bidirectional,
 };
 

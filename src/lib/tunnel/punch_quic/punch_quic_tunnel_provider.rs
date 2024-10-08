@@ -13,9 +13,11 @@ use crate::{
         punch_quic::{PunchQuicInData, PunchQuicOutData},
         InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, OutMatchServer,
     },
-    routing::config::OutRuleConfig,
-    tunnel::{InTunnel, OutTunnel},
-    tunnel_provider::{InTunnelProvider, OutTunnelProvider},
+    route::config::OutRuleConfig,
+    tunnel::{
+        tunnel_provider::{InTunnelProvider, OutTunnelProvider},
+        InTunnel, OutTunnel,
+    },
 };
 
 use super::{

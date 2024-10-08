@@ -1,5 +1,5 @@
 use crate::{
-    routing::config::OutRuleConfig,
+    route::config::OutRuleConfig,
     tunnel::{InTunnel, OutTunnel},
 };
 

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use plug2proxy::{
     config::MatchServerUrlOrConfig,
-    routing::config::{InRuleConfig, OutRuleConfig},
+    route::config::{InRuleConfig, OutRuleConfig},
     utils::OneOrMany,
 };
 

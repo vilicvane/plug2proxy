@@ -3,7 +3,7 @@ use std::str::FromStr as _;
 use itertools::Itertools;
 
 use crate::{
-    routing::rule::{
+    route::rule::{
         AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule,
     },
     utils::{net::parse_ip_net, OneOrMany},

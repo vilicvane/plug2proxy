@@ -1,4 +1,4 @@
-use crate::routing::config::OutRuleConfig;
+use crate::route::config::OutRuleConfig;
 
 use super::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},

@@ -1,4 +1,4 @@
-use crate::{routing::config::OutRuleConfig, tunnel::TunnelId};
+use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
 
 #[async_trait::async_trait]
 pub trait InMatchServerTrait {
