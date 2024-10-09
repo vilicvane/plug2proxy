@@ -1,4 +1,7 @@
-use std::net::{SocketAddr, ToSocketAddrs as _};
+use std::{
+    net::{SocketAddr, ToSocketAddrs as _},
+    sync::Arc,
+};
 
 use itertools::Itertools as _;
 
@@ -8,6 +11,7 @@ use crate::{
     route::config::OutRuleConfig,
     tunnel::{
         punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
+        yamux::{YamuxOutTunnelConfig, YamuxOutTunnelProvider},
         OutTunnel, OutTunnelProvider as _,
     },
     utils::io::copy_bidirectional,
@@ -15,49 +19,87 @@ use crate::{
 
 pub struct Options {
     pub labels: Vec<String>,
-    pub priority: i64,
     pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
+    pub tcp_priority: Option<i64>,
+    pub udp_priority: Option<i64>,
     pub routing_rules: Vec<OutRuleConfig>,
+    pub routing_priority: i64,
 }
 
 pub async fn up(
     Options {
         labels,
-        priority,
         stun_server_addresses,
         match_server_config,
+        tcp_priority,
+        udp_priority,
         routing_rules,
+        routing_priority,
     }: Options,
 ) -> anyhow::Result<()> {
     log::info!("starting OUT...");
 
-    let match_server = match_server_config.new_out_match_server(labels).await?;
+    let match_server = Arc::new(match_server_config.new_out_match_server(labels).await?);
 
     let stun_server_addresses = stun_server_addresses
         .iter()
         .flat_map(|address| address.to_socket_addrs().unwrap_or_default())
         .collect_vec();
 
-    let tunnel_provider = PunchQuicOutTunnelProvider::new(
-        match_server,
-        PunchQuicOutTunnelConfig {
-            priority,
-            stun_server_addresses,
-            routing_rules,
-        },
-    );
+    let tcp_tunneling_task = {
+        let match_server = match_server.clone();
+        let stun_server_addresses = stun_server_addresses.clone();
+        let routing_rules = routing_rules.clone();
 
-    loop {
-        match tunnel_provider.accept().await {
-            Ok(tunnel) => {
-                tokio::spawn(handle_tunnel(tunnel));
-            }
-            Err(error) => {
-                log::error!("error accepting tunnel: {:?}", error);
+        async {
+            let tunnel_provider = YamuxOutTunnelProvider::new(
+                match_server,
+                YamuxOutTunnelConfig {
+                    priority: tcp_priority,
+                    stun_server_addresses,
+                    routing_rules,
+                    routing_priority,
+                },
+            );
+
+            loop {
+                match tunnel_provider.accept().await {
+                    Ok(tunnel) => {
+                        tokio::spawn(handle_tunnel(tunnel));
+                    }
+                    Err(error) => {
+                        log::error!("error accepting tunnel: {:?}", error);
+                    }
+                }
             }
         }
-    }
+    };
+
+    let udp_tunneling_task = async {
+        let tunnel_provider = PunchQuicOutTunnelProvider::new(
+            match_server,
+            PunchQuicOutTunnelConfig {
+                priority: udp_priority,
+                stun_server_addresses,
+                routing_rules,
+                routing_priority,
+            },
+        );
+
+        loop {
+            match tunnel_provider.accept().await {
+                Ok(tunnel) => {
+                    tokio::spawn(handle_tunnel(tunnel));
+                }
+                Err(error) => {
+                    log::error!("error accepting tunnel: {:?}", error);
+                }
+            }
+        }
+    };
+
+    tokio::join!(tcp_tunneling_task, udp_tunneling_task);
 
     #[allow(unreachable_code)]
     Ok(())

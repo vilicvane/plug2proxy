@@ -34,12 +34,26 @@ pub fn transparent_proxy_traffic_mark_default() -> u32 {
 
 pub fn stun_server_addresses_default() -> Vec<String> {
     vec![
+        "stun.sipnet.net:3478".to_string(),
+        "freestun.net:3478".to_string(),
         "stun.l.google.com:19302".to_string(),
         "stun.miwifi.com:3478".to_string(),
     ]
 }
 
-pub fn tunnel_connections_default() -> usize {
+pub fn tunneling_tcp_priority_default() -> i64 {
+    0
+}
+
+pub fn tunneling_tcp_connections_default() -> usize {
+    1
+}
+
+pub fn tunneling_udp_priority_default() -> i64 {
+    10
+}
+
+pub fn tunneling_udp_connections_default() -> usize {
     1
 }
 

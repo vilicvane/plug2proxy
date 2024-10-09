@@ -8,7 +8,8 @@ use config::{InConfig, OutConfig};
 use constants::{
     dns_server_addresses_default, fake_ip_dns_db_path_default, fake_ipv4_net_default,
     fake_ipv6_net_default, geolite2_cache_path_default, geolite2_update_interval_default,
-    stun_server_addresses_default, DATA_DIR_DEFAULT,
+    stun_server_addresses_default, tunneling_tcp_priority_default, tunneling_udp_priority_default,
+    DATA_DIR_DEFAULT,
 };
 use plug2proxy::{
     out,
@@ -94,7 +95,12 @@ async fn main() -> anyhow::Result<()> {
                             .map_or_else(stun_server_addresses_default, |address| address
                                 .into_vec()),
                         match_server_config: tunneling.match_server.into_config(),
-                        tunnel_connections: tunneling.connections,
+                        tunneling_tcp_priority: tunneling.tcp.priority,
+                        tunneling_tcp_priority_default: tunneling_tcp_priority_default(),
+                        tunneling_tcp_connections: tunneling.tcp.connections,
+                        tunneling_udp_priority: tunneling.udp.priority,
+                        tunneling_udp_priority_default: tunneling_udp_priority_default(),
+                        tunneling_udp_connections: tunneling.udp.connections,
                         routing_rules: routing.rules,
                         geolite2_cache_path: &geolite2_cache_path,
                         geolite2_url: routing.geolite2.url,
@@ -112,12 +118,14 @@ async fn main() -> anyhow::Result<()> {
         Config::Out(OutConfig { tunneling, routing }) => {
             out::up(out::Options {
                 labels: tunneling.label.map_or_else(Vec::new, OneOrMany::into_vec),
-                priority: tunneling.priority,
+                tcp_priority: tunneling.tcp.priority,
+                udp_priority: tunneling.udp.priority,
                 stun_server_addresses: tunneling
                     .stun_server
                     .map_or_else(stun_server_addresses_default, |address| address.into_vec()),
                 match_server_config: tunneling.match_server.into_config(),
                 routing_rules: routing.rules,
+                routing_priority: routing.priority,
             })
             .await?
         }

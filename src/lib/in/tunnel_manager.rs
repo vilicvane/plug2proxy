@@ -43,7 +43,8 @@ impl TunnelManager {
 
                     async move {
                         loop {
-                            if let Ok((tunnel, out_routing_rules)) = tunnel_provider.accept().await
+                            if let Ok((tunnel, (out_routing_rules, out_routing_priority))) =
+                                tunnel_provider.accept().await
                             {
                                 let tunnel_id = tunnel.id();
                                 let tunnel = Arc::new(tunnel);
@@ -65,7 +66,7 @@ impl TunnelManager {
                                         .register_tunnel(
                                             tunnel_id,
                                             out_routing_rules,
-                                            tunnel.priority(),
+                                            out_routing_priority,
                                         )
                                         .await;
                                 }

@@ -13,6 +13,10 @@ pub struct PunchQuicOutData {
 }
 
 impl MatchPair<PunchQuicInData, PunchQuicOutData> for (PunchQuicInData, PunchQuicOutData) {
+    fn get_match_name() -> &'static str {
+        "punch_quic"
+    }
+
     fn get_redis_match_channel_name(in_id: MatchInId, in_data: &PunchQuicInData) -> String {
         format!("punch_quic:{}/{}", in_id, in_data.address)
     }

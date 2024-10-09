@@ -17,6 +17,7 @@ use crate::{
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
     tunnel::{
         punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
+        yamux::{YamuxInTunnelConfig, YamuxInTunnelProvider},
         InTunnelLike as _, InTunnelProvider,
     },
     utils::{
@@ -35,7 +36,12 @@ pub struct Options<'a> {
     pub fake_ipv6_net: ipnet::Ipv6Net,
     pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
-    pub tunnel_connections: usize,
+    pub tunneling_tcp_priority: Option<i64>,
+    pub tunneling_tcp_priority_default: i64,
+    pub tunneling_tcp_connections: usize,
+    pub tunneling_udp_priority: Option<i64>,
+    pub tunneling_udp_priority_default: i64,
+    pub tunneling_udp_connections: usize,
     pub routing_rules: Vec<InRuleConfig>,
     pub geolite2_cache_path: &'a PathBuf,
     pub geolite2_url: String,
@@ -52,7 +58,12 @@ pub async fn up(
         fake_ipv6_net,
         stun_server_addresses,
         match_server_config,
-        tunnel_connections,
+        tunneling_tcp_priority,
+        tunneling_tcp_priority_default,
+        tunneling_tcp_connections,
+        tunneling_udp_priority,
+        tunneling_udp_priority_default,
+        tunneling_udp_connections,
         routing_rules,
         geolite2_cache_path,
         geolite2_url,
@@ -75,16 +86,29 @@ pub async fn up(
             resolved_addresses
         };
 
-        (0..tunnel_connections)
-            .map(|_| {
+        (0..tunneling_tcp_connections)
+            .map(|index| {
+                Box::new(YamuxInTunnelProvider::new(
+                    match_server.clone(),
+                    YamuxInTunnelConfig {
+                        priority: tunneling_tcp_priority,
+                        priority_default: tunneling_tcp_priority_default,
+                        traffic_mark,
+                    },
+                    index,
+                )) as Box<dyn InTunnelProvider + Send>
+            })
+            .chain((0..tunneling_udp_connections).map(|_| {
                 Box::new(PunchQuicInTunnelProvider::new(
                     match_server.clone(),
                     PunchQuicInTunnelConfig {
+                        priority: tunneling_udp_priority,
+                        priority_default: tunneling_udp_priority_default,
                         stun_server_addresses: stun_server_addresses.clone(),
                         traffic_mark,
                     },
                 )) as Box<dyn InTunnelProvider + Send>
-            })
+            }))
             .collect_vec()
     };
 
@@ -297,6 +321,8 @@ async fn handle_in_tcp_stream(
         async move {
             let (mut tunnel_recv_stream, mut tunnel_send_stream) =
                 tunnel.connect(destination, name).await?;
+
+            // println!("connected to {destination} via {tunnel}.");
 
             copy_bidirectional(
                 (&mut in_recv_stream, &mut tunnel_send_stream),

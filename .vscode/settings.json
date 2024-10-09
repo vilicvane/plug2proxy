@@ -25,6 +25,8 @@
         "nonblocking",
         "nsec",
         "ocsp",
+        "oneshot",
+        "Pkcs",
         "proto",
         "quic",
         "rdata",
@@ -38,6 +40,7 @@
         "sockopt",
         "tproxy",
         "webrtc",
-        "xoraddr"
+        "xoraddr",
+        "yamux"
     ]
 }

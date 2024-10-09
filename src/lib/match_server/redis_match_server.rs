@@ -83,8 +83,15 @@ impl InMatchServer for RedisInMatchServer {
 
         let match_out = tokio::select! {
             match_out = match_task => match_out?,
-            _ = announce_task => anyhow::bail!("failed to match a server."),
+            _ = announce_task => anyhow::bail!("failed to match IN."),
         };
+
+        log::info!(
+            "matched OUT {} {} as tunnel {}.",
+            <(TInData, TOutData)>::get_match_name(),
+            match_out.id,
+            match_out.tunnel_id
+        );
 
         Ok(match_out)
     }
@@ -113,8 +120,9 @@ impl OutMatchServerTrait for RedisOutMatchServer {
         &self,
         out_id: MatchOutId,
         out_data: TOutData,
-        out_priority: i64,
+        out_priority: Option<i64>,
         out_routing_rules: &[OutRuleConfig],
+        out_routing_priority: i64,
     ) -> anyhow::Result<MatchIn<TInData>>
     where
         TInData: serde::de::DeserializeOwned + Send,
@@ -138,7 +146,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
             let push = push_receiver
                 .recv()
                 .await
-                .ok_or_else(|| anyhow::anyhow!("in announcement subscription ended."))?;
+                .ok_or_else(|| anyhow::anyhow!("IN announcement subscription ended."))?;
 
             let Some(message) = redis::Msg::from_push_info(push) else {
                 continue;
@@ -188,10 +196,16 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                         tunnel_labels: self.labels.clone(),
                         tunnel_priority: out_priority,
                         routing_rules: out_routing_rules.to_vec(),
+                        routing_priority: out_routing_priority,
                         data: out_data,
                     })?,
                 )
                 .await?;
+
+            log::info!(
+                "matched IN {} {id} as tunnel {tunnel_id}.",
+                <(TInData, TOutData)>::get_match_name(),
+            );
 
             break Ok(MatchIn {
                 id,

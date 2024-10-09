@@ -2,7 +2,7 @@
 
 target=""
 
-while getopts "t::m:c:d:" flag; do
+while getopts "t::m:c::d:" flag; do
     case $flag in
     t)
         target=$OPTARG

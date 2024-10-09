@@ -29,6 +29,8 @@ use super::{
 };
 
 pub struct PunchQuicInTunnelConfig {
+    pub priority: Option<i64>,
+    pub priority_default: i64,
     pub stun_server_addresses: Vec<SocketAddr>,
     pub traffic_mark: u32,
 }
@@ -51,7 +53,7 @@ impl PunchQuicInTunnelProvider {
 
 #[async_trait::async_trait]
 impl InTunnelProvider for PunchQuicInTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, Vec<OutRuleConfig>)> {
+    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
         let socket = tokio::net::UdpSocket::bind("0:0").await?;
 
         nix::sys::socket::setsockopt(
@@ -68,6 +70,7 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             tunnel_id,
             tunnel_labels,
             tunnel_priority,
+            routing_priority,
             routing_rules,
             data: PunchQuicOutData { address },
         } = self
@@ -92,20 +95,23 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             tunnel_id,
             id,
             tunnel_labels,
-            tunnel_priority,
+            self.config
+                .priority
+                .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default)),
             PunchQuicInTunnelConnection::new(connection),
         );
 
-        log::info!("tunnel {tunnel} established.");
+        log::info!("punch_quic tunnel {tunnel} established.");
 
-        return Ok((Box::new(tunnel), routing_rules));
+        return Ok((Box::new(tunnel), (routing_rules, routing_priority)));
     }
 }
 
 pub struct PunchQuicOutTunnelConfig {
-    pub priority: i64,
+    pub priority: Option<i64>,
     pub stun_server_addresses: Vec<SocketAddr>,
     pub routing_rules: Vec<OutRuleConfig>,
+    pub routing_priority: i64,
 }
 
 pub struct PunchQuicOutTunnelProvider {
@@ -115,10 +121,10 @@ pub struct PunchQuicOutTunnelProvider {
 }
 
 impl PunchQuicOutTunnelProvider {
-    pub fn new(match_server: OutMatchServer, config: PunchQuicOutTunnelConfig) -> Self {
+    pub fn new(match_server: Arc<OutMatchServer>, config: PunchQuicOutTunnelConfig) -> Self {
         Self {
             id: MatchOutId::new(),
-            match_server: Arc::new(match_server),
+            match_server,
             config,
         }
     }
@@ -145,10 +151,9 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
                 },
                 self.config.priority,
                 &self.config.routing_rules,
+                self.config.routing_priority,
             )
             .await?;
-
-        log::info!("matched IN {address} as tunnel {tunnel_id}.");
 
         punch(&socket, address).await?;
 
@@ -161,7 +166,7 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
 
         let connection = incoming.accept()?.await?;
 
-        log::info!("tunnel {tunnel_id} established.");
+        log::info!("punch_quic tunnel {tunnel_id} established.");
 
         let connection = Arc::new(connection);
 

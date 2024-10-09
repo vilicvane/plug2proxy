@@ -39,8 +39,9 @@ impl OutMatchServerTrait for OutMatchServer {
         &self,
         out_id: MatchOutId,
         out_data: TOutData,
-        out_priority: i64,
+        out_priority: Option<i64>,
         out_routing_rules: &[OutRuleConfig],
+        out_routing_priority: i64,
     ) -> anyhow::Result<MatchIn<TInData>>
     where
         TInData: serde::de::DeserializeOwned + Send,
@@ -50,7 +51,13 @@ impl OutMatchServerTrait for OutMatchServer {
         match self {
             Self::Redis(redis) => {
                 redis
-                    .match_in(out_id, out_data, out_priority, out_routing_rules)
+                    .match_in(
+                        out_id,
+                        out_data,
+                        out_priority,
+                        out_routing_rules,
+                        out_routing_priority,
+                    )
                     .await
             }
         }

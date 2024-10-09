@@ -18,7 +18,8 @@ pub struct MatchOut<TData> {
     pub id: MatchOutId,
     pub tunnel_id: TunnelId,
     pub tunnel_labels: Vec<String>,
-    pub tunnel_priority: i64,
+    pub tunnel_priority: Option<i64>,
+    pub routing_priority: i64,
     pub routing_rules: Vec<OutRuleConfig>,
     pub data: TData,
 }
@@ -29,8 +30,9 @@ pub trait OutMatchServerTrait: Send {
         &self,
         out_id: MatchOutId,
         out_data: TOutData,
-        out_priority: i64,
+        out_priority: Option<i64>,
         out_routing_rules: &[OutRuleConfig],
+        out_routing_priority: i64,
     ) -> anyhow::Result<MatchIn<TInData>>
     where
         TInData: serde::de::DeserializeOwned + Send,
@@ -91,6 +93,7 @@ impl MatchOutId {
 }
 
 pub trait MatchPair<TInData, TOutData> {
+    fn get_match_name() -> &'static str;
     fn get_redis_match_channel_name(in_id: MatchInId, in_data: &TInData) -> String;
     fn get_redis_match_lock_key(in_id: MatchInId, in_data: &TInData) -> String;
     fn get_redis_in_announcement_channel_name() -> String;
