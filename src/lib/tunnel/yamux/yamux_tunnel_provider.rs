@@ -25,7 +25,7 @@ use super::{
     YamuxInTunnelConnection, YamuxOutTunnelConnection,
 };
 
-const H2_HANDSHAKE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+// const H2_HANDSHAKE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 pub struct YamuxInTunnelConfig {
     pub stun_server_addresses: Vec<SocketAddr>,
@@ -137,15 +137,15 @@ impl YamuxInTunnelProvider {
 
         let mut stream = tls_acceptor.accept(stream).await?;
 
-        {
-            let mut buffer = vec![0; H2_HANDSHAKE.len()];
+        // {
+        //     let mut buffer = vec![0; H2_HANDSHAKE.len()];
 
-            stream.read_exact(&mut buffer).await?;
+        //     stream.read_exact(&mut buffer).await?;
 
-            if buffer != H2_HANDSHAKE {
-                anyhow::bail!("invalid h2 handshake.");
-            }
-        }
+        //     if buffer != H2_HANDSHAKE {
+        //         anyhow::bail!("invalid h2 handshake.");
+        //     }
+        // }
 
         // {
         //     let token_length = token.as_bytes().len();
@@ -280,8 +280,8 @@ impl OutTunnelProvider for YamuxOutTunnelProvider {
             .connect("localhost".try_into()?, stream)
             .await?;
 
-        stream.write_all(H2_HANDSHAKE).await?;
-        stream.flush().await?;
+        // stream.write_all(H2_HANDSHAKE).await?;
+        // stream.flush().await?;
 
         // stream.write_all(token.as_bytes()).await?;
         // stream.flush().await?;

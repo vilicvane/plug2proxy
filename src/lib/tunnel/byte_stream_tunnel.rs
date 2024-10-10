@@ -81,7 +81,11 @@ where
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     )> {
+        println!("opening {destination_address}");
+
         let (read_stream, mut write_stream) = self.connection.open().await?;
+
+        println!("opened {destination_address}");
 
         let head = {
             let mut head = Vec::<u8>::new();

@@ -10,6 +10,7 @@ use crate::{
     config::MatchServerConfig,
     route::config::OutRuleConfig,
     tunnel::{
+        http2::{Http2OutTunnelConfig, Http2OutTunnelProvider},
         punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
         yamux::{YamuxOutTunnelConfig, YamuxOutTunnelProvider},
         OutTunnel, OutTunnelProvider as _,
@@ -53,9 +54,10 @@ pub async fn up(
         let routing_rules = routing_rules.clone();
 
         async {
-            let tunnel_provider = YamuxOutTunnelProvider::new(
+            let tunnel_provider = Http2OutTunnelProvider::new(
                 match_server,
-                YamuxOutTunnelConfig {
+                Http2OutTunnelConfig {
+                    stun_server_addresses,
                     priority: tcp_priority,
                     routing_rules,
                     routing_priority,

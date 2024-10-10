@@ -20,6 +20,7 @@ too_many_arguments = "allow"
 [dependencies]
 anyhow = { version = "1.0.88", features = ["backtrace"] }
 async-trait = "0.1.83"
+bytes = "1.7.2"
 chrono = "0.4.38"
 clap = { version = "4.5.19", features = ["derive"] }
 color-backtrace = "0.6.1"
@@ -27,10 +28,11 @@ colored = "2.1.0"
 derive_more = { version = "1.0.0", features = ["full"] }
 env_logger = "0.11.5"
 futures = "0.3.30"
-h2 = "0.4.6"
+h2 = { version = "0.4.6", features = ["stream"] }
 hickory-client = "0.24.1"
 hickory-resolver = { version = "0.24.1", features = ["dns-over-native-tls"] }
 hickory-server = { version = "0.24.1", features = ["hickory-resolver"] }
+http = "1.1.0"
 humantime = "2.1.0"
 ipnet = "2.10.0"
 itertools = "0.13.0"

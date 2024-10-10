@@ -16,6 +16,7 @@ use crate::{
     r#in::dns_resolver::convert_to_socket_addresses,
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
     tunnel::{
+        http2::{Http2InTunnelConfig, Http2InTunnelProvider},
         punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
         yamux::{YamuxInTunnelConfig, YamuxInTunnelProvider},
         InTunnelLike as _, InTunnelProvider,
@@ -86,21 +87,19 @@ pub async fn up(
             resolved_addresses
         };
 
-        let mut tunnel_providers = Vec::new();
+        let mut tunnel_providers = Vec::<Box<dyn InTunnelProvider + Send>>::new();
 
         for _ in 0..tunneling_tcp_connections {
-            let config = YamuxInTunnelConfig {
-                stun_server_addresses: stun_server_addresses.clone(),
+            let config = Http2InTunnelConfig {
                 priority: tunneling_tcp_priority,
                 priority_default: tunneling_tcp_priority_default,
-                listen: "0.0.0.0:18443".parse().unwrap(),
                 connections: 1,
                 traffic_mark,
             };
 
             tunnel_providers.push(Box::new(
-                YamuxInTunnelProvider::new(match_server.clone(), config).await?,
-            ) as Box<dyn InTunnelProvider + Send>)
+                Http2InTunnelProvider::new(match_server.clone(), config).await?,
+            ));
         }
 
         for _ in 0..tunneling_udp_connections {
@@ -114,7 +113,7 @@ pub async fn up(
             tunnel_providers.push(Box::new(PunchQuicInTunnelProvider::new(
                 match_server.clone(),
                 config,
-            )) as Box<dyn InTunnelProvider + Send>)
+            )));
         }
 
         tunnel_providers

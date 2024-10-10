@@ -1,5 +1,6 @@
 mod byte_stream_tunnel;
 pub mod direct_tunnel;
+pub mod http2;
 pub mod punch_quic;
 #[allow(clippy::module_inception)]
 mod tunnel;
