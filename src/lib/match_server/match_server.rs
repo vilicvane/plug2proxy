@@ -94,7 +94,5 @@ impl MatchOutId {
 
 pub trait MatchPair<TInData, TOutData> {
     fn get_match_name() -> &'static str;
-    fn get_redis_match_channel_name(in_id: MatchInId, in_data: &TInData) -> String;
-    fn get_redis_match_lock_key(in_id: MatchInId, in_data: &TInData) -> String;
     fn get_redis_in_announcement_channel_name() -> String;
 }

@@ -86,30 +86,38 @@ pub async fn up(
             resolved_addresses
         };
 
-        (0..tunneling_tcp_connections)
-            .map(|index| {
-                Box::new(YamuxInTunnelProvider::new(
-                    match_server.clone(),
-                    YamuxInTunnelConfig {
-                        priority: tunneling_tcp_priority,
-                        priority_default: tunneling_tcp_priority_default,
-                        traffic_mark,
-                    },
-                    index,
-                )) as Box<dyn InTunnelProvider + Send>
-            })
-            .chain((0..tunneling_udp_connections).map(|_| {
-                Box::new(PunchQuicInTunnelProvider::new(
-                    match_server.clone(),
-                    PunchQuicInTunnelConfig {
-                        priority: tunneling_udp_priority,
-                        priority_default: tunneling_udp_priority_default,
-                        stun_server_addresses: stun_server_addresses.clone(),
-                        traffic_mark,
-                    },
-                )) as Box<dyn InTunnelProvider + Send>
-            }))
-            .collect_vec()
+        let mut tunnel_providers = Vec::new();
+
+        for _ in 0..tunneling_tcp_connections {
+            let config = YamuxInTunnelConfig {
+                stun_server_addresses: stun_server_addresses.clone(),
+                priority: tunneling_tcp_priority,
+                priority_default: tunneling_tcp_priority_default,
+                listen: "0.0.0.0:18443".parse().unwrap(),
+                connections: 1,
+                traffic_mark,
+            };
+
+            tunnel_providers.push(Box::new(
+                YamuxInTunnelProvider::new(match_server.clone(), config).await?,
+            ) as Box<dyn InTunnelProvider + Send>)
+        }
+
+        for _ in 0..tunneling_udp_connections {
+            let config = PunchQuicInTunnelConfig {
+                priority: tunneling_udp_priority,
+                priority_default: tunneling_udp_priority_default,
+                stun_server_addresses: stun_server_addresses.clone(),
+                traffic_mark,
+            };
+
+            tunnel_providers.push(Box::new(PunchQuicInTunnelProvider::new(
+                match_server.clone(),
+                config,
+            )) as Box<dyn InTunnelProvider + Send>)
+        }
+
+        tunnel_providers
     };
 
     let router = Arc::new(Router::new(routing_rules));

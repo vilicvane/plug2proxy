@@ -1,6 +1,7 @@
 use std::{
     fmt,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    sync::Arc,
 };
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -21,6 +22,8 @@ pub trait ByteStreamInTunnelConnection: Send + Sync {
     async fn closed(&self);
 
     fn is_closed(&self) -> bool;
+
+    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit);
 }
 
 pub struct ByteStreamInTunnel<TConnection> {
@@ -31,7 +34,10 @@ pub struct ByteStreamInTunnel<TConnection> {
     connection: TConnection,
 }
 
-impl<TConnection> ByteStreamInTunnel<TConnection> {
+impl<TConnection> ByteStreamInTunnel<TConnection>
+where
+    TConnection: ByteStreamInTunnelConnection,
+{
     pub fn new(
         id: TunnelId,
         out_id: MatchOutId,
@@ -136,6 +142,10 @@ where
 
     fn is_closed(&self) -> bool {
         self.connection.is_closed()
+    }
+
+    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
+        self.connection.handle_permit(permit);
     }
 }
 

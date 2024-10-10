@@ -34,8 +34,6 @@ pub fn transparent_proxy_traffic_mark_default() -> u32 {
 
 pub fn stun_server_addresses_default() -> Vec<String> {
     vec![
-        "stun.sipnet.net:3478".to_string(),
-        "freestun.net:3478".to_string(),
         "stun.l.google.com:19302".to_string(),
         "stun.miwifi.com:3478".to_string(),
     ]

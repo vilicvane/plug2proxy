@@ -17,15 +17,16 @@ type YamuxServerConnection = yamux::Connection<
 >;
 
 pub struct YamuxInTunnelConnection {
-    connection: Arc<Mutex<YamuxClientConnection>>,
+    connection: Arc<Mutex<YamuxServerConnection>>,
     waker: Arc<Mutex<Option<futures::task::Waker>>>,
     open_mutex: tokio::sync::Mutex<()>,
     closed_notify: tokio::sync::Notify,
     closed: AtomicBool,
+    permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
 }
 
 impl YamuxInTunnelConnection {
-    pub fn new(connection: YamuxClientConnection) -> Self {
+    pub fn new(connection: YamuxServerConnection) -> Self {
         let connection = Arc::new(Mutex::new(connection));
 
         let waker = Arc::new(Mutex::new(None));
@@ -50,6 +51,7 @@ impl YamuxInTunnelConnection {
             open_mutex: tokio::sync::Mutex::new(()),
             closed_notify: tokio::sync::Notify::new(),
             closed: AtomicBool::new(false),
+            permit: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -105,17 +107,21 @@ impl ByteStreamInTunnelConnection for YamuxInTunnelConnection {
     fn is_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
+        self.permit.lock().unwrap().replace(permit);
+    }
 }
 
 pub struct YamuxOutTunnelConnection {
-    connection: Arc<Mutex<YamuxServerConnection>>,
+    connection: Arc<Mutex<YamuxClientConnection>>,
     closed: AtomicBool,
     closed_sender: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 impl YamuxOutTunnelConnection {
     pub fn new(
-        connection: YamuxServerConnection,
+        connection: YamuxClientConnection,
         closed_sender: tokio::sync::mpsc::UnboundedSender<()>,
     ) -> Self {
         YamuxOutTunnelConnection {

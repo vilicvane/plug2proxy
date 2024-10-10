@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -8,11 +8,15 @@ use crate::tunnel::byte_stream_tunnel::{
 
 pub struct PunchQuicInTunnelConnection {
     connection: quinn::Connection,
+    permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
 }
 
 impl PunchQuicInTunnelConnection {
     pub fn new(connection: quinn::Connection) -> Self {
-        PunchQuicInTunnelConnection { connection }
+        PunchQuicInTunnelConnection {
+            connection,
+            permit: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -35,6 +39,10 @@ impl ByteStreamInTunnelConnection for PunchQuicInTunnelConnection {
 
     fn is_closed(&self) -> bool {
         self.connection.close_reason().is_some()
+    }
+
+    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
+        self.permit.lock().unwrap().replace(permit);
     }
 }
 

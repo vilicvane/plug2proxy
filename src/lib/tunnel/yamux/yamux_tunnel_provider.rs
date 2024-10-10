@@ -17,6 +17,7 @@ use crate::{
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel,
     },
+    utils::stun::probe_external_ip,
 };
 
 use super::{
@@ -24,144 +25,32 @@ use super::{
     YamuxInTunnelConnection, YamuxOutTunnelConnection,
 };
 
+const H2_HANDSHAKE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
 pub struct YamuxInTunnelConfig {
+    pub stun_server_addresses: Vec<SocketAddr>,
     pub priority: Option<i64>,
     pub priority_default: i64,
+    pub listen: SocketAddr,
+    pub connections: usize,
     pub traffic_mark: u32,
 }
 
 pub struct YamuxInTunnelProvider {
     id: MatchInId,
-    index: usize,
     match_server: Arc<AnyInMatchServer>,
+    listener: tokio::net::TcpListener,
+    connections_semaphore: Arc<tokio::sync::Semaphore>,
+    server_config: Arc<tokio_rustls::rustls::ServerConfig>,
+    cert: String,
     config: YamuxInTunnelConfig,
 }
 
 impl YamuxInTunnelProvider {
-    pub fn new(
+    pub async fn new(
         match_server: Arc<AnyInMatchServer>,
         config: YamuxInTunnelConfig,
-        index: usize,
-    ) -> Self {
-        Self {
-            id: MatchInId::new(),
-            index,
-            match_server,
-            config,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl InTunnelProvider for YamuxInTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
-        let MatchOut {
-            id,
-            tunnel_id,
-            tunnel_labels,
-            tunnel_priority,
-            routing_priority,
-            routing_rules,
-            data:
-                YamuxOutData {
-                    address,
-                    cert,
-                    token,
-                },
-        } = self
-            .match_server
-            .match_out(self.id, YamuxInData { index: self.index })
-            .await?;
-
-        let stream = {
-            let socket = match address {
-                SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-                SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
-            };
-
-            nix::sys::socket::setsockopt(
-                &socket,
-                nix::sys::socket::sockopt::Mark,
-                &self.config.traffic_mark,
-            )?;
-
-            socket.connect(address).await?
-        };
-
-        println!("yamux tunnel {tunnel_id} underlying TCP connected.");
-
-        let root_store = {
-            let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-
-            let cert =
-                tokio_rustls::rustls::pki_types::CertificateDer::from_pem_slice(cert.as_bytes())
-                    .map_err(|_| anyhow::anyhow!("invalid cert."))?;
-
-            root_store.add(cert)?;
-
-            root_store
-        };
-
-        let client_config = tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        let client_config = Arc::new(client_config);
-
-        let tls_connector = tokio_rustls::TlsConnector::from(client_config);
-
-        let mut stream = tls_connector
-            .connect("localhost".try_into()?, stream)
-            .await?;
-
-        println!("yamux tunnel {tunnel_id} underlying TLS connection established.");
-
-        stream.write_all(token.as_bytes()).await?;
-        stream.flush().await?;
-
-        let yamux_connection = {
-            let mut config = yamux::Config::default();
-
-            config.set_max_num_streams(1024);
-
-            yamux::Connection::new(stream.compat(), config, yamux::Mode::Server)
-        };
-
-        let connection = YamuxInTunnelConnection::new(yamux_connection);
-
-        let tunnel = ByteStreamInTunnel::new(
-            tunnel_id,
-            id,
-            tunnel_labels,
-            self.config
-                .priority
-                .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default)),
-            connection,
-        );
-
-        log::info!("yamux tunnel {tunnel} established.");
-
-        return Ok((Box::new(tunnel), (routing_rules, routing_priority)));
-    }
-}
-
-pub struct YamuxOutTunnelConfig {
-    pub priority: Option<i64>,
-    pub stun_server_addresses: Vec<SocketAddr>,
-    pub routing_rules: Vec<OutRuleConfig>,
-    pub routing_priority: i64,
-}
-
-pub struct YamuxOutTunnelProvider {
-    id: MatchOutId,
-    match_server: Arc<OutMatchServer>,
-    config: YamuxOutTunnelConfig,
-    server_config: Arc<tokio_rustls::rustls::ServerConfig>,
-    cert: String,
-}
-
-impl YamuxOutTunnelProvider {
-    pub fn new(match_server: Arc<OutMatchServer>, config: YamuxOutTunnelConfig) -> Self {
+    ) -> anyhow::Result<Self> {
         let (server_config, cert) = {
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 
@@ -184,12 +73,156 @@ impl YamuxOutTunnelProvider {
             (server_config, cert)
         };
 
+        let listener = {
+            let socket = match config.listen {
+                SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+                SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+            };
+
+            socket.set_reuseport(true)?;
+
+            nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Mark,
+                &config.traffic_mark,
+            )?;
+
+            socket.bind(config.listen)?;
+
+            socket.listen(1024)?
+        };
+
+        Ok(Self {
+            id: MatchInId::new(),
+            match_server,
+            listener,
+            connections_semaphore: Arc::new(tokio::sync::Semaphore::new(config.connections)),
+            server_config,
+            cert,
+            config,
+        })
+    }
+
+    async fn _accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
+        let token = uuid::Uuid::new_v4().as_simple().to_string();
+
+        let external_ip = probe_external_ip(&self.config.stun_server_addresses).await?;
+
+        let external_address = SocketAddr::new(external_ip, self.listener.local_addr()?.port());
+
+        let MatchOut {
+            id,
+            tunnel_id,
+            tunnel_labels,
+            tunnel_priority,
+            routing_priority,
+            routing_rules,
+            data: _,
+        } = self
+            .match_server
+            .match_out(
+                self.id,
+                YamuxInData {
+                    address: external_address,
+                    cert: self.cert.clone(),
+                    token: token.clone(),
+                },
+            )
+            .await?;
+
+        let (stream, _) =
+            tokio::time::timeout(Duration::from_secs(5), self.listener.accept()).await??;
+
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.server_config.clone());
+
+        let mut stream = tls_acceptor.accept(stream).await?;
+
+        {
+            let mut buffer = vec![0; H2_HANDSHAKE.len()];
+
+            stream.read_exact(&mut buffer).await?;
+
+            if buffer != H2_HANDSHAKE {
+                anyhow::bail!("invalid h2 handshake.");
+            }
+        }
+
+        // {
+        //     let token_length = token.as_bytes().len();
+
+        //     let mut token_buffer = vec![0; token_length];
+
+        //     stream.read_exact(&mut token_buffer).await?;
+
+        //     println!("token: {:?}", token_buffer);
+
+        //     if token_buffer != token.as_bytes() {
+        //         println!("invalid token");
+
+        //         anyhow::bail!("invalid token.");
+        //     }
+        // }
+
+        let yamux_connection = {
+            let mut config = yamux::Config::default();
+
+            // config.set_max_num_streams(1024);
+
+            yamux::Connection::new(stream.compat(), config, yamux::Mode::Server)
+        };
+
+        let connection = YamuxInTunnelConnection::new(yamux_connection);
+
+        let tunnel = ByteStreamInTunnel::new(
+            tunnel_id,
+            id,
+            tunnel_labels,
+            self.config
+                .priority
+                .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default)),
+            connection,
+        );
+
+        log::info!("yamux tunnel {tunnel} established.");
+
+        Ok((Box::new(tunnel), (routing_rules, routing_priority)))
+    }
+}
+
+#[async_trait::async_trait]
+impl InTunnelProvider for YamuxInTunnelProvider {
+    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
+        let permit = self.connections_semaphore.clone().acquire_owned().await?;
+
+        let result = self._accept().await;
+
+        match &result {
+            Ok((tunnel, _)) => tunnel.handle_permit(permit),
+            Err(_) => {}
+        }
+
+        result
+    }
+}
+
+pub struct YamuxOutTunnelConfig {
+    pub priority: Option<i64>,
+    pub routing_rules: Vec<OutRuleConfig>,
+    pub routing_priority: i64,
+}
+
+pub struct YamuxOutTunnelProvider {
+    id: MatchOutId,
+    match_server: Arc<OutMatchServer>,
+    config: YamuxOutTunnelConfig,
+}
+
+impl YamuxOutTunnelProvider {
+    pub fn new(match_server: Arc<OutMatchServer>, config: YamuxOutTunnelConfig) -> Self {
         Self {
             id: MatchOutId::new(),
             match_server,
-            server_config,
             config,
-            cert,
         }
     }
 }
@@ -197,69 +230,70 @@ impl YamuxOutTunnelProvider {
 #[async_trait::async_trait]
 impl OutTunnelProvider for YamuxOutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
-        let (out_local_address, out_address) =
-            assign_local_and_public_addresses(&self.config.stun_server_addresses).await?;
-
-        println!("yamux tunnel assigned addresses {out_local_address}/{out_address}.");
-
-        let socket = tokio::net::TcpSocket::new_v4()?;
-
-        socket.set_reuseport(true)?;
-
-        socket.bind(out_local_address)?;
-
-        let listener = socket.listen(1024)?;
-
-        let token = uuid::Uuid::new_v4().as_simple().to_string();
-
         let MatchIn {
             id,
             tunnel_id,
-            data: _,
+            data:
+                YamuxInData {
+                    address,
+                    cert,
+                    token,
+                },
         } = self
             .match_server
             .match_in(
                 self.id,
-                YamuxOutData {
-                    address: out_address,
-                    cert: self.cert.clone(),
-                    token: token.clone(),
-                },
+                YamuxOutData {},
                 self.config.priority,
                 &self.config.routing_rules,
                 self.config.routing_priority,
             )
             .await?;
 
-        let (stream, _) = tokio::select! {
-            result = listener.accept() => result?,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                anyhow::bail!("accept timeout.")
-            }
+        let stream = tokio::net::TcpStream::connect(address).await?;
+
+        println!("yamux tunnel {tunnel_id} underlying TCP connected.");
+
+        let root_store = {
+            let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+
+            let cert =
+                tokio_rustls::rustls::pki_types::CertificateDer::from_pem_slice(cert.as_bytes())
+                    .map_err(|_| anyhow::anyhow!("invalid cert."))?;
+
+            root_store.add(cert)?;
+
+            root_store
         };
 
-        let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.server_config.clone());
+        let mut client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
 
-        let mut stream = tls_acceptor.accept(stream).await?;
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
 
-        {
-            let token_length = token.as_bytes().len();
+        let client_config = Arc::new(client_config);
 
-            let mut token_buffer = vec![0; token_length];
+        let tls_connector = tokio_rustls::TlsConnector::from(client_config);
 
-            stream.read_exact(&mut token_buffer).await?;
+        let mut stream = tls_connector
+            .connect("localhost".try_into()?, stream)
+            .await?;
 
-            if token_buffer != token.as_bytes() {
-                anyhow::bail!("invalid token.");
-            }
-        }
+        stream.write_all(H2_HANDSHAKE).await?;
+        stream.flush().await?;
+
+        // stream.write_all(token.as_bytes()).await?;
+        // stream.flush().await?;
+
+        println!("yamux tunnel {tunnel_id} underlying TLS connection established.");
 
         let yamux_connection = {
             let mut config = yamux::Config::default();
 
-            config.set_max_num_streams(1024);
+            // config.set_max_num_streams(1024);
 
-            yamux::Connection::new(stream.compat(), config, yamux::Mode::Server)
+            yamux::Connection::new(stream.compat(), config, yamux::Mode::Client)
         };
 
         let (closed_sender, mut closed_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -285,76 +319,4 @@ impl OutTunnelProvider for YamuxOutTunnelProvider {
 
         return Ok(Box::new(ByteStreamOutTunnel::new(tunnel_id, connection)));
     }
-}
-
-const STUN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
-
-async fn assign_local_and_public_addresses(
-    stun_server_addresses: &[SocketAddr],
-) -> anyhow::Result<(SocketAddr, SocketAddr)> {
-    let request_buffer = {
-        let mut request = stun::message::Message::new();
-
-        request.build(&[
-            Box::new(stun::agent::TransactionId::new()),
-            Box::new(stun::message::BINDING_REQUEST),
-        ])?;
-
-        let mut request_buffer = Vec::new();
-
-        request.write_to(&mut request_buffer)?;
-
-        request_buffer
-    };
-
-    for stun_server_address in stun_server_addresses {
-        let result = async {
-            let socket = tokio::net::TcpSocket::new_v4()?;
-
-            socket.set_reuseport(true)?;
-
-            socket.bind("0.0.0.0:0".parse()?)?;
-
-            println!("connecting to STUN server {stun_server_address}.");
-
-            let mut stream = socket.connect(*stun_server_address).await?;
-
-            println!("connected to STUN server {stun_server_address}.");
-
-            let local_address = stream.local_addr()?;
-
-            stream.write_all(&request_buffer).await?;
-            stream.shutdown().await?;
-
-            let mut response_buffer = Vec::new();
-
-            stream.read_to_end(&mut response_buffer).await?;
-
-            let mut response = stun::message::Message::new();
-
-            response.read_from(&mut Cursor::new(response_buffer))?;
-
-            let mut xor_addr = stun::xoraddr::XorMappedAddress::default();
-
-            xor_addr.get_from(&response)?;
-
-            anyhow::Ok((local_address, SocketAddr::new(xor_addr.ip, xor_addr.port)))
-        };
-
-        let result = tokio::select! {
-            result = result => result,
-            _ = tokio::time::sleep(STUN_RESPONSE_TIMEOUT) => Err(anyhow::anyhow!("request timeout.")),
-        };
-
-        match result {
-            Ok(addresses) => {
-                return Ok(addresses);
-            }
-            Err(error) => {
-                log::error!("STUN request to {stun_server_address} failed: {}", error);
-            }
-        }
-    }
-
-    anyhow::bail!("failed to assign local and public addresses.");
 }

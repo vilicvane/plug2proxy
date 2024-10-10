@@ -1,4 +1,4 @@
-use std::{fmt, net::SocketAddr};
+use std::{fmt, net::SocketAddr, sync::Arc};
 
 use crate::match_server::MatchOutId;
 
@@ -27,6 +27,8 @@ pub trait InTunnel: InTunnelLike {
     async fn closed(&self);
 
     fn is_closed(&self) -> bool;
+
+    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit);
 }
 
 #[async_trait::async_trait]

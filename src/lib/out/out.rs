@@ -57,7 +57,6 @@ pub async fn up(
                 match_server,
                 YamuxOutTunnelConfig {
                     priority: tcp_priority,
-                    stun_server_addresses,
                     routing_rules,
                     routing_priority,
                 },

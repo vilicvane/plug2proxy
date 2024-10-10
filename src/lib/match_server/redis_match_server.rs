@@ -9,6 +9,9 @@ use super::{
     MatchInId, MatchOutId, MatchPair,
 };
 
+const MATCH_TIMEOUT_SECONDS: i64 = 5;
+const MATCH_IN_DATA_EXPIRATION_IN_SECONDS: i64 = 30;
+
 pub struct RedisInMatchServer {
     redis: redis::Client,
 }
@@ -41,10 +44,9 @@ impl InMatchServer for RedisInMatchServer {
             )
             .await?;
 
-        let match_channel_name =
-            <(TInData, TOutData)>::get_redis_match_channel_name(in_id, &in_data);
+        let match_key = uuid::Uuid::new_v4().to_string();
 
-        connection.subscribe(match_channel_name).await?;
+        connection.subscribe(&match_key).await?;
 
         let match_task = async {
             while let Some(push) = push_receiver.recv().await {
@@ -66,8 +68,19 @@ impl InMatchServer for RedisInMatchServer {
 
             let announcement = InAnnouncement {
                 id: in_id,
-                data: in_data,
+                match_key: match_key.clone(),
             };
+
+            connection
+                .send_packed_command(
+                    redis::cmd("SET")
+                        .arg(&match_key)
+                        .arg(serde_json::to_string(&in_data)?)
+                        .arg("NX")
+                        .arg("EX")
+                        .arg(MATCH_IN_DATA_EXPIRATION_IN_SECONDS),
+                )
+                .await?;
 
             loop {
                 connection
@@ -75,6 +88,10 @@ impl InMatchServer for RedisInMatchServer {
                     .await?;
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
+
+                connection
+                    .expire(&match_key, MATCH_IN_DATA_EXPIRATION_IN_SECONDS)
+                    .await?;
             }
 
             #[allow(unreachable_code)]
@@ -152,7 +169,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                 continue;
             };
 
-            let Ok(InAnnouncement::<TInData> { id, data }) =
+            let Ok(InAnnouncement { id, match_key }) =
                 serde_json::from_slice(message.get_payload_bytes())
             else {
                 continue;
@@ -162,14 +179,14 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                 continue;
             }
 
-            let match_key = <(TInData, TOutData)>::get_redis_match_lock_key(id, &data);
+            let match_lock_key = format!("{match_key}:lock");
 
-            log::debug!("locking IN {match_key}...");
+            log::debug!("locking IN {match_lock_key}...");
 
             let match_key_locking = connection
                 .send_packed_command(
                     redis::cmd("SET")
-                        .arg(&match_key)
+                        .arg(&match_lock_key)
                         .arg(serde_json::to_string(&out_data)?)
                         .arg("NX")
                         .arg("EX")
@@ -178,18 +195,22 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                 .await?;
 
             if !matches!(match_key_locking, redis::Value::Okay) {
-                log::debug!("missed IN {match_key}...");
+                log::debug!("missed IN {match_lock_key}...");
 
                 continue;
             }
 
+            let in_data: String = connection.get(&match_key).await?;
+
+            let in_data: TInData = serde_json::from_str(&in_data)?;
+
             let tunnel_id = TunnelId::new();
 
-            log::debug!("matching IN {match_key}...");
+            log::debug!("matching IN {match_lock_key}...");
 
             connection
                 .publish(
-                    <(TInData, TOutData)>::get_redis_match_channel_name(id, &data),
+                    match_key,
                     serde_json::to_string(&MatchOut {
                         id: out_id,
                         tunnel_id,
@@ -210,7 +231,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
             break Ok(MatchIn {
                 id,
                 tunnel_id,
-                data,
+                data: in_data,
             });
         }
     }
@@ -229,9 +250,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct InAnnouncement<TInData> {
+struct InAnnouncement {
     id: MatchInId,
-    data: TInData,
+    match_key: String,
 }
-
-const MATCH_TIMEOUT_SECONDS: u64 = 30;
