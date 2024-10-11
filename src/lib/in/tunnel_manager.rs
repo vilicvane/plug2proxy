@@ -35,71 +35,21 @@ impl TunnelManager {
         let accept_handles = tunnel_providers
             .into_iter()
             .map(|tunnel_provider| {
-                tokio::spawn({
-                    let router = Arc::clone(&router);
+                let router = router.clone();
+                let tunnel_map = tunnel_map.clone();
+                let label_to_tunnels_map = label_to_tunnels_map.clone();
 
-                    let tunnel_map = Arc::clone(&tunnel_map);
-                    let label_to_tunnels_map = Arc::clone(&label_to_tunnels_map);
-
-                    async move {
-                        loop {
-                            if let Ok((tunnel, (out_routing_rules, out_routing_priority))) =
-                                tunnel_provider.accept().await
-                            {
-                                let tunnel_id = tunnel.id();
-                                let tunnel = Arc::new(tunnel);
-
-                                {
-                                    let mut tunnel_map = tunnel_map.lock().await;
-
-                                    tunnel_map.insert(tunnel_id, Arc::clone(&tunnel));
-
-                                    let mut label_to_tunnels_map =
-                                        label_to_tunnels_map.lock().await;
-
-                                    Self::update_label_to_tunnels_map(
-                                        &tunnel_map,
-                                        &mut label_to_tunnels_map,
-                                    );
-
-                                    router
-                                        .register_tunnel(
-                                            tunnel_id,
-                                            out_routing_rules,
-                                            out_routing_priority,
-                                        )
-                                        .await;
-                                }
-
-                                tokio::spawn({
-                                    let tunnel_map = tunnel_map.clone();
-                                    let label_to_tunnels_map = label_to_tunnels_map.clone();
-
-                                    let router = router.clone();
-
-                                    async move {
-                                        tunnel.closed().await;
-
-                                        log::info!("tunnel {tunnel_id} closed.");
-
-                                        let mut tunnel_map = tunnel_map.lock().await;
-
-                                        tunnel_map.remove(&tunnel_id);
-
-                                        let mut label_to_tunnels_map =
-                                            label_to_tunnels_map.lock().await;
-
-                                        Self::update_label_to_tunnels_map(
-                                            &tunnel_map,
-                                            &mut label_to_tunnels_map,
-                                        );
-
-                                        router.unregister_tunnel(tunnel_id).await;
-                                    }
-                                });
-                            }
-                        }
-                    }
+                tokio::task::spawn_blocking(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(Self::handle_tunnel_provider(
+                            tunnel_provider,
+                            router,
+                            tunnel_map,
+                            label_to_tunnels_map,
+                        ));
                 })
             })
             .collect_vec();
@@ -160,6 +110,59 @@ impl TunnelManager {
         }
 
         None
+    }
+
+    async fn handle_tunnel_provider(
+        tunnel_provider: Box<dyn InTunnelProvider + Send>,
+        router: Arc<Router>,
+        tunnel_map: Arc<tokio::sync::Mutex<TunnelMap>>,
+        label_to_tunnels_map: Arc<tokio::sync::Mutex<LabelToTunnelsMap>>,
+    ) {
+        loop {
+            if let Ok((tunnel, (out_routing_rules, out_routing_priority))) =
+                tunnel_provider.accept().await
+            {
+                let tunnel_id = tunnel.id();
+                let tunnel = Arc::new(tunnel);
+
+                {
+                    let mut tunnel_map = tunnel_map.lock().await;
+
+                    tunnel_map.insert(tunnel_id, Arc::clone(&tunnel));
+
+                    let mut label_to_tunnels_map = label_to_tunnels_map.lock().await;
+
+                    Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
+
+                    router
+                        .register_tunnel(tunnel_id, out_routing_rules, out_routing_priority)
+                        .await;
+                }
+
+                tokio::spawn({
+                    let tunnel_map = tunnel_map.clone();
+                    let label_to_tunnels_map = label_to_tunnels_map.clone();
+
+                    let router = router.clone();
+
+                    async move {
+                        tunnel.closed().await;
+
+                        log::info!("tunnel {tunnel_id} closed.");
+
+                        let mut tunnel_map = tunnel_map.lock().await;
+
+                        tunnel_map.remove(&tunnel_id);
+
+                        let mut label_to_tunnels_map = label_to_tunnels_map.lock().await;
+
+                        Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
+
+                        router.unregister_tunnel(tunnel_id).await;
+                    }
+                });
+            }
+        }
     }
 
     fn update_label_to_tunnels_map(
