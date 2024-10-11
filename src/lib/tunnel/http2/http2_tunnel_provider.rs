@@ -1,15 +1,7 @@
-use std::{
-    io::Cursor,
-    net::{SocketAddr, SocketAddrV4},
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::TryFutureExt;
 use rustls::pki_types::pem::PemObject;
-use stun::message::Getter as _;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::compat::TokioAsyncReadCompatExt as _;
 
 use crate::{
     match_server::{
@@ -18,8 +10,6 @@ use crate::{
     },
     route::config::OutRuleConfig,
     tunnel::{
-        self,
-        byte_stream_tunnel::{ByteStreamInTunnel, ByteStreamOutTunnel},
         http2::{Http2InTunnel, Http2OutTunnel},
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel,
@@ -32,14 +22,12 @@ use super::match_pair::{Http2InData, Http2OutData};
 pub struct Http2InTunnelConfig {
     pub priority: Option<i64>,
     pub priority_default: i64,
-    pub connections: usize,
     pub traffic_mark: u32,
 }
 
 pub struct Http2InTunnelProvider {
     id: MatchInId,
     match_server: Arc<AnyInMatchServer>,
-    connections_semaphore: Arc<tokio::sync::Semaphore>,
     config: Http2InTunnelConfig,
 }
 
@@ -51,12 +39,14 @@ impl Http2InTunnelProvider {
         Ok(Self {
             id: MatchInId::new(),
             match_server,
-            connections_semaphore: Arc::new(tokio::sync::Semaphore::new(config.connections)),
             config,
         })
     }
+}
 
-    async fn _accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
+#[async_trait::async_trait]
+impl InTunnelProvider for Http2InTunnelProvider {
+    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
         let MatchOut {
             id,
             tunnel_id,
@@ -67,9 +57,20 @@ impl Http2InTunnelProvider {
             data: Http2OutData { address, cert, key },
         } = self.match_server.match_out(self.id, Http2InData {}).await?;
 
-        let stream = tokio::net::TcpStream::connect(address).await?;
+        let socket = match address {
+            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        }?;
 
-        println!("http2 tunnel {tunnel_id} underlying TCP connected.");
+        nix::sys::socket::setsockopt(
+            &socket,
+            nix::sys::socket::sockopt::Mark,
+            &self.config.traffic_mark,
+        )?;
+
+        let stream = socket.connect(address).await?;
+
+        log::debug!("http2 tunnel {tunnel_id} underlying TCP connected.");
 
         let client_config = {
             let cert =
@@ -100,7 +101,7 @@ impl Http2InTunnelProvider {
             .connect("localhost".try_into()?, stream)
             .await?;
 
-        println!("http2 tunnel {tunnel_id} underlying TLS connection established.");
+        log::debug!("http2 tunnel {tunnel_id} underlying TLS connection established.");
 
         let (request_sender, h2_connection) = h2::client::handshake(stream).await?;
 
@@ -115,25 +116,9 @@ impl Http2InTunnelProvider {
             h2_connection,
         );
 
-        log::info!("http2 tunnel {tunnel} established.");
+        log::info!("tunnel {tunnel} established.");
 
         Ok((Box::new(tunnel), (routing_rules, routing_priority)))
-    }
-}
-
-#[async_trait::async_trait]
-impl InTunnelProvider for Http2InTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
-        let permit = self.connections_semaphore.clone().acquire_owned().await?;
-
-        let result = self._accept().await;
-
-        match &result {
-            Ok((tunnel, _)) => tunnel.handle_permit(permit),
-            Err(_) => {}
-        }
-
-        result
     }
 }
 
@@ -208,15 +193,11 @@ impl Http2OutTunnelProvider {
 #[async_trait::async_trait]
 impl OutTunnelProvider for Http2OutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
-        println!("probing external ip.");
-
         let ip = probe_external_ip(&self.config.stun_server_addresses).await?;
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
 
         let external_address = SocketAddr::new(ip, listener.local_addr()?.port());
-
-        println!("external address is {external_address}.");
 
         let MatchIn {
             id,
@@ -243,15 +224,13 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
 
         let stream = tls_acceptor.accept(stream).await?;
 
-        let mut h2_connection = h2::server::handshake(stream).await?;
-
-        // h2_connection.enable_connect_protocol()?;
+        let h2_connection = h2::server::handshake(stream).await?;
 
         let (closed_sender, mut closed_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let tunnel = Http2OutTunnel::new(tunnel_id, h2_connection, closed_sender);
 
-        log::info!("http2 tunnel {tunnel_id} established.");
+        log::info!("tunnel {tunnel} established.");
 
         self.match_server.register_in(id).await?;
 

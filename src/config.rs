@@ -9,7 +9,6 @@ use plug2proxy::{
 use crate::constants::{
     fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
     transparent_proxy_address_default, transparent_proxy_traffic_mark_default,
-    tunneling_tcp_connections_default, tunneling_udp_connections_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -80,32 +79,32 @@ pub struct InTunnelingConfig {
 
 #[derive(serde::Deserialize)]
 pub struct InTunnelingTcpConfig {
+    #[serde(default = "true_default")]
+    pub enabled: bool,
     pub priority: Option<i64>,
-    #[serde(default = "tunneling_tcp_connections_default")]
-    pub connections: usize,
 }
 
 impl Default for InTunnelingTcpConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             priority: None,
-            connections: tunneling_tcp_connections_default(),
         }
     }
 }
 
 #[derive(serde::Deserialize)]
 pub struct InTunnelingUdpConfig {
+    #[serde(default = "true_default")]
+    pub enabled: bool,
     pub priority: Option<i64>,
-    #[serde(default = "tunneling_udp_connections_default")]
-    pub connections: usize,
 }
 
 impl Default for InTunnelingUdpConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             priority: None,
-            connections: tunneling_udp_connections_default(),
         }
     }
 }
@@ -177,4 +176,8 @@ pub struct OutRoutingConfig {
     pub priority: i64,
     #[serde(default)]
     pub rules: Vec<OutRuleConfig>,
+}
+
+fn true_default() -> bool {
+    true
 }

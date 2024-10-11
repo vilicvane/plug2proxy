@@ -43,16 +43,8 @@ pub fn tunneling_tcp_priority_default() -> i64 {
     0
 }
 
-pub fn tunneling_tcp_connections_default() -> usize {
-    1
-}
-
 pub fn tunneling_udp_priority_default() -> i64 {
     10
-}
-
-pub fn tunneling_udp_connections_default() -> usize {
-    1
 }
 
 pub fn fake_ip_dns_db_path_default(data_dir: Option<&str>) -> PathBuf {

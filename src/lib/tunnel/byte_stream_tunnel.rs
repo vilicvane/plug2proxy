@@ -1,12 +1,11 @@
 use std::{
     fmt,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Arc,
 };
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use crate::match_server::MatchOutId;
+use crate::{match_server::MatchOutId, tunnel::common::get_tunnel_string};
 
 use super::{InTunnel, InTunnelLike, OutTunnel, TunnelId};
 
@@ -22,11 +21,10 @@ pub trait ByteStreamInTunnelConnection: Send + Sync {
     async fn closed(&self);
 
     fn is_closed(&self) -> bool;
-
-    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit);
 }
 
 pub struct ByteStreamInTunnel<TConnection> {
+    r#type: &'static str,
     id: TunnelId,
     out_id: MatchOutId,
     labels: Vec<String>,
@@ -39,6 +37,7 @@ where
     TConnection: ByteStreamInTunnelConnection,
 {
     pub fn new(
+        r#type: &'static str,
         id: TunnelId,
         out_id: MatchOutId,
         labels: Vec<String>,
@@ -46,6 +45,7 @@ where
         connection: TConnection,
     ) -> Self {
         ByteStreamInTunnel {
+            r#type,
             id,
             out_id,
             labels,
@@ -57,14 +57,11 @@ where
 
 impl<TConnection> fmt::Display for ByteStreamInTunnel<TConnection> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self.id.to_string();
-        let id_short = id.split('-').next().unwrap();
-
-        if self.labels.is_empty() {
-            write!(formatter, "{id_short}",)
-        } else {
-            write!(formatter, "{id_short} ({})", self.labels.join(","))
-        }
+        write!(
+            formatter,
+            "{}",
+            get_tunnel_string(self.r#type, self.id, &self.labels)
+        )
     }
 }
 
@@ -81,11 +78,7 @@ where
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     )> {
-        println!("opening {destination_address}");
-
         let (read_stream, mut write_stream) = self.connection.open().await?;
-
-        println!("opened {destination_address}");
 
         let head = {
             let mut head = Vec::<u8>::new();
@@ -146,10 +139,6 @@ where
 
     fn is_closed(&self) -> bool {
         self.connection.is_closed()
-    }
-
-    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
-        self.connection.handle_permit(permit);
     }
 }
 

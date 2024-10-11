@@ -92,6 +92,7 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
         let connection = endpoint.connect(address, "localhost")?.await?;
 
         let tunnel = ByteStreamInTunnel::new(
+            "quic",
             tunnel_id,
             id,
             tunnel_labels,

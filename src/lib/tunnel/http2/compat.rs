@@ -1,17 +1,26 @@
 use std::{
     cmp::min,
     pin::Pin,
-    task::ready,
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
 };
 
+use futures::FutureExt;
+
+#[derive(derive_more::From)]
+pub enum ResponseFutureOrRecvStream {
+    ResponseFuture(h2::client::ResponseFuture),
+    RecvStream(h2::RecvStream),
+}
+
 pub struct H2RecvStreamAsyncRead {
-    recv_stream: h2::RecvStream,
+    inner: ResponseFutureOrRecvStream,
 }
 
 impl H2RecvStreamAsyncRead {
-    pub fn new(recv_stream: h2::RecvStream) -> Self {
-        Self { recv_stream }
+    pub fn new(inner: impl Into<ResponseFutureOrRecvStream>) -> Self {
+        Self {
+            inner: inner.into(),
+        }
     }
 }
 
@@ -23,20 +32,35 @@ impl tokio::io::AsyncRead for H2RecvStreamAsyncRead {
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
 
-        if let Some(data) = ready!(this.recv_stream.poll_data(context)) {
-            let data = data.map_err(h2_error_to_io_error)?;
+        loop {
+            break match &mut this.inner {
+                ResponseFutureOrRecvStream::ResponseFuture(response_future) => {
+                    let response = ready!(response_future.poll_unpin(context))
+                        .map_err(h2_error_to_io_error)?;
 
-            let length = min(data.len(), buffer.remaining());
+                    let body = response.into_body();
 
-            buffer.put_slice(&data[..length]);
+                    this.inner = ResponseFutureOrRecvStream::RecvStream(body);
 
-            Poll::Ready(Ok(this
-                .recv_stream
-                .flow_control()
-                .release_capacity(length)
-                .map_err(h2_error_to_io_error)?))
-        } else {
-            Poll::Ready(Ok(()))
+                    continue;
+                }
+                ResponseFutureOrRecvStream::RecvStream(recv_stream) => {
+                    if let Some(data) = ready!(recv_stream.poll_data(context)) {
+                        let data = data.map_err(h2_error_to_io_error)?;
+
+                        let length = min(data.len(), buffer.remaining());
+
+                        buffer.put_slice(&data[..length]);
+
+                        Poll::Ready(Ok(recv_stream
+                            .flow_control()
+                            .release_capacity(length)
+                            .map_err(h2_error_to_io_error)?))
+                    } else {
+                        Poll::Ready(Ok(()))
+                    }
+                }
+            };
         }
     }
 }

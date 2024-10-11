@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use futures::future::join_all;
 use itertools::Itertools as _;
 
 use crate::{
@@ -12,8 +13,7 @@ use crate::{
     tunnel::{
         http2::{Http2OutTunnelConfig, Http2OutTunnelProvider},
         punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
-        yamux::{YamuxOutTunnelConfig, YamuxOutTunnelProvider},
-        OutTunnel, OutTunnelProvider as _,
+        OutTunnel, OutTunnelProvider,
     },
     utils::io::copy_bidirectional,
 };
@@ -48,65 +48,56 @@ pub async fn up(
         .flat_map(|address| address.to_socket_addrs().unwrap_or_default())
         .collect_vec();
 
-    let tcp_tunneling_task = {
-        let match_server = match_server.clone();
-        let stun_server_addresses = stun_server_addresses.clone();
-        let routing_rules = routing_rules.clone();
+    let tunnel_providers: Vec<Box<dyn OutTunnelProvider>> = vec![
+        Box::new(Http2OutTunnelProvider::new(
+            match_server.clone(),
+            Http2OutTunnelConfig {
+                stun_server_addresses: stun_server_addresses.clone(),
+                priority: tcp_priority,
+                routing_priority,
+                routing_rules: routing_rules.clone(),
+            },
+        )),
+        Box::new(PunchQuicOutTunnelProvider::new(
+            match_server.clone(),
+            PunchQuicOutTunnelConfig {
+                stun_server_addresses,
+                priority: udp_priority,
+                routing_priority,
+                routing_rules,
+            },
+        )),
+    ];
 
-        async {
-            let tunnel_provider = Http2OutTunnelProvider::new(
-                match_server,
-                Http2OutTunnelConfig {
-                    stun_server_addresses,
-                    priority: tcp_priority,
-                    routing_rules,
-                    routing_priority,
-                },
-            );
-
+    let tunneling_tasks = tunnel_providers
+        .into_iter()
+        .map(|tunnel_provider| async move {
             loop {
                 match tunnel_provider.accept().await {
                     Ok(tunnel) => {
-                        tokio::spawn(handle_tunnel(tunnel));
+                        tokio::task::spawn_blocking(|| {
+                            tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap()
+                                .block_on(handle_tunnel(tunnel));
+                        });
                     }
                     Err(error) => {
                         log::error!("error accepting tunnel: {:?}", error);
                     }
                 }
             }
-        }
-    };
+        })
+        .collect_vec();
 
-    let udp_tunneling_task = async {
-        let tunnel_provider = PunchQuicOutTunnelProvider::new(
-            match_server,
-            PunchQuicOutTunnelConfig {
-                priority: udp_priority,
-                stun_server_addresses,
-                routing_rules,
-                routing_priority,
-            },
-        );
-
-        loop {
-            match tunnel_provider.accept().await {
-                Ok(tunnel) => {
-                    tokio::spawn(handle_tunnel(tunnel));
-                }
-                Err(error) => {
-                    log::error!("error accepting tunnel: {:?}", error);
-                }
-            }
-        }
-    };
-
-    tokio::join!(tcp_tunneling_task, udp_tunneling_task);
+    join_all(tunneling_tasks).await;
 
     #[allow(unreachable_code)]
     Ok(())
 }
 
-async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
+async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) {
     loop {
         match tunnel.accept().await {
             Ok((
@@ -134,8 +125,6 @@ async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) -> anyhow::Result<()> {
             }
         }
     }
-
-    Ok(())
 }
 
 async fn handle_tcp_stream(

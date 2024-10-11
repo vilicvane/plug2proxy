@@ -1,20 +1,15 @@
 use std::{
     fmt,
     net::SocketAddr,
-    str::Bytes,
     sync::{atomic::AtomicBool, Arc, Mutex},
-    time::Duration,
 };
 
-use chrono::format;
-use futures::AsyncReadExt;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt as _};
 
 use crate::{
     match_server::MatchOutId,
     tunnel::{
-        byte_stream_tunnel::{ByteStreamInTunnelConnection, ByteStreamOutTunnelConnection},
+        common::get_tunnel_string,
         http2::compat::{H2RecvStreamAsyncRead, H2SendStreamAsyncWrite},
         InTunnel, InTunnelLike, OutTunnel, TunnelId,
     },
@@ -34,7 +29,6 @@ pub struct Http2InTunnel {
     request_sender: Arc<Mutex<h2::client::SendRequest<bytes::Bytes>>>,
     closed_notify: Arc<tokio::sync::Notify>,
     closed: AtomicBool,
-    permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
 }
 
 impl Http2InTunnel {
@@ -68,23 +62,17 @@ impl Http2InTunnel {
             request_sender: Arc::new(Mutex::new(request_sender)),
             closed_notify,
             closed: AtomicBool::new(false),
-            permit: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 impl fmt::Display for Http2InTunnel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self.id().to_string();
-        let id_short = id.split('-').next().unwrap();
-
-        let name = format!("http2 {id_short}");
-
-        if self.labels().is_empty() {
-            write!(formatter, "{}", name)
-        } else {
-            write!(formatter, "{} ({})", name, self.labels().join(","))
-        }
+        write!(
+            formatter,
+            "{}",
+            get_tunnel_string("http2", self.id(), self.labels())
+        )
     }
 }
 
@@ -118,15 +106,7 @@ impl InTunnelLike for Http2InTunnel {
             .unwrap()
             .send_request(http_request, false)?;
 
-        println!("send request called");
-
-        let response = response.await?;
-
-        println!("response received: {:?}", response);
-
-        let body = response.into_body();
-
-        let read_stream = H2RecvStreamAsyncRead::new(body);
+        let read_stream = H2RecvStreamAsyncRead::new(response);
         let write_stream = H2SendStreamAsyncWrite::new(write_stream);
 
         Ok((Box::new(read_stream), Box::new(write_stream)))
@@ -158,10 +138,6 @@ impl InTunnel for Http2InTunnel {
     fn is_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::Relaxed)
     }
-
-    fn handle_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
-        self.permit.lock().unwrap().replace(permit);
-    }
 }
 
 pub struct Http2OutTunnel {
@@ -186,6 +162,12 @@ impl Http2OutTunnel {
     }
 }
 
+impl fmt::Display for Http2OutTunnel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", get_tunnel_string("http2", self.id(), &[]))
+    }
+}
+
 #[async_trait::async_trait]
 impl OutTunnel for Http2OutTunnel {
     fn id(&self) -> TunnelId {
@@ -201,11 +183,7 @@ impl OutTunnel for Http2OutTunnel {
             Box<dyn AsyncWrite + Send + Unpin>,
         ),
     )> {
-        println!("accept called");
-
         let mut connection = self.connection.lock().await;
-
-        println!("accepting connection");
 
         let result = match connection.accept().await {
             Some(Ok((request, mut response_sender))) => {
@@ -243,8 +221,6 @@ impl OutTunnel for Http2OutTunnel {
             Some(Err(error)) => Err(error.into()),
             None => Err(anyhow::anyhow!("http2 connection closed.")),
         };
-
-        println!("connection accepted");
 
         if result.is_err() {
             self.closed
