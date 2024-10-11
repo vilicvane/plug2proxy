@@ -4,7 +4,6 @@ use std::{
     time::Duration,
 };
 
-use futures::TryFutureExt;
 use stun::message::Getter as _;
 use webrtc_util::Conn;
 
@@ -140,7 +139,7 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
             configure_peer_socket(socket, &self.config.stun_server_addresses).await?;
 
         let MatchIn {
-            id,
+            id: _,
             tunnel_id,
             data: PunchQuicInData { address },
         } = self
@@ -170,22 +169,6 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
         log::info!("punch_quic tunnel {tunnel_id} established.");
 
         let connection = Arc::new(connection);
-
-        self.match_server.register_in(id).await?;
-
-        tokio::spawn({
-            let connection = Arc::clone(&connection);
-            let match_server = Arc::clone(&self.match_server);
-
-            async move {
-                let _ = connection.closed().await;
-
-                match_server.unregister_in(&id).await?;
-
-                anyhow::Ok(())
-            }
-            .inspect_err(|error| log::error!("{}", error))
-        });
 
         return Ok(Box::new(ByteStreamOutTunnel::new(
             tunnel_id,

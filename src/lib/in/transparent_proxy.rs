@@ -37,6 +37,7 @@ pub struct Options<'a> {
     pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
     pub tunneling_tcp_enabled: bool,
+    pub tunneling_tcp_connections: usize,
     pub tunneling_tcp_priority: Option<i64>,
     pub tunneling_tcp_priority_default: i64,
     pub tunneling_udp_enabled: bool,
@@ -59,6 +60,7 @@ pub async fn up(
         stun_server_addresses,
         match_server_config,
         tunneling_tcp_enabled,
+        tunneling_tcp_connections,
         tunneling_tcp_priority,
         tunneling_tcp_priority_default,
         tunneling_udp_enabled,
@@ -90,6 +92,7 @@ pub async fn up(
 
         if tunneling_tcp_enabled {
             let config = Http2InTunnelConfig {
+                connections: tunneling_tcp_connections,
                 priority: tunneling_tcp_priority,
                 priority_default: tunneling_tcp_priority_default,
                 traffic_mark,

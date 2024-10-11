@@ -96,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
                                 .into_vec()),
                         match_server_config: tunneling.match_server.into_config(),
                         tunneling_tcp_enabled: tunneling.tcp.enabled,
+                        tunneling_tcp_connections: tunneling.tcp.connections,
                         tunneling_tcp_priority: tunneling.tcp.priority,
                         tunneling_tcp_priority_default: tunneling_tcp_priority_default(),
                         tunneling_udp_enabled: tunneling.udp.enabled,

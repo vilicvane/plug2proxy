@@ -175,22 +175,15 @@ pub struct Http2OutTunnel {
     id: TunnelId,
     connection: Arc<tokio::sync::Mutex<Http2ServerConnection>>,
     closed: AtomicBool,
-    closed_sender: tokio::sync::mpsc::UnboundedSender<()>,
     fd: i32,
 }
 
 impl Http2OutTunnel {
-    pub fn new(
-        id: TunnelId,
-        connection: Http2ServerConnection,
-        closed_sender: tokio::sync::mpsc::UnboundedSender<()>,
-        fd: i32,
-    ) -> Self {
+    pub fn new(id: TunnelId, connection: Http2ServerConnection, fd: i32) -> Self {
         Http2OutTunnel {
             id,
             connection: Arc::new(tokio::sync::Mutex::new(connection)),
             closed: AtomicBool::new(false),
-            closed_sender,
             fd,
         }
     }
@@ -276,8 +269,6 @@ impl OutTunnel for Http2OutTunnel {
 
         if result.is_err() {
             self.closed.store(true, atomic::Ordering::Relaxed);
-
-            let _ = self.closed_sender.send(());
         }
 
         result
@@ -297,6 +288,8 @@ impl AsFd for AnyAsFd {
         unsafe { BorrowedFd::borrow_raw(self.raw_fd) }
     }
 }
+
+const MIN_WINDOW_SIZE: u32 = 4 * 1024 * 1024; // 4MB
 
 struct WindowSizeSetter {
     fd: AnyAsFd,
@@ -320,8 +313,8 @@ impl WindowSizeSetter {
             return;
         }
 
-        let stream_window_size = receive_buffer_size;
-        let connection_window_size = receive_buffer_size * 4;
+        let stream_window_size = receive_buffer_size.max(MIN_WINDOW_SIZE);
+        let connection_window_size = stream_window_size * 4;
 
         match connection {
             H2ConnectionMutRef::Server(connection) => {
@@ -334,7 +327,7 @@ impl WindowSizeSetter {
             }
         }
 
-        self.last_window_size = receive_buffer_size;
+        self.last_window_size = stream_window_size;
     }
 }
 

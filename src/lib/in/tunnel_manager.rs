@@ -126,7 +126,11 @@ impl TunnelManager {
         tunnel_map: Arc<tokio::sync::Mutex<TunnelMap>>,
         label_to_tunnels_map: Arc<tokio::sync::Mutex<LabelToTunnelsMap>>,
     ) {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(tunnel_provider.connections()));
+
         loop {
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+
             if let Ok((tunnel, (out_routing_rules, out_routing_priority))) =
                 tunnel_provider.accept().await
             {
@@ -157,6 +161,8 @@ impl TunnelManager {
                         tunnel.closed().await;
 
                         log::info!("tunnel {tunnel_id} closed.");
+
+                        drop(permit);
 
                         let mut tunnel_map = tunnel_map.lock().await;
 

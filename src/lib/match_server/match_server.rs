@@ -38,10 +38,6 @@ pub trait OutMatchServerTrait: Send {
         TInData: serde::de::DeserializeOwned + Send,
         TOutData: serde::Serialize + Send,
         (TInData, TOutData): MatchPair<TInData, TOutData>;
-
-    async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()>;
-
-    async fn unregister_in(&self, in_id: &MatchInId) -> anyhow::Result<()>;
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

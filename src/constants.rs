@@ -39,6 +39,10 @@ pub fn stun_server_addresses_default() -> Vec<String> {
     ]
 }
 
+pub fn tunneling_tcp_connections_default() -> usize {
+    3
+}
+
 pub fn tunneling_tcp_priority_default() -> i64 {
     0
 }

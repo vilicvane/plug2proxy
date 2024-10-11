@@ -62,16 +62,4 @@ impl OutMatchServerTrait for OutMatchServer {
             }
         }
     }
-
-    async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()> {
-        match self {
-            Self::Redis(redis) => redis.register_in(in_id).await,
-        }
-    }
-
-    async fn unregister_in(&self, in_id: &MatchInId) -> anyhow::Result<()> {
-        match self {
-            Self::Redis(redis) => redis.unregister_in(in_id).await,
-        }
-    }
 }

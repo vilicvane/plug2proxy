@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use futures::TryFutureExt;
 use rustls::pki_types::pem::PemObject;
 
 use crate::{
@@ -25,6 +24,7 @@ use crate::{
 use super::match_pair::{Http2InData, Http2OutData};
 
 pub struct Http2InTunnelConfig {
+    pub connections: usize,
     pub priority: Option<i64>,
     pub priority_default: i64,
     pub traffic_mark: u32,
@@ -51,6 +51,10 @@ impl Http2InTunnelProvider {
 
 #[async_trait::async_trait]
 impl InTunnelProvider for Http2InTunnelProvider {
+    fn connections(&self) -> usize {
+        self.config.connections
+    }
+
     async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
         let MatchOut {
             id,
@@ -116,13 +120,16 @@ impl InTunnelProvider for Http2InTunnelProvider {
             .handshake(stream)
             .await?;
 
+        let priority = self
+            .config
+            .priority
+            .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default));
+
         let tunnel = Http2InTunnel::new(
             tunnel_id,
             id,
             tunnel_labels,
-            self.config
-                .priority
-                .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default)),
+            priority,
             request_sender,
             h2_connection,
             fd,
@@ -212,7 +219,7 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
         let external_address = SocketAddr::new(ip, listener.local_addr()?.port());
 
         let MatchIn {
-            id,
+            id: _,
             tunnel_id,
             data: Http2InData {},
         } = self
@@ -244,26 +251,9 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
             .handshake(stream)
             .await?;
 
-        let (closed_sender, mut closed_receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        let tunnel = Http2OutTunnel::new(tunnel_id, connection, closed_sender, fd);
+        let tunnel = Http2OutTunnel::new(tunnel_id, connection, fd);
 
         log::info!("tunnel {tunnel} established.");
-
-        self.match_server.register_in(id).await?;
-
-        tokio::spawn({
-            let match_server = self.match_server.clone();
-
-            async move {
-                closed_receiver.recv().await;
-
-                match_server.unregister_in(&id).await?;
-
-                anyhow::Ok(())
-            }
-            .inspect_err(|error| log::error!("{}", error))
-        });
 
         return Ok(Box::new(tunnel));
     }

@@ -235,18 +235,6 @@ impl OutMatchServerTrait for RedisOutMatchServer {
             });
         }
     }
-
-    async fn register_in(&self, in_id: MatchInId) -> anyhow::Result<()> {
-        self.matched_in_id_set.lock().await.insert(in_id);
-
-        Ok(())
-    }
-
-    async fn unregister_in(&self, in_id: &MatchInId) -> anyhow::Result<()> {
-        self.matched_in_id_set.lock().await.remove(in_id);
-
-        Ok(())
-    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
