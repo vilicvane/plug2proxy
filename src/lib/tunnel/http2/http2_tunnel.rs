@@ -1,9 +1,16 @@
 use std::{
     fmt,
     net::SocketAddr,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    os::fd::{AsFd, BorrowedFd},
+    sync::{
+        atomic::{self, AtomicBool},
+        Arc, Mutex,
+    },
+    task::Poll,
+    time::Duration,
 };
 
+use futures::FutureExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
@@ -14,6 +21,8 @@ use crate::{
         InTunnel, InTunnelLike, OutTunnel, TunnelId,
     },
 };
+
+const WINDOW_SIZE_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 
 type Http2ServerConnection =
     h2::server::Connection<tokio_rustls::server::TlsStream<tokio::net::TcpStream>, bytes::Bytes>;
@@ -28,7 +37,7 @@ pub struct Http2InTunnel {
     priority: i64,
     request_sender: Arc<Mutex<h2::client::SendRequest<bytes::Bytes>>>,
     closed_notify: Arc<tokio::sync::Notify>,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
 }
 
 impl Http2InTunnel {
@@ -38,18 +47,40 @@ impl Http2InTunnel {
         labels: Vec<String>,
         priority: i64,
         request_sender: h2::client::SendRequest<bytes::Bytes>,
-        h2_connection: Http2ClientConnection,
+        mut connection: Http2ClientConnection,
+        fd: i32,
     ) -> Self {
         let closed_notify = Arc::new(tokio::sync::Notify::new());
+        let closed = Arc::new(AtomicBool::new(false));
 
         tokio::spawn({
             let closed_notify = closed_notify.clone();
+            let closed = closed.clone();
 
             async move {
-                if let Err(error) = h2_connection.await {
-                    log::error!("http2 connection error: {}", error);
-                }
+                let mut window_size_setter = WindowSizeSetter::new(fd);
 
+                let mut interval = tokio::time::interval(WINDOW_SIZE_CHECK_INTERVAL);
+
+                futures::future::poll_fn(|context| {
+                    match connection.poll_unpin(context) {
+                        std::task::Poll::Ready(_) => return Poll::Ready(()),
+                        std::task::Poll::Pending => {}
+                    }
+
+                    match interval.poll_tick(context) {
+                        Poll::Ready(_) => {
+                            window_size_setter
+                                .set_window_size(H2ConnectionMutRef::Client(&mut connection));
+                        }
+                        Poll::Pending => {}
+                    }
+
+                    Poll::Pending
+                })
+                .await;
+
+                closed.store(true, atomic::Ordering::Relaxed);
                 closed_notify.notify_waiters();
             }
         });
@@ -61,7 +92,7 @@ impl Http2InTunnel {
             priority,
             request_sender: Arc::new(Mutex::new(request_sender)),
             closed_notify,
-            closed: AtomicBool::new(false),
+            closed,
         }
     }
 }
@@ -136,7 +167,7 @@ impl InTunnel for Http2InTunnel {
     }
 
     fn is_closed(&self) -> bool {
-        self.closed.load(std::sync::atomic::Ordering::Relaxed)
+        self.closed.load(atomic::Ordering::Relaxed)
     }
 }
 
@@ -145,6 +176,7 @@ pub struct Http2OutTunnel {
     connection: Arc<tokio::sync::Mutex<Http2ServerConnection>>,
     closed: AtomicBool,
     closed_sender: tokio::sync::mpsc::UnboundedSender<()>,
+    fd: i32,
 }
 
 impl Http2OutTunnel {
@@ -152,12 +184,14 @@ impl Http2OutTunnel {
         id: TunnelId,
         connection: Http2ServerConnection,
         closed_sender: tokio::sync::mpsc::UnboundedSender<()>,
+        fd: i32,
     ) -> Self {
         Http2OutTunnel {
             id,
             connection: Arc::new(tokio::sync::Mutex::new(connection)),
             closed: AtomicBool::new(false),
             closed_sender,
+            fd,
         }
     }
 }
@@ -184,47 +218,64 @@ impl OutTunnel for Http2OutTunnel {
         ),
     )> {
         let mut connection = self.connection.lock().await;
+        let mut window_size_setter = WindowSizeSetter::new(self.fd);
 
-        let result = match connection.accept().await {
-            Some(Ok((request, mut response_sender))) => {
-                let (destination_address, destination_name) = {
-                    let headers = request.headers();
+        let mut interval = tokio::time::interval(WINDOW_SIZE_CHECK_INTERVAL);
 
-                    (
-                        headers
-                            .get("X-Address")
-                            .and_then(|value| value.to_str().ok())
-                            .and_then(|value| value.parse::<SocketAddr>().ok())
-                            .ok_or_else(|| anyhow::anyhow!("missing X-Address header."))?,
-                        headers
-                            .get("X-Name")
-                            .and_then(|value| value.to_str().ok())
-                            .map(|value| value.to_string()),
-                    )
-                };
+        let result = futures::future::poll_fn(|context| {
+            match connection.poll_accept(context) {
+                Poll::Ready(Some(Ok((request, mut response_sender)))) => {
+                    let (destination_address, destination_name) = {
+                        let headers = request.headers();
 
-                let response = http::Response::builder().body(()).unwrap();
+                        (
+                            headers
+                                .get("X-Address")
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|value| value.parse::<SocketAddr>().ok())
+                                .ok_or_else(|| anyhow::anyhow!("missing X-Address header."))?,
+                            headers
+                                .get("X-Name")
+                                .and_then(|value| value.to_str().ok())
+                                .map(|value| value.to_string()),
+                        )
+                    };
 
-                let send_stream = response_sender.send_response(response, false)?;
+                    let response = http::Response::builder().body(()).unwrap();
 
-                let read_stream = H2RecvStreamAsyncRead::new(request.into_body());
-                let write_stream = H2SendStreamAsyncWrite::new(send_stream);
+                    let send_stream = response_sender.send_response(response, false)?;
 
-                Ok((
-                    (destination_address, destination_name),
-                    (
-                        Box::new(read_stream) as Box<dyn AsyncRead + Send + Unpin>,
-                        Box::new(write_stream) as Box<dyn AsyncWrite + Send + Unpin>,
-                    ),
-                ))
+                    let read_stream = H2RecvStreamAsyncRead::new(request.into_body());
+                    let write_stream = H2SendStreamAsyncWrite::new(send_stream);
+
+                    return Poll::Ready(Ok((
+                        (destination_address, destination_name),
+                        (
+                            Box::new(read_stream) as Box<dyn AsyncRead + Send + Unpin>,
+                            Box::new(write_stream) as Box<dyn AsyncWrite + Send + Unpin>,
+                        ),
+                    )));
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(anyhow::anyhow!("http2 connection closed.")))
+                }
+                Poll::Pending => {}
             }
-            Some(Err(error)) => Err(error.into()),
-            None => Err(anyhow::anyhow!("http2 connection closed.")),
-        };
+
+            match interval.poll_tick(context) {
+                Poll::Ready(_) => {
+                    window_size_setter.set_window_size(H2ConnectionMutRef::Server(&mut connection));
+                }
+                Poll::Pending => {}
+            }
+
+            Poll::Pending
+        })
+        .await;
 
         if result.is_err() {
-            self.closed
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.closed.store(true, atomic::Ordering::Relaxed);
 
             let _ = self.closed_sender.send(());
         }
@@ -233,6 +284,61 @@ impl OutTunnel for Http2OutTunnel {
     }
 
     fn is_closed(&self) -> bool {
-        self.closed.load(std::sync::atomic::Ordering::Relaxed)
+        self.closed.load(atomic::Ordering::Relaxed)
     }
+}
+
+struct AnyAsFd {
+    raw_fd: i32,
+}
+
+impl AsFd for AnyAsFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.raw_fd) }
+    }
+}
+
+struct WindowSizeSetter {
+    fd: AnyAsFd,
+    last_window_size: u32,
+}
+
+impl WindowSizeSetter {
+    fn new(fd: i32) -> Self {
+        WindowSizeSetter {
+            fd: AnyAsFd { raw_fd: fd },
+            last_window_size: 0,
+        }
+    }
+
+    fn set_window_size(&mut self, connection: H2ConnectionMutRef) {
+        let receive_buffer_size =
+            nix::sys::socket::getsockopt(&self.fd, nix::sys::socket::sockopt::RcvBuf).unwrap()
+                as u32;
+
+        if self.last_window_size == receive_buffer_size {
+            return;
+        }
+
+        let stream_window_size = receive_buffer_size;
+        let connection_window_size = receive_buffer_size * 4;
+
+        match connection {
+            H2ConnectionMutRef::Server(connection) => {
+                connection.set_initial_window_size(stream_window_size).ok();
+                connection.set_target_window_size(connection_window_size);
+            }
+            H2ConnectionMutRef::Client(connection) => {
+                connection.set_initial_window_size(stream_window_size).ok();
+                connection.set_target_window_size(connection_window_size);
+            }
+        }
+
+        self.last_window_size = receive_buffer_size;
+    }
+}
+
+enum H2ConnectionMutRef<'a> {
+    Server(&'a mut Http2ServerConnection),
+    Client(&'a mut Http2ClientConnection),
 }

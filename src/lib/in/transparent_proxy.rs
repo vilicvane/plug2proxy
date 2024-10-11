@@ -327,8 +327,6 @@ async fn handle_in_tcp_stream(
             let (mut tunnel_recv_stream, mut tunnel_send_stream) =
                 tunnel.connect(destination, name).await?;
 
-            // println!("connected to {destination} via {tunnel}.");
-
             copy_bidirectional(
                 (&mut in_recv_stream, &mut tunnel_send_stream),
                 (&mut tunnel_recv_stream, &mut in_send_stream),

@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicUsize, Arc, Mutex},
+    sync::{
+        atomic::{self, AtomicUsize},
+        Arc, Mutex,
+    },
 };
 
 use itertools::Itertools;
@@ -39,18 +42,25 @@ impl TunnelManager {
                 let tunnel_map = tunnel_map.clone();
                 let label_to_tunnels_map = label_to_tunnels_map.clone();
 
-                tokio::task::spawn_blocking(move || {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap()
-                        .block_on(Self::handle_tunnel_provider(
-                            tunnel_provider,
-                            router,
-                            tunnel_map,
-                            label_to_tunnels_map,
-                        ));
-                })
+                tokio::spawn(Self::handle_tunnel_provider(
+                    tunnel_provider,
+                    router,
+                    tunnel_map,
+                    label_to_tunnels_map,
+                ))
+
+                // tokio::task::spawn_blocking(move || {
+                //     tokio::runtime::Builder::new_current_thread()
+                //         .enable_all()
+                //         .build()
+                //         .unwrap()
+                //         .block_on(Self::handle_tunnel_provider(
+                //             tunnel_provider,
+                //             router,
+                //             tunnel_map,
+                //             label_to_tunnels_map,
+                //         ));
+                // })
             })
             .collect_vec();
 
@@ -63,9 +73,7 @@ impl TunnelManager {
     }
 
     pub async fn select_tunnel(&self, labels_groups: &[Vec<String>]) -> Option<AnyInTunnelLikeArc> {
-        let index = self
-            .select_index
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let index = self.select_index.fetch_add(1, atomic::Ordering::Relaxed);
 
         let label_to_tunnels_map = self.label_to_tunnels_map.lock().await;
 

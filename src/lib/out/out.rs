@@ -75,13 +75,15 @@ pub async fn up(
             loop {
                 match tunnel_provider.accept().await {
                     Ok(tunnel) => {
-                        tokio::task::spawn_blocking(|| {
-                            tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .unwrap()
-                                .block_on(handle_tunnel(tunnel));
-                        });
+                        tokio::spawn(handle_tunnel(tunnel));
+
+                        // tokio::task::spawn_blocking(|| {
+                        //     tokio::runtime::Builder::new_current_thread()
+                        //         .enable_all()
+                        //         .build()
+                        //         .unwrap()
+                        //         .block_on(handle_tunnel(tunnel));
+                        // });
                     }
                     Err(error) => {
                         log::error!("error accepting tunnel: {:?}", error);

@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    os::fd::{AsFd as _, AsRawFd as _},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::TryFutureExt;
 use rustls::pki_types::pem::PemObject;
@@ -70,6 +75,8 @@ impl InTunnelProvider for Http2InTunnelProvider {
 
         let stream = socket.connect(address).await?;
 
+        let fd = stream.as_fd().as_raw_fd();
+
         log::debug!("http2 tunnel {tunnel_id} underlying TCP connected.");
 
         let client_config = {
@@ -103,7 +110,11 @@ impl InTunnelProvider for Http2InTunnelProvider {
 
         log::debug!("http2 tunnel {tunnel_id} underlying TLS connection established.");
 
-        let (request_sender, h2_connection) = h2::client::handshake(stream).await?;
+        let (request_sender, h2_connection) = h2::client::Builder::new()
+            // .initial_connection_window_size(4 * 1024 * 1024)
+            // .initial_window_size(4 * 1024 * 1024)
+            .handshake(stream)
+            .await?;
 
         let tunnel = Http2InTunnel::new(
             tunnel_id,
@@ -114,6 +125,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
                 .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default)),
             request_sender,
             h2_connection,
+            fd,
         );
 
         log::info!("tunnel {tunnel} established.");
@@ -220,15 +232,21 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
 
         let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
 
+        let fd = stream.as_fd().as_raw_fd();
+
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.server_config.clone());
 
         let stream = tls_acceptor.accept(stream).await?;
 
-        let h2_connection = h2::server::handshake(stream).await?;
+        let connection = h2::server::Builder::new()
+            // .initial_connection_window_size(4 * 1024 * 1024)
+            // .initial_window_size(4 * 1024 * 1024)
+            .handshake(stream)
+            .await?;
 
         let (closed_sender, mut closed_receiver) = tokio::sync::mpsc::unbounded_channel();
 
-        let tunnel = Http2OutTunnel::new(tunnel_id, h2_connection, closed_sender);
+        let tunnel = Http2OutTunnel::new(tunnel_id, connection, closed_sender, fd);
 
         log::info!("tunnel {tunnel} established.");
 
