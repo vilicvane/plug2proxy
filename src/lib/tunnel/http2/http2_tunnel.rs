@@ -293,14 +293,14 @@ const MIN_WINDOW_SIZE: u32 = 4 * 1024 * 1024; // 4MB
 
 struct WindowSizeSetter {
     fd: AnyAsFd,
-    last_window_size: u32,
+    recorded_receive_buffer_size: u32,
 }
 
 impl WindowSizeSetter {
     fn new(fd: i32) -> Self {
         WindowSizeSetter {
             fd: AnyAsFd { raw_fd: fd },
-            last_window_size: 0,
+            recorded_receive_buffer_size: 0,
         }
     }
 
@@ -309,12 +309,14 @@ impl WindowSizeSetter {
             nix::sys::socket::getsockopt(&self.fd, nix::sys::socket::sockopt::RcvBuf).unwrap()
                 as u32;
 
-        if self.last_window_size == receive_buffer_size {
+        if self.recorded_receive_buffer_size == receive_buffer_size {
             return;
         }
 
-        let stream_window_size = receive_buffer_size.max(MIN_WINDOW_SIZE);
-        let connection_window_size = stream_window_size * 4;
+        self.recorded_receive_buffer_size = receive_buffer_size;
+
+        let stream_window_size = receive_buffer_size;
+        let connection_window_size = receive_buffer_size.max(MIN_WINDOW_SIZE) * 4;
 
         match connection {
             H2ConnectionMutRef::Server(connection) => {
@@ -326,8 +328,6 @@ impl WindowSizeSetter {
                 connection.set_target_window_size(connection_window_size);
             }
         }
-
-        self.last_window_size = stream_window_size;
     }
 }
 

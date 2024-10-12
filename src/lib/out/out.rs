@@ -142,6 +142,8 @@ async fn handle_tcp_stream(
         tokio::net::TcpStream::connect(destination_address).await?
     };
 
+    stream.set_nodelay(true)?;
+
     let (remote_recv_stream, remote_send_stream) = stream.into_split();
 
     copy_bidirectional(

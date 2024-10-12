@@ -22,30 +22,16 @@ impl InTunnelLike for DirectInTunnel {
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     )> {
-        let stream = match destination_address {
-            SocketAddr::V4(_) => {
-                let socket = tokio::net::TcpSocket::new_v4()?;
+        let socket = match destination_address {
+            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        }?;
 
-                nix::sys::socket::setsockopt(
-                    &socket,
-                    nix::sys::socket::sockopt::Mark,
-                    &self.traffic_mark,
-                )?;
+        socket.set_nodelay(true)?;
 
-                socket.connect(destination_address).await?
-            }
-            SocketAddr::V6(_) => {
-                let socket = tokio::net::TcpSocket::new_v6()?;
+        nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &self.traffic_mark)?;
 
-                nix::sys::socket::setsockopt(
-                    &socket,
-                    nix::sys::socket::sockopt::Mark,
-                    &self.traffic_mark,
-                )?;
-
-                socket.connect(destination_address).await?
-            }
-        };
+        let stream = socket.connect(destination_address).await?;
 
         let (read_stream, write_stream) = stream.into_split();
 

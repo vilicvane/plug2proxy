@@ -175,6 +175,7 @@ pub async fn up(
                 )?;
 
                 socket.set_reuseport(true)?;
+                socket.set_nodelay(true)?;
 
                 socket.bind(listen_address)?;
 

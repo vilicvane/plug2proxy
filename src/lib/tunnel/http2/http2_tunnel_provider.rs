@@ -77,9 +77,11 @@ impl InTunnelProvider for Http2InTunnelProvider {
             &self.config.traffic_mark,
         )?;
 
-        let stream = socket.connect(address).await?;
+        socket.set_nodelay(true)?;
 
-        let fd = stream.as_fd().as_raw_fd();
+        let fd = socket.as_fd().as_raw_fd();
+
+        let stream = socket.connect(address).await?;
 
         log::debug!("http2 tunnel {tunnel_id} underlying TCP connected.");
 
@@ -115,8 +117,8 @@ impl InTunnelProvider for Http2InTunnelProvider {
         log::debug!("http2 tunnel {tunnel_id} underlying TLS connection established.");
 
         let (request_sender, h2_connection) = h2::client::Builder::new()
-            // .initial_connection_window_size(4 * 1024 * 1024)
-            // .initial_window_size(4 * 1024 * 1024)
+            .initial_connection_window_size(4 * 1024 * 1024)
+            .initial_window_size(4 * 1024 * 1024)
             .handshake(stream)
             .await?;
 
@@ -239,6 +241,8 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
 
         let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
 
+        stream.set_nodelay(true)?;
+
         let fd = stream.as_fd().as_raw_fd();
 
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.server_config.clone());
@@ -246,8 +250,8 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
         let stream = tls_acceptor.accept(stream).await?;
 
         let connection = h2::server::Builder::new()
-            // .initial_connection_window_size(4 * 1024 * 1024)
-            // .initial_window_size(4 * 1024 * 1024)
+            .initial_connection_window_size(4 * 1024 * 1024)
+            .initial_window_size(4 * 1024 * 1024)
             .handshake(stream)
             .await?;
 

@@ -2,6 +2,7 @@ use std::{
     cmp::min,
     pin::Pin,
     task::{ready, Context, Poll},
+    time::Instant,
 };
 
 use futures::FutureExt;
@@ -67,11 +68,15 @@ impl tokio::io::AsyncRead for H2RecvStreamAsyncRead {
 
 pub struct H2SendStreamAsyncWrite {
     send_stream: h2::SendStream<bytes::Bytes>,
+    capacity_requested_at: Option<Instant>,
 }
 
 impl H2SendStreamAsyncWrite {
     pub fn new(send_stream: h2::SendStream<bytes::Bytes>) -> Self {
-        Self { send_stream }
+        Self {
+            send_stream,
+            capacity_requested_at: None,
+        }
     }
 }
 
@@ -87,28 +92,28 @@ impl tokio::io::AsyncWrite for H2SendStreamAsyncWrite {
 
         let this = self.get_mut();
 
-        loop {
-            if this.send_stream.capacity() == 0 {
-                this.send_stream.reserve_capacity(buffer.len());
+        if this.send_stream.capacity() == 0 {
+            this.capacity_requested_at = Some(Instant::now());
 
-                match ready!(this.send_stream.poll_capacity(context)) {
-                    Some(Ok(_)) => continue,
-                    Some(Err(error)) => {
-                        return Poll::Ready(Err(h2_error_to_io_error(error)));
-                    }
-                    None => return Poll::Ready(Ok(0)),
+            this.send_stream.reserve_capacity(buffer.len());
+
+            match ready!(this.send_stream.poll_capacity(context)) {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    return Poll::Ready(Err(h2_error_to_io_error(error)));
                 }
+                None => return Poll::Ready(Ok(0)),
             }
+        }
 
-            let length = min(this.send_stream.capacity(), buffer.len());
+        let length = min(this.send_stream.capacity(), buffer.len());
 
-            match this
-                .send_stream
-                .send_data(buffer[..length].to_vec().into(), false)
-            {
-                Ok(_) => return Poll::Ready(Ok(length)),
-                Err(error) => return Poll::Ready(Err(h2_error_to_io_error(error))),
-            }
+        match this
+            .send_stream
+            .send_data(buffer[..length].to_vec().into(), false)
+        {
+            Ok(_) => Poll::Ready(Ok(length)),
+            Err(error) => Poll::Ready(Err(h2_error_to_io_error(error))),
         }
     }
 

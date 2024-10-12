@@ -7,6 +7,7 @@
     },
     "cSpell.words": [
         "addrs",
+        "alpn",
         "AUTOINCREMENT",
         "axfr",
         "bilibili",
@@ -23,6 +24,7 @@
         "maxmind",
         "maxminddb",
         "miwifi",
+        "nodelay",
         "nonblocking",
         "nsec",
         "ocsp",
@@ -30,6 +32,7 @@
         "Pkcs",
         "proto",
         "quic",
+        "rcgen",
         "rdata",
         "readfile",
         "rediss",
