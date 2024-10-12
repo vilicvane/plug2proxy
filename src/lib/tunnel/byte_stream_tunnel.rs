@@ -155,13 +155,28 @@ pub trait ByteStreamOutTunnelConnection: Send + Sync {
 }
 
 pub struct ByteStreamOutTunnel<TConnection> {
+    r#type: &'static str,
     id: TunnelId,
     connection: TConnection,
 }
 
 impl<TConnection> ByteStreamOutTunnel<TConnection> {
-    pub fn new(id: TunnelId, connection: TConnection) -> Self {
-        ByteStreamOutTunnel { id, connection }
+    pub fn new(r#type: &'static str, id: TunnelId, connection: TConnection) -> Self {
+        ByteStreamOutTunnel {
+            r#type,
+            id,
+            connection,
+        }
+    }
+}
+
+impl<TConnection> fmt::Display for ByteStreamOutTunnel<TConnection> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}",
+            get_tunnel_string(self.r#type, self.id, &[])
+        )
     }
 }
 

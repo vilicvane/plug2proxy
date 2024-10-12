@@ -35,6 +35,9 @@ impl InMatchServer for RedisInMatchServer {
         TOutData: serde::de::DeserializeOwned + Send,
         (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
+        let match_name = <(TInData, TOutData)>::get_match_name();
+        let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name();
+
         let (push_sender, mut push_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let mut connection = self
@@ -64,8 +67,6 @@ impl InMatchServer for RedisInMatchServer {
         };
 
         let announce_task = async move {
-            let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name();
-
             let announcement = InAnnouncement {
                 id: in_id,
                 match_key: match_key.clone(),
@@ -83,6 +84,8 @@ impl InMatchServer for RedisInMatchServer {
                 .await?;
 
             loop {
+                log::debug!("announcing {match_name} IN {in_id} with match key {match_key}...");
+
                 connection
                     .publish(&channel_name, serde_json::to_string(&announcement)?)
                     .await?;
@@ -104,8 +107,7 @@ impl InMatchServer for RedisInMatchServer {
         };
 
         log::info!(
-            "matched OUT {} {} as tunnel {}.",
-            <(TInData, TOutData)>::get_match_name(),
+            "matched {match_name} OUT {} as tunnel {}.",
             match_out.id,
             match_out.tunnel_id
         );

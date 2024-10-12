@@ -207,7 +207,7 @@ pub async fn up(
     };
 
     tokio::select! {
-        _ = tunnel_task => Err(anyhow::anyhow!("unexpected completion of tunnel task.")),
+        _ = tunnel_task => unreachable!("unexpected completion of tunnel task."),
         result = listen_task => {
             result?;
             Err(anyhow::anyhow!("listening ended unexpectedly."))

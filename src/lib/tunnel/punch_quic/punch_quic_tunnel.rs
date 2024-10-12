@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::tunnel::byte_stream_tunnel::{
@@ -39,11 +37,11 @@ impl ByteStreamInTunnelConnection for PunchQuicInTunnelConnection {
 }
 
 pub struct PunchQuicOutTunnelConnection {
-    connection: Arc<quinn::Connection>,
+    connection: quinn::Connection,
 }
 
 impl PunchQuicOutTunnelConnection {
-    pub fn new(connection: Arc<quinn::Connection>) -> Self {
+    pub fn new(connection: quinn::Connection) -> Self {
         PunchQuicOutTunnelConnection { connection }
     }
 }

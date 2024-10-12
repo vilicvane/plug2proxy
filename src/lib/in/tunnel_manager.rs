@@ -160,7 +160,7 @@ impl TunnelManager {
                     async move {
                         tunnel.closed().await;
 
-                        log::info!("tunnel {tunnel_id} closed.");
+                        log::info!("tunnel {tunnel} closed.");
 
                         drop(permit);
 

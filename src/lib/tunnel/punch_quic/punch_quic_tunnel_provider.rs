@@ -82,8 +82,6 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             )
             .await?;
 
-        log::info!("matched OUT {address} as tunnel {tunnel_id}.");
-
         punch(&socket, address).await?;
 
         let endpoint = create_client_endpoint(socket.into_std()?)?;
@@ -101,7 +99,7 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             PunchQuicInTunnelConnection::new(connection),
         );
 
-        log::info!("punch_quic tunnel {tunnel} established.");
+        log::info!("tunnel {tunnel} established.");
 
         return Ok((Box::new(tunnel), (routing_rules, routing_priority)));
     }
@@ -166,14 +164,15 @@ impl OutTunnelProvider for PunchQuicOutTunnelProvider {
 
         let connection = incoming.accept()?.await?;
 
-        log::info!("punch_quic tunnel {tunnel_id} established.");
-
-        let connection = Arc::new(connection);
-
-        return Ok(Box::new(ByteStreamOutTunnel::new(
+        let tunnel = ByteStreamOutTunnel::new(
+            "quic",
             tunnel_id,
             PunchQuicOutTunnelConnection::new(connection),
-        )));
+        );
+
+        log::info!("tunnel {tunnel} established.");
+
+        return Ok(Box::new(tunnel));
     }
 }
 

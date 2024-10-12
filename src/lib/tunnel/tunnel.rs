@@ -30,7 +30,7 @@ pub trait InTunnel: InTunnelLike {
 }
 
 #[async_trait::async_trait]
-pub trait OutTunnel: Send {
+pub trait OutTunnel: fmt::Display + Send {
     fn id(&self) -> TunnelId;
 
     async fn accept(

@@ -7,8 +7,8 @@
 
 Plug2Proxy is a transparent proxy **currently in development** that:
 
--   Connects IN to OUT with punched UDP (QUIC) tunnels.
--   Utilizes a match server (currently only Redis server is supported) to discover peers.
+-   Connects IN to OUT with TCP (HTTP2) or UDP (QUIC) tunnels.
+-   Utilizes a match server (currently only Redis server is supported) to exchange peer configuration.
 -   Supports routing based on GeoLite2 and fake-IP DNS (no traffic sniffing).
 
 Currently only IPv4 TCP is supported, will probably add UDP support soon and then IPv6 as well.
