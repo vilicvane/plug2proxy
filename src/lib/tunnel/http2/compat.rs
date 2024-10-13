@@ -2,9 +2,9 @@ use std::{
     cmp::min,
     pin::Pin,
     task::{ready, Context, Poll},
-    time::Instant,
 };
 
+use bytes::Buf;
 use futures::FutureExt;
 
 #[derive(derive_more::From)]
@@ -15,12 +15,14 @@ pub enum ResponseFutureOrRecvStream {
 
 pub struct H2RecvStreamAsyncRead {
     inner: ResponseFutureOrRecvStream,
+    pending: bytes::BytesMut,
 }
 
 impl H2RecvStreamAsyncRead {
     pub fn new(inner: impl Into<ResponseFutureOrRecvStream>) -> Self {
         Self {
             inner: inner.into(),
+            pending: bytes::BytesMut::new(),
         }
     }
 }
@@ -32,6 +34,20 @@ impl tokio::io::AsyncRead for H2RecvStreamAsyncRead {
         buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
+
+        let pending = &mut this.pending;
+
+        if !pending.is_empty() {
+            let length = min(pending.len(), buffer.remaining());
+
+            buffer.put_slice(&pending[..length]);
+
+            pending.advance(length);
+
+            context.waker().wake_by_ref();
+
+            return Poll::Ready(Ok(()));
+        }
 
         loop {
             break match &mut this.inner {
@@ -49,13 +65,19 @@ impl tokio::io::AsyncRead for H2RecvStreamAsyncRead {
                     if let Some(data) = ready!(recv_stream.poll_data(context)) {
                         let data = data.map_err(h2_error_to_io_error)?;
 
-                        let length = min(data.len(), buffer.remaining());
+                        if data.len() < buffer.remaining() {
+                            buffer.put_slice(&data);
+                        } else {
+                            let length = buffer.remaining();
 
-                        buffer.put_slice(&data[..length]);
+                            buffer.put_slice(&data[..length]);
+
+                            pending.extend_from_slice(&data[length..]);
+                        }
 
                         Poll::Ready(Ok(recv_stream
                             .flow_control()
-                            .release_capacity(length)
+                            .release_capacity(data.len())
                             .map_err(h2_error_to_io_error)?))
                     } else {
                         Poll::Ready(Ok(()))
@@ -68,15 +90,11 @@ impl tokio::io::AsyncRead for H2RecvStreamAsyncRead {
 
 pub struct H2SendStreamAsyncWrite {
     send_stream: h2::SendStream<bytes::Bytes>,
-    capacity_requested_at: Option<Instant>,
 }
 
 impl H2SendStreamAsyncWrite {
     pub fn new(send_stream: h2::SendStream<bytes::Bytes>) -> Self {
-        Self {
-            send_stream,
-            capacity_requested_at: None,
-        }
+        Self { send_stream }
     }
 }
 
@@ -92,9 +110,7 @@ impl tokio::io::AsyncWrite for H2SendStreamAsyncWrite {
 
         let this = self.get_mut();
 
-        if this.send_stream.capacity() == 0 {
-            this.capacity_requested_at = Some(Instant::now());
-
+        while this.send_stream.capacity() == 0 {
             this.send_stream.reserve_capacity(buffer.len());
 
             match ready!(this.send_stream.poll_capacity(context)) {
@@ -102,7 +118,10 @@ impl tokio::io::AsyncWrite for H2SendStreamAsyncWrite {
                 Some(Err(error)) => {
                     return Poll::Ready(Err(h2_error_to_io_error(error)));
                 }
-                None => return Poll::Ready(Ok(0)),
+                None => {
+                    // stream closed.
+                    return Poll::Ready(Ok(0));
+                }
             }
         }
 
