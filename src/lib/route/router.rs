@@ -1,4 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use itertools::Itertools as _;
 
@@ -11,8 +15,8 @@ use super::{
 
 pub struct Router {
     in_rules: Vec<Arc<DynRuleBox>>,
-    out_rules_map: tokio::sync::Mutex<HashMap<TunnelId, Vec<Arc<DynRuleBox>>>>,
-    rules_groups_cache: tokio::sync::Mutex<Vec<Vec<Arc<DynRuleBox>>>>,
+    out_rules_map: Mutex<HashMap<TunnelId, Vec<Arc<DynRuleBox>>>>,
+    rules_groups_cache: Mutex<Vec<Vec<Arc<DynRuleBox>>>>,
 }
 
 impl Router {
@@ -24,18 +28,18 @@ impl Router {
 
         Self {
             in_rules: rules.clone(),
-            out_rules_map: tokio::sync::Mutex::new(HashMap::new()),
-            rules_groups_cache: tokio::sync::Mutex::new(vec![rules]),
+            out_rules_map: Mutex::new(HashMap::new()),
+            rules_groups_cache: Mutex::new(vec![rules]),
         }
     }
 
-    pub async fn r#match(
+    pub fn r#match(
         &self,
         address: SocketAddr,
         domain: &Option<String>,
         region_codes: &Option<Vec<String>>,
     ) -> Vec<Vec<String>> {
-        let rules_groups = self.rules_groups_cache.lock().await;
+        let rules_groups = self.rules_groups_cache.lock().unwrap();
 
         rules_groups
             .iter()
@@ -67,8 +71,8 @@ impl Router {
             .collect_vec()
     }
 
-    pub async fn register_tunnel(&self, id: TunnelId, rules: Vec<OutRuleConfig>, priority: i64) {
-        self.out_rules_map.lock().await.insert(
+    pub fn register_tunnel(&self, id: TunnelId, rules: Vec<OutRuleConfig>, priority: i64) {
+        self.out_rules_map.lock().unwrap().insert(
             id,
             rules
                 .into_iter()
@@ -76,17 +80,17 @@ impl Router {
                 .collect_vec(),
         );
 
-        self.update_rules_cache().await;
+        self.update_rules_cache();
     }
 
-    pub async fn unregister_tunnel(&self, id: TunnelId) {
-        self.out_rules_map.lock().await.remove(&id);
+    pub fn unregister_tunnel(&self, id: TunnelId) {
+        self.out_rules_map.lock().unwrap().remove(&id);
 
-        self.update_rules_cache().await;
+        self.update_rules_cache();
     }
 
-    async fn update_rules_cache(&self) {
-        let rules_map = self.out_rules_map.lock().await;
+    fn update_rules_cache(&self) {
+        let rules_map = self.out_rules_map.lock().unwrap();
 
         let mut rules = rules_map
             .values()
@@ -112,6 +116,6 @@ impl Router {
             }
         }
 
-        *self.rules_groups_cache.lock().await = rules_groups;
+        *self.rules_groups_cache.lock().unwrap() = rules_groups;
     }
 }

@@ -1,19 +1,17 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::{future::try_join_all, TryFutureExt};
 use itertools::Itertools;
-use rusqlite::OptionalExtension;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
-    r#in::dns_resolver::convert_to_socket_addresses,
+    r#in::{
+        dns_resolver::convert_to_socket_addresses,
+        fake_ip_dns::FakeIpResolver,
+        udp_forwarder::{UdpForwarder, UDP_BUFFER_SIZE},
+    },
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
     tunnel::{
         http2::{Http2InTunnelConfig, Http2InTunnelProvider},
@@ -22,7 +20,7 @@ use crate::{
     },
     utils::{
         io::copy_bidirectional,
-        net::{get_tokio_tcp_stream_original_destination, IpFamily},
+        net::socket::{get_socket_original_destination, IpFamily},
     },
 };
 
@@ -146,17 +144,24 @@ pub async fn up(
         }
     };
 
-    let listen_task = {
-        let sqlite_connection = rusqlite::Connection::open_with_flags(
-            fake_ip_dns_db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+    let fake_ip_resolver = Arc::new(FakeIpResolver::new(
+        fake_ip_dns_db_path,
+        fake_ipv4_net,
+        fake_ipv6_net,
+    ));
 
-        let geolite2 =
-            GeoLite2::new(geolite2_cache_path, geolite2_url, geolite2_update_interval).await;
+    let geolite2 = Arc::new(GeoLite2::new(
+        geolite2_cache_path,
+        geolite2_url,
+        geolite2_update_interval,
+    ));
 
-        let tunnel_manager = Arc::clone(&tunnel_manager);
+    let listen_tcp_task = {
+        let fake_ip_resolver = fake_ip_resolver.clone();
+        let geolite2 = geolite2.clone();
+        let router = router.clone();
+
+        let tunnel_manager = tunnel_manager.clone();
 
         async move {
             let tcp_listener = {
@@ -182,23 +187,15 @@ pub async fn up(
                 socket.listen(64)?
             };
 
-            log::info!("transparent proxy listening on {listen_address}...");
-
             while let Ok((stream, _)) = tcp_listener.accept().await {
-                let destination = get_tokio_tcp_stream_original_destination(&stream, IpFamily::V4)
+                let destination = get_socket_original_destination(&stream, IpFamily::V4)
                     .unwrap_or_else(|_| stream.local_addr().unwrap());
 
-                handle_in_tcp_stream(
-                    stream,
-                    destination,
-                    &tunnel_manager,
-                    &fake_ipv4_net,
-                    &fake_ipv6_net,
-                    &sqlite_connection,
-                    &geolite2,
-                    &router,
-                )
-                .await?;
+                let (destination, name, labels_groups) =
+                    resolve_destination(destination, &fake_ip_resolver, &geolite2, &router);
+
+                handle_in_tcp_stream(stream, destination, name, labels_groups, &tunnel_manager)
+                    .await?;
             }
 
             #[allow(unreachable_code)]
@@ -206,108 +203,84 @@ pub async fn up(
         }
     };
 
-    tokio::select! {
-        _ = tunnel_task => unreachable!("unexpected completion of tunnel task."),
-        result = listen_task => {
-            result?;
-            Err(anyhow::anyhow!("listening ended unexpectedly."))
-        },
-    }?;
+    let listen_udp_task = async move {
+        let udp_forwarder = UdpForwarder::new(listen_address, traffic_mark)?;
+
+        let mut buffer = [0u8; UDP_BUFFER_SIZE];
+
+        while let Ok((length, source, original_destination)) =
+            udp_forwarder.receive(&mut buffer).await
+        {
+            println!(
+                "Received {} bytes from {} to {}",
+                length, source, original_destination
+            );
+
+            let real_destination = udp_forwarder
+                .get_associated_destination(&source, &original_destination)
+                .await
+                .unwrap_or_else(|| {
+                    let (real_destination, _, _) = resolve_destination(
+                        original_destination,
+                        &fake_ip_resolver,
+                        &geolite2,
+                        &router,
+                    );
+
+                    real_destination
+                });
+
+            udp_forwarder
+                .send(
+                    source,
+                    original_destination,
+                    real_destination,
+                    &buffer[..length],
+                )
+                .await?;
+        }
+
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+    };
+
+    log::info!("transparent proxy listening on {listen_address}...");
+
+    tokio::try_join!(tunnel_task, listen_tcp_task, listen_udp_task)?;
 
     Ok(())
+}
+
+fn resolve_destination(
+    destination: SocketAddr,
+    fake_ip_resolver: &FakeIpResolver,
+    geolite2: &GeoLite2,
+    router: &Router,
+) -> (SocketAddr, Option<String>, Vec<Vec<String>>) {
+    if let Some((real_ip, name)) = fake_ip_resolver.resolve(&destination.ip()) {
+        let real_destination = SocketAddr::new(real_ip, destination.port());
+
+        let region_codes = geolite2.lookup(real_ip);
+
+        let labels_groups = router.r#match(real_destination, &name, &region_codes);
+
+        (real_destination, name, labels_groups)
+    } else {
+        (destination, None, Vec::new())
+    }
 }
 
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
     destination: SocketAddr,
+    name: Option<String>,
+    labels_groups: Vec<Vec<String>>,
     tunnel_manager: &TunnelManager,
-    fake_ipv4_net: &ipnet::Ipv4Net,
-    fake_ipv6_net: &ipnet::Ipv6Net,
-    sqlite_connection: &rusqlite::Connection,
-    geolite2: &GeoLite2,
-    router: &Router,
 ) -> anyhow::Result<()> {
-    let fake_ip_type_and_id = match destination.ip() {
-        IpAddr::V4(ipv4) => {
-            if fake_ipv4_net.contains(&ipv4) {
-                Some((
-                    hickory_client::rr::RecordType::A,
-                    (ipv4.to_bits() - fake_ipv4_net.network().to_bits()) as i64,
-                ))
-            } else {
-                None
-            }
-        }
-        IpAddr::V6(ipv6) => {
-            if fake_ipv6_net.contains(&ipv6) {
-                Some((
-                    hickory_client::rr::RecordType::AAAA,
-                    (ipv6.to_bits() - fake_ipv6_net.network().to_bits()) as i64,
-                ))
-            } else {
-                None
-            }
-        }
-    };
-
-    let (destination, name, labels_groups) = if let Some((r#type, id)) = fake_ip_type_and_id {
-        let record: Option<(String, Vec<u8>)> = sqlite_connection
-            .query_row(
-                "SELECT name, real_ip FROM records WHERE type = ? AND id = ?",
-                rusqlite::params![r#type.to_string(), id],
-                |row| Ok((row.get("name")?, row.get("real_ip")?)),
-            )
-            .optional()
-            .unwrap();
-
-        if let Some((name, real_ip)) = record {
-            let name = name.trim_end_matches(".").to_owned();
-
-            let real_ip = match r#type {
-                hickory_client::rr::RecordType::A => IpAddr::V4(Ipv4Addr::from_bits(
-                    u32::from_be_bytes(real_ip.try_into().unwrap()),
-                )),
-                hickory_client::rr::RecordType::AAAA => IpAddr::V6(Ipv6Addr::from_bits(
-                    u128::from_be_bytes(real_ip.try_into().unwrap()),
-                )),
-                _ => unreachable!(),
-            };
-
-            log::debug!(
-                "fake ip {} translated to {} ({}).",
-                destination.ip(),
-                real_ip,
-                name
-            );
-
-            let real_destination = SocketAddr::new(real_ip, destination.port());
-
-            let domain = Some(name);
-
-            let region_codes = geolite2.lookup(real_ip).await;
-
-            let labels_groups = router
-                .r#match(real_destination, &domain, &region_codes)
-                .await;
-
-            (real_destination, domain, labels_groups)
-        } else {
-            log::warn!("fake ip {} not found.", destination.ip());
-
-            (destination, None, Vec::new())
-        }
-    } else {
-        let region_codes = geolite2.lookup(destination.ip()).await;
-
-        let labels_groups = router.r#match(destination, &None, &region_codes).await;
-
-        (destination, None, labels_groups)
-    };
-
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
-        "route {destination_string} with labels {}...",
+        "route TCP {destination_string} with labels {}...",
         stringify_labels_groups(&labels_groups)
     );
 

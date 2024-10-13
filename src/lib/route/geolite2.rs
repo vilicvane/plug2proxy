@@ -1,24 +1,25 @@
 use std::{
+    fs, io,
     net::IpAddr,
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime},
 };
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct GeoLite2 {
-    reader: Arc<tokio::sync::Mutex<Option<GeoLite2Reader>>>,
+    reader: Arc<Mutex<Option<GeoLite2Reader>>>,
     update_handle: tokio::task::JoinHandle<()>,
 }
 
 type GeoLite2Reader = maxminddb::Reader<Vec<u8>>;
 
 impl GeoLite2 {
-    pub async fn new(cache_path: &PathBuf, url: String, update_interval: Duration) -> Self {
-        let modified_time = tokio::fs::metadata(&cache_path).await.map_or_else(
+    pub fn new(cache_path: &PathBuf, url: String, update_interval: Duration) -> Self {
+        let modified_time = fs::metadata(&cache_path).map_or_else(
             |error| {
-                if error.kind() == tokio::io::ErrorKind::NotFound {
+                if error.kind() == io::ErrorKind::NotFound {
                     None
                 } else {
                     panic!("failed to get metadata of GeoLite2 database: {}", error);
@@ -27,21 +28,20 @@ impl GeoLite2 {
             |metadata| Some(metadata.modified().unwrap()),
         );
 
-        let next_update_time =
-            modified_time.map_or_else(tokio::time::Instant::now, |modified_time| {
-                tokio::time::Instant::now()
-                    + (update_interval.saturating_sub(
-                        SystemTime::now()
-                            .duration_since(modified_time)
-                            .unwrap_or(Duration::from_secs(0)),
-                    ))
-            });
+        let next_update_time = modified_time.map_or_else(Instant::now, |modified_time| {
+            Instant::now()
+                + (update_interval.saturating_sub(
+                    SystemTime::now()
+                        .duration_since(modified_time)
+                        .unwrap_or(Duration::from_secs(0)),
+                ))
+        });
 
         let reader = modified_time.map(|_| {
             maxminddb::Reader::open_readfile(cache_path).expect("failed to open GeoLite2 database.")
         });
 
-        let reader = Arc::new(tokio::sync::Mutex::new(reader));
+        let reader = Arc::new(Mutex::new(reader));
 
         let update_handle = tokio::spawn(Self::schedule_reader_update(
             reader.clone(),
@@ -57,8 +57,8 @@ impl GeoLite2 {
         }
     }
 
-    pub async fn lookup(&self, ip: IpAddr) -> Option<Vec<String>> {
-        let reader = self.reader.lock().await;
+    pub fn lookup(&self, ip: IpAddr) -> Option<Vec<String>> {
+        let reader = self.reader.lock().unwrap();
         let reader = reader.as_ref()?;
 
         if let Result::<maxminddb::geoip2::Country, _>::Ok(record) = reader.lookup(ip) {
@@ -83,13 +83,13 @@ impl GeoLite2 {
     }
 
     async fn schedule_reader_update(
-        reader: Arc<tokio::sync::Mutex<Option<GeoLite2Reader>>>,
+        reader: Arc<Mutex<Option<GeoLite2Reader>>>,
         cache_path: PathBuf,
         url: String,
         update_interval: Duration,
-        next_update_time: tokio::time::Instant,
+        next_update_time: Instant,
     ) {
-        tokio::time::sleep_until(next_update_time).await;
+        tokio::time::sleep_until(next_update_time.into()).await;
 
         loop {
             let updated = async {
@@ -103,7 +103,7 @@ impl GeoLite2 {
 
                 reader
                     .lock()
-                    .await
+                    .unwrap()
                     .replace(maxminddb::Reader::from_source(data)?);
 
                 log::info!("GeoLite2 database updated successfully.");

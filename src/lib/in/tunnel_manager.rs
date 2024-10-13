@@ -146,9 +146,7 @@ impl TunnelManager {
 
                     Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
 
-                    router
-                        .register_tunnel(tunnel_id, out_routing_rules, out_routing_priority)
-                        .await;
+                    router.register_tunnel(tunnel_id, out_routing_rules, out_routing_priority);
                 }
 
                 tokio::spawn({
@@ -172,7 +170,7 @@ impl TunnelManager {
 
                         Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
 
-                        router.unregister_tunnel(tunnel_id).await;
+                        router.unregister_tunnel(tunnel_id);
                     }
                 });
             }
