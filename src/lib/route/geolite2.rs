@@ -17,7 +17,7 @@ type GeoLite2Reader = maxminddb::Reader<Vec<u8>>;
 
 impl GeoLite2 {
     pub fn new(cache_path: &PathBuf, url: String, update_interval: Duration) -> Self {
-        let modified_time = fs::metadata(&cache_path).map_or_else(
+        let modified_time = fs::metadata(cache_path).map_or_else(
             |error| {
                 if error.kind() == io::ErrorKind::NotFound {
                     None

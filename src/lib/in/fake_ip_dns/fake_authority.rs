@@ -209,8 +209,6 @@ impl Authority for FakeAuthority {
 
                 let fake_ip = self.assign_fake_ip(record_type, name, upstream_record);
 
-                println!("fake_ip: {:?}", fake_ip);
-
                 let mut record = Record::new();
 
                 let data = match fake_ip {

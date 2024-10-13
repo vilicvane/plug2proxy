@@ -247,9 +247,6 @@ impl Association {
                     _ = activity_signal_receiver.recv() => continue,
                     _ = tokio::time::sleep(RESPONSE_SOCKET_EXPIRATION) => {
                         let _ = timeout_sender.send(());
-
-                        println!("timeout for source {source_address}");
-
                         break;
                     },
                 }
@@ -299,11 +296,6 @@ impl Association {
             self.traffic_mark,
         );
 
-        println!(
-            "delegate send {} bytes to {real_destination_address}",
-            buffer.len()
-        );
-
         self.delegate_socket
             .send_to(buffer, real_destination_address)
             .await?;
@@ -348,8 +340,6 @@ impl Association {
         socket.set_mark(traffic_mark).unwrap();
         socket.set_nonblocking(true).unwrap();
 
-        println!("Binding response socket to {}", binding_address);
-
         socket.bind(&binding_address.into()).unwrap();
 
         let socket = tokio::net::UdpSocket::from_std(socket.into()).unwrap();
@@ -362,10 +352,6 @@ impl Association {
         real_to_response_socket_map.insert(*real_destination_address, socket.clone());
         original_to_real_destination_map
             .insert(original_destination_address, *real_destination_address);
-
-        println!(
-            "Assigned response socket original {original_destination_address} real {real_destination_address}"
-        );
 
         socket
     }

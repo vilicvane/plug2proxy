@@ -211,21 +211,20 @@ pub async fn up(
         while let Ok((length, source, original_destination)) =
             udp_forwarder.receive(&mut buffer).await
         {
-            println!(
-                "Received {} bytes from {} to {}",
-                length, source, original_destination
-            );
-
             let real_destination = udp_forwarder
                 .get_associated_destination(&source, &original_destination)
                 .await
                 .unwrap_or_else(|| {
-                    let (real_destination, _, _) = resolve_destination(
+                    let (real_destination, name, _) = resolve_destination(
                         original_destination,
                         &fake_ip_resolver,
                         &geolite2,
                         &router,
                     );
+
+                    let destination_string = get_destination_string(real_destination, &name);
+
+                    log::info!("redirect datagrams from {source} to {destination_string}...");
 
                     real_destination
                 });
@@ -277,16 +276,17 @@ async fn handle_in_tcp_stream(
     labels_groups: Vec<Vec<String>>,
     tunnel_manager: &TunnelManager,
 ) -> anyhow::Result<()> {
+    let source = stream.peer_addr()?;
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
-        "route TCP {destination_string} with labels {}...",
+        "route connection from {source} to {destination_string} with labels {}...",
         stringify_labels_groups(&labels_groups)
     );
 
     let Some(tunnel) = tunnel_manager.select_tunnel(&labels_groups).await else {
         log::warn!(
-            "connection to {destination_string} via {} rejected cause no matching tunnel.",
+            "connection from {source} to {destination_string} via {} rejected cause no matching tunnel.",
             stringify_labels_groups(&labels_groups)
         );
 
@@ -295,7 +295,7 @@ async fn handle_in_tcp_stream(
         return Ok(());
     };
 
-    log::info!("connect {destination_string} via {tunnel}...");
+    log::info!("connect {source} to {destination_string} via {tunnel}...");
 
     let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
 
@@ -313,7 +313,7 @@ async fn handle_in_tcp_stream(
             anyhow::Ok(())
         }
         .inspect_err(move |error| {
-            log::debug!("connection to {destination_string} errored: {error}",)
+            log::debug!("connection from {source} to {destination_string} errored: {error}",)
         })
     });
 
