@@ -122,6 +122,8 @@ async fn handle_tunnel(tunnel: Box<dyn OutTunnel>) {
                 log::warn!("error accepting connection: {error}");
 
                 if tunnel.is_closed() {
+                    log::info!("tunnel {tunnel} closed.");
+
                     break;
                 }
             }

@@ -187,15 +187,22 @@ pub async fn up(
                 socket.listen(64)?
             };
 
-            while let Ok((stream, _)) = tcp_listener.accept().await {
+            while let Ok((stream, source)) = tcp_listener.accept().await {
                 let destination = get_socket_original_destination(&stream, IpFamily::V4)
                     .unwrap_or_else(|_| stream.local_addr().unwrap());
 
                 let (destination, name, labels_groups) =
                     resolve_destination(destination, &fake_ip_resolver, &geolite2, &router);
 
-                handle_in_tcp_stream(stream, destination, name, labels_groups, &tunnel_manager)
-                    .await?;
+                handle_in_tcp_stream(
+                    stream,
+                    source,
+                    destination,
+                    name,
+                    labels_groups,
+                    &tunnel_manager,
+                )
+                .await?;
             }
 
             #[allow(unreachable_code)]
@@ -271,12 +278,12 @@ fn resolve_destination(
 
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
+    source: SocketAddr,
     destination: SocketAddr,
     name: Option<String>,
     labels_groups: Vec<Vec<String>>,
     tunnel_manager: &TunnelManager,
 ) -> anyhow::Result<()> {
-    let source = stream.peer_addr()?;
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
