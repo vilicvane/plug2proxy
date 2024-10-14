@@ -26,11 +26,22 @@ pub async fn up(
 
     catalog.upsert(authority.origin().clone(), authority);
 
-    let udp_socket = tokio::net::UdpSocket::bind(listen_address).await?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(listen_address),
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+
+    socket.bind(&listen_address.into())?;
+
+    let socket = tokio::net::UdpSocket::from_std(socket.into())?;
 
     let mut server = hickory_server::server::ServerFuture::new(catalog);
 
-    server.register_socket(udp_socket);
+    server.register_socket(socket);
 
     log::info!("fake-ip dns listening on {listen_address}...");
 
