@@ -169,7 +169,7 @@ impl Association {
         delegate_socket.set_nonblocking(true).unwrap();
 
         delegate_socket
-            .bind(&get_any_address(&source_address.ip()).into())
+            .bind(&get_any_address(&source_address).into())
             .unwrap();
 
         let delegate_socket =

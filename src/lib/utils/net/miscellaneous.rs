@@ -6,10 +6,10 @@ pub const ANY_ADDRESS_IPV4: SocketAddr =
 pub const ANY_ADDRESS_IPV6: SocketAddr =
     SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
 
-pub fn get_any_address(ip: &IpAddr) -> SocketAddr {
-    match ip {
-        IpAddr::V4(_) => ANY_ADDRESS_IPV4,
-        IpAddr::V6(_) => ANY_ADDRESS_IPV6,
+pub fn get_any_address(address: &SocketAddr) -> SocketAddr {
+    match address {
+        SocketAddr::V4(_) => ANY_ADDRESS_IPV4,
+        SocketAddr::V6(_) => ANY_ADDRESS_IPV6,
     }
 }
 
