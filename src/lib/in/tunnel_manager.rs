@@ -4,11 +4,13 @@ use std::{
         atomic::{self, AtomicUsize},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 use itertools::Itertools;
 
 use crate::{
+    match_server::MatchOutId,
     route::router::Router,
     tunnel::{
         direct_tunnel::DirectInTunnel, AnyInTunnelLikeArc, InTunnel, InTunnelLike,
@@ -126,53 +128,111 @@ impl TunnelManager {
         tunnel_map: Arc<tokio::sync::Mutex<TunnelMap>>,
         label_to_tunnels_map: Arc<tokio::sync::Mutex<LabelToTunnelsMap>>,
     ) {
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(tunnel_provider.connections()));
+        let tunnel_provider = Arc::new(tunnel_provider);
 
         loop {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            log::info!("accepting OUT {}...", tunnel_provider.name());
 
-            if let Ok((tunnel, (out_routing_rules, out_routing_priority))) =
-                tunnel_provider.accept().await
-            {
-                let tunnel_id = tunnel.id();
-                let tunnel = Arc::new(tunnel);
-
-                {
-                    let mut tunnel_map = tunnel_map.lock().await;
-
-                    tunnel_map.insert(tunnel_id, Arc::clone(&tunnel));
-
-                    let mut label_to_tunnels_map = label_to_tunnels_map.lock().await;
-
-                    Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
-
-                    router.register_tunnel(tunnel_id, out_routing_rules, out_routing_priority);
+            match tunnel_provider.accept_out().await {
+                Ok((out_id, connections)) => {
+                    tokio::spawn(Self::handle_out(
+                        out_id,
+                        connections,
+                        tunnel_provider.clone(),
+                        router.clone(),
+                        tunnel_map.clone(),
+                        label_to_tunnels_map.clone(),
+                    ));
                 }
+                Err(error) => {
+                    log::warn!("error accepting OUT: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
 
-                tokio::spawn({
-                    let tunnel_map = tunnel_map.clone();
-                    let label_to_tunnels_map = label_to_tunnels_map.clone();
+    async fn handle_out(
+        out_id: MatchOutId,
+        connections: usize,
+        tunnel_provider: Arc<Box<dyn InTunnelProvider + Send>>,
+        router: Arc<Router>,
+        tunnel_map: Arc<tokio::sync::Mutex<TunnelMap>>,
+        label_to_tunnels_map: Arc<tokio::sync::Mutex<LabelToTunnelsMap>>,
+    ) {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(connections));
 
-                    let router = router.clone();
+        let mut handles = Vec::<tokio::task::JoinHandle<()>>::new();
 
-                    async move {
-                        tunnel.closed().await;
+        loop {
+            let permit = semaphore.clone().acquire_owned().await;
 
-                        log::info!("tunnel {tunnel} closed.");
+            handles.retain(|handle| !handle.is_finished());
 
-                        drop(permit);
+            log::info!("accepting {} tunnel...", tunnel_provider.name());
 
+            match tunnel_provider.accept(out_id).await {
+                Ok(Some((tunnel, (out_routing_rules, out_routing_priority)))) => {
+                    let tunnel_id = tunnel.id();
+                    let tunnel = Arc::new(tunnel);
+
+                    {
                         let mut tunnel_map = tunnel_map.lock().await;
 
-                        tunnel_map.remove(&tunnel_id);
+                        tunnel_map.insert(tunnel_id, tunnel.clone());
 
                         let mut label_to_tunnels_map = label_to_tunnels_map.lock().await;
 
                         Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
 
-                        router.unregister_tunnel(tunnel_id);
+                        router.register_tunnel(tunnel_id, out_routing_rules, out_routing_priority);
                     }
-                });
+
+                    let handle = tokio::spawn({
+                        let tunnel_map = tunnel_map.clone();
+                        let label_to_tunnels_map = label_to_tunnels_map.clone();
+
+                        let router = router.clone();
+
+                        async move {
+                            tunnel.closed().await;
+
+                            log::info!("tunnel {tunnel} closed.");
+
+                            let mut tunnel_map = tunnel_map.lock().await;
+
+                            tunnel_map.remove(&tunnel_id);
+
+                            let mut label_to_tunnels_map = label_to_tunnels_map.lock().await;
+
+                            Self::update_label_to_tunnels_map(
+                                &tunnel_map,
+                                &mut label_to_tunnels_map,
+                            );
+
+                            router.unregister_tunnel(tunnel_id);
+
+                            drop(permit);
+                        }
+                    });
+
+                    handles.push(handle);
+                }
+                Ok(None) => {
+                    // OUT no longer active, abort all unfinished handles to avoid active tunnel to
+                    // this OUT lives (which could potentially result in connections exceeding the
+                    // desired number).
+
+                    for handle in handles {
+                        handle.abort();
+                    }
+
+                    break;
+                }
+                Err(error) => {
+                    log::warn!("error accepting tunnel: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
     }

@@ -51,12 +51,22 @@ impl Http2InTunnelProvider {
 
 #[async_trait::async_trait]
 impl InTunnelProvider for Http2InTunnelProvider {
-    fn connections(&self) -> usize {
-        self.config.connections
+    fn name(&self) -> &'static str {
+        "http2"
     }
 
-    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
-        let MatchOut {
+    async fn accept_out(&self) -> anyhow::Result<(MatchOutId, usize)> {
+        self.match_server
+            .accept_out::<Http2InData, Http2OutData>()
+            .await
+            .map(|out_id| (out_id, self.config.connections))
+    }
+
+    async fn accept(
+        &self,
+        out_id: MatchOutId,
+    ) -> anyhow::Result<Option<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))>> {
+        let Some(MatchOut {
             id,
             tunnel_id,
             tunnel_labels,
@@ -64,7 +74,13 @@ impl InTunnelProvider for Http2InTunnelProvider {
             routing_priority,
             routing_rules,
             data: Http2OutData { address, cert, key },
-        } = self.match_server.match_out(self.id, Http2InData {}).await?;
+        }) = self
+            .match_server
+            .match_out(out_id, self.id, Http2InData {})
+            .await?
+        else {
+            return Ok(None);
+        };
 
         let socket = match address {
             SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
@@ -139,7 +155,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
 
         log::info!("tunnel {tunnel} established.");
 
-        Ok((Box::new(tunnel), (routing_rules, routing_priority)))
+        Ok(Some((Box::new(tunnel), (routing_rules, routing_priority))))
     }
 }
 

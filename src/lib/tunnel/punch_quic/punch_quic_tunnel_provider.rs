@@ -52,7 +52,21 @@ impl PunchQuicInTunnelProvider {
 
 #[async_trait::async_trait]
 impl InTunnelProvider for PunchQuicInTunnelProvider {
-    async fn accept(&self) -> anyhow::Result<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))> {
+    fn name(&self) -> &'static str {
+        "punch_udp"
+    }
+
+    async fn accept_out(&self) -> anyhow::Result<(MatchOutId, usize)> {
+        self.match_server
+            .accept_out::<PunchQuicInData, PunchQuicOutData>()
+            .await
+            .map(|out_id| (out_id, 1))
+    }
+
+    async fn accept(
+        &self,
+        out_id: MatchOutId,
+    ) -> anyhow::Result<Option<(Box<dyn InTunnel>, (Vec<OutRuleConfig>, i64))>> {
         let socket = tokio::net::UdpSocket::bind("0:0").await?;
 
         nix::sys::socket::setsockopt(
@@ -64,7 +78,7 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
         let (socket, in_address) =
             configure_peer_socket(socket, &self.config.stun_server_addresses).await?;
 
-        let MatchOut {
+        let Some(MatchOut {
             id,
             tunnel_id,
             tunnel_labels,
@@ -72,15 +86,19 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
             routing_priority,
             routing_rules,
             data: PunchQuicOutData { address },
-        } = self
+        }) = self
             .match_server
             .match_out(
+                out_id,
                 self.id,
                 PunchQuicInData {
                     address: in_address,
                 },
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
 
         punch(&socket, address).await?;
 
@@ -101,7 +119,7 @@ impl InTunnelProvider for PunchQuicInTunnelProvider {
 
         log::info!("tunnel {tunnel} established.");
 
-        return Ok((Box::new(tunnel), (routing_rules, routing_priority)));
+        return Ok(Some((Box::new(tunnel), (routing_rules, routing_priority))));
     }
 }
 

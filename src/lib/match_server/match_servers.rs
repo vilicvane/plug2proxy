@@ -12,18 +12,30 @@ pub enum AnyInMatchServer {
 
 #[async_trait::async_trait]
 impl InMatchServer for AnyInMatchServer {
-    async fn match_out<TInData, TOutData>(
-        &self,
-        in_id: MatchInId,
-        in_data: TInData,
-    ) -> anyhow::Result<MatchOut<TOutData>>
+    async fn accept_out<TInData, TOutData>(&self) -> anyhow::Result<MatchOutId>
     where
         TInData: serde::Serialize + Send,
         TOutData: serde::de::DeserializeOwned + Send,
         (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         match self {
-            Self::Redis(redis) => redis.match_out(in_id, in_data).await,
+            Self::Redis(redis) => redis.accept_out::<TInData, TOutData>().await,
+        }
+    }
+
+    async fn match_out<TInData, TOutData>(
+        &self,
+        out_id: MatchOutId,
+        in_id: MatchInId,
+        in_data: TInData,
+    ) -> anyhow::Result<Option<MatchOut<TOutData>>>
+    where
+        TInData: serde::Serialize + Send,
+        TOutData: serde::de::DeserializeOwned + Send,
+        (TInData, TOutData): MatchPair<TInData, TOutData>,
+    {
+        match self {
+            Self::Redis(redis) => redis.match_out(out_id, in_id, in_data).await,
         }
     }
 }

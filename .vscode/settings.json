@@ -39,6 +39,7 @@
         "oneshot",
         "Pkcs",
         "proto",
+        "psubscribe",
         "quic",
         "rcgen",
         "rdata",
