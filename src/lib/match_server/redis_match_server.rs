@@ -44,6 +44,8 @@ impl InMatchServer for RedisInMatchServer {
         let match_name = <(TInData, TOutData)>::get_match_name();
         let out_pattern = <(TInData, TOutData)>::get_redis_out_pattern();
 
+        log::info!("accepting {match_name} OUT...");
+
         let (mut connection, message_stream) =
             get_connection_and_subscribe::<MatchOutId>(&self.redis, out_pattern).await?;
 
@@ -135,6 +137,8 @@ impl InMatchServer for RedisInMatchServer {
                 .lock()
                 .await
                 .remove(&out_id);
+
+            log::info!("{match_name} OUT {out_id} no longer active.");
 
             return Ok(None);
         }
@@ -241,36 +245,36 @@ impl OutMatchServerTrait for RedisOutMatchServer {
             let connection = connection.clone();
 
             async move {
-                connection
-                    .lock()
-                    .await
-                    .send_packed_command(
-                        redis::cmd("SET")
-                            .arg(&out_key)
-                            .arg(serde_json::to_string(&out_id)?)
-                            .arg("EX")
-                            .arg(MATCH_TIMEOUT_SECONDS),
-                    )
-                    .await?;
+                {
+                    let mut connection = connection.lock().await;
 
-                let mut first = true;
+                    connection
+                        .send_packed_command(
+                            redis::cmd("SET")
+                                .arg(&out_key)
+                                .arg(serde_json::to_string(&out_id)?)
+                                .arg("EX")
+                                .arg(MATCH_TIMEOUT_SECONDS),
+                        )
+                        .await?;
+
+                    connection
+                        .publish(&out_key, serde_json::to_string(&out_id)?)
+                        .await?;
+                }
 
                 loop {
-                    {
-                        let mut connection = connection.lock().await;
-
-                        if first {
-                            first = false;
-                        } else {
-                            connection.expire(&out_key, MATCH_TIMEOUT_SECONDS).await?;
-                        }
-
-                        connection
-                            .publish(&out_key, serde_json::to_string(&out_id)?)
-                            .await?;
-                    }
-
                     tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    let ret: i32 = connection
+                        .lock()
+                        .await
+                        .expire(&out_key, MATCH_TIMEOUT_SECONDS)
+                        .await?;
+
+                    if ret == 0 {
+                        anyhow::bail!("OUT {out_id} expired.");
+                    }
                 }
             }
         };

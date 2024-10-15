@@ -131,8 +131,6 @@ impl TunnelManager {
         let tunnel_provider = Arc::new(tunnel_provider);
 
         loop {
-            log::info!("accepting OUT {}...", tunnel_provider.name());
-
             match tunnel_provider.accept_out().await {
                 Ok((out_id, connections)) => {
                     tokio::spawn(Self::handle_out(
@@ -160,6 +158,8 @@ impl TunnelManager {
         tunnel_map: Arc<tokio::sync::Mutex<TunnelMap>>,
         label_to_tunnels_map: Arc<tokio::sync::Mutex<LabelToTunnelsMap>>,
     ) {
+        let tunnel_name = tunnel_provider.name();
+
         let semaphore = Arc::new(tokio::sync::Semaphore::new(connections));
 
         let mut handles = Vec::<tokio::task::JoinHandle<()>>::new();
@@ -169,7 +169,7 @@ impl TunnelManager {
 
             handles.retain(|handle| !handle.is_finished());
 
-            log::info!("accepting {} tunnel...", tunnel_provider.name());
+            log::info!("accepting {tunnel_name} tunnel...");
 
             match tunnel_provider.accept(out_id).await {
                 Ok(Some((tunnel, (out_routing_rules, out_routing_priority)))) => {
