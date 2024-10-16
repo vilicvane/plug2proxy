@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, str::FromStr};
 
-use itertools::Itertools;
+use itertools::Itertools as _;
 
 use crate::match_server::{MatchOutId, MatchPair};
 

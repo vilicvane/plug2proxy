@@ -12,7 +12,7 @@ use crate::{
     route::config::OutRuleConfig,
     tunnel::{
         http2::{Http2OutTunnelConfig, Http2OutTunnelProvider},
-        punch_quic::{PunchQuicOutTunnelConfig, PunchQuicOutTunnelProvider},
+        quic::{QuicOutTunnelConfig, QuicOutTunnelProvider},
         OutTunnel, OutTunnelProvider,
     },
     utils::io::copy_bidirectional,
@@ -58,9 +58,9 @@ pub async fn up(
                 routing_rules: routing_rules.clone(),
             },
         )),
-        Box::new(PunchQuicOutTunnelProvider::new(
+        Box::new(QuicOutTunnelProvider::new(
             match_server.clone(),
-            PunchQuicOutTunnelConfig {
+            QuicOutTunnelConfig {
                 stun_server_addresses,
                 priority: udp_priority,
                 routing_priority,

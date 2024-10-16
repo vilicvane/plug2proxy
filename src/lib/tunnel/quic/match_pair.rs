@@ -5,26 +5,26 @@ use itertools::Itertools as _;
 use crate::match_server::{MatchOutId, MatchPair};
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct PunchQuicInData {
-    pub address: SocketAddr,
-}
+pub struct QuicInData {}
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct PunchQuicOutData {
+pub struct QuicOutData {
     pub address: SocketAddr,
+    pub cert: String,
+    pub key: String,
 }
 
-impl MatchPair<PunchQuicInData, PunchQuicOutData> for (PunchQuicInData, PunchQuicOutData) {
+impl MatchPair<QuicInData, QuicOutData> for (QuicInData, QuicOutData) {
     fn get_match_name() -> &'static str {
-        "punch_quic"
+        "quic"
     }
 
     fn get_redis_out_pattern() -> &'static str {
-        "punch_quic:out:*"
+        "quic:out:*"
     }
 
     fn get_redis_out_key(out_id: &MatchOutId) -> String {
-        format!("punch_quic:out:{}", out_id)
+        format!("quic:out:{}", out_id)
     }
 
     fn get_out_id_from_redis_out_key(out_key: &str) -> anyhow::Result<MatchOutId> {
@@ -37,6 +37,6 @@ impl MatchPair<PunchQuicInData, PunchQuicOutData> for (PunchQuicInData, PunchQui
     }
 
     fn get_redis_in_announcement_channel_name(out_id: &MatchOutId) -> String {
-        format!("punch_quic:in:out:{}", out_id)
+        format!("quic:in:out:{}", out_id)
     }
 }

@@ -4,18 +4,18 @@ use crate::tunnel::byte_stream_tunnel::{
     ByteStreamInTunnelConnection, ByteStreamOutTunnelConnection,
 };
 
-pub struct PunchQuicInTunnelConnection {
+pub struct QuicInTunnelConnection {
     connection: quinn::Connection,
 }
 
-impl PunchQuicInTunnelConnection {
+impl QuicInTunnelConnection {
     pub fn new(connection: quinn::Connection) -> Self {
-        PunchQuicInTunnelConnection { connection }
+        QuicInTunnelConnection { connection }
     }
 }
 
 #[async_trait::async_trait]
-impl ByteStreamInTunnelConnection for PunchQuicInTunnelConnection {
+impl ByteStreamInTunnelConnection for QuicInTunnelConnection {
     async fn open(
         &self,
     ) -> anyhow::Result<(
@@ -36,18 +36,18 @@ impl ByteStreamInTunnelConnection for PunchQuicInTunnelConnection {
     }
 }
 
-pub struct PunchQuicOutTunnelConnection {
+pub struct QuicOutTunnelConnection {
     connection: quinn::Connection,
 }
 
-impl PunchQuicOutTunnelConnection {
+impl QuicOutTunnelConnection {
     pub fn new(connection: quinn::Connection) -> Self {
-        PunchQuicOutTunnelConnection { connection }
+        QuicOutTunnelConnection { connection }
     }
 }
 
 #[async_trait::async_trait]
-impl ByteStreamOutTunnelConnection for PunchQuicOutTunnelConnection {
+impl ByteStreamOutTunnelConnection for QuicOutTunnelConnection {
     async fn accept(
         &self,
     ) -> anyhow::Result<(

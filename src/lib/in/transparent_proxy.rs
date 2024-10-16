@@ -15,7 +15,7 @@ use crate::{
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
     tunnel::{
         http2::{Http2InTunnelConfig, Http2InTunnelProvider},
-        punch_quic::{PunchQuicInTunnelConfig, PunchQuicInTunnelProvider},
+        quic::{QuicInTunnelConfig, QuicInTunnelProvider},
         InTunnelLike as _, InTunnelProvider,
     },
     utils::{
@@ -102,14 +102,14 @@ pub async fn up(
         }
 
         if tunneling_udp_enabled {
-            let config = PunchQuicInTunnelConfig {
+            let config = QuicInTunnelConfig {
                 priority: tunneling_udp_priority,
                 priority_default: tunneling_udp_priority_default,
                 stun_server_addresses: stun_server_addresses.clone(),
                 traffic_mark,
             };
 
-            tunnel_providers.push(Box::new(PunchQuicInTunnelProvider::new(
+            tunnel_providers.push(Box::new(QuicInTunnelProvider::new(
                 match_server.clone(),
                 config,
             )));

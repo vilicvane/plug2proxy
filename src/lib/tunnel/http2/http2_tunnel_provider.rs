@@ -5,8 +5,6 @@ use std::{
     time::Duration,
 };
 
-use rustls::pki_types::pem::PemObject;
-
 use crate::{
     match_server::{
         AnyInMatchServer, InMatchServer as _, MatchIn, MatchInId, MatchOut, MatchOutId,
@@ -14,6 +12,7 @@ use crate::{
     },
     route::config::OutRuleConfig,
     tunnel::{
+        common::{create_rustls_client_config, create_rustls_server_config_and_cert},
         http2::{Http2InTunnel, Http2OutTunnel},
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel,
@@ -22,6 +21,10 @@ use crate::{
 };
 
 use super::match_pair::{Http2InData, Http2OutData};
+
+const TUNNEL_NAME: &str = "http2";
+
+const TLS_NAME: &str = "localhost";
 
 pub struct Http2InTunnelConfig {
     pub connections: usize,
@@ -52,7 +55,7 @@ impl Http2InTunnelProvider {
 #[async_trait::async_trait]
 impl InTunnelProvider for Http2InTunnelProvider {
     fn name(&self) -> &'static str {
-        "http2"
+        TUNNEL_NAME
     }
 
     async fn accept_out(&self) -> anyhow::Result<(MatchOutId, usize)> {
@@ -102,22 +105,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
         log::debug!("http2 tunnel {tunnel_id} underlying TCP connected.");
 
         let client_config = {
-            let cert =
-                tokio_rustls::rustls::pki_types::CertificateDer::from_pem_slice(cert.as_bytes())
-                    .map_err(|_| anyhow::anyhow!("invalid cert."))?;
-            let key =
-                tokio_rustls::rustls::pki_types::PrivateKeyDer::from_pem_slice(key.as_bytes())
-                    .map_err(|_| anyhow::anyhow!("invalid key."))?;
-
-            let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-
-            root_store.add(cert.clone())?;
-
-            let cert_chain = vec![cert];
-
-            let mut client_config = tokio_rustls::rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_client_auth_cert(cert_chain, key)?;
+            let mut client_config = create_rustls_client_config(&cert, &key)?;
 
             client_config.alpn_protocols = vec![b"h2".to_vec()];
 
@@ -126,9 +114,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
 
         let tls_connector = tokio_rustls::TlsConnector::from(client_config);
 
-        let stream = tls_connector
-            .connect("localhost".try_into()?, stream)
-            .await?;
+        let stream = tls_connector.connect(TLS_NAME.try_into()?, stream).await?;
 
         log::debug!("http2 tunnel {tunnel_id} underlying TLS connection established.");
 
@@ -177,49 +163,13 @@ pub struct Http2OutTunnelProvider {
 
 impl Http2OutTunnelProvider {
     pub fn new(match_server: Arc<OutMatchServer>, config: Http2OutTunnelConfig) -> Self {
-        let (server_config, cert, key) = {
-            let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-
-            let cert_chain = vec![cert.cert.der().clone()];
-            let key = tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(
-                cert.key_pair.serialize_der(),
-            );
-
-            let root_store = {
-                let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-
-                let cert =
-                    tokio_rustls::rustls::pki_types::CertificateDer::from_slice(cert.cert.der());
-
-                root_store.add(cert).unwrap();
-
-                Arc::new(root_store)
-            };
-
-            let client_cert_verifier =
-                tokio_rustls::rustls::server::WebPkiClientVerifier::builder(root_store)
-                    .build()
-                    .unwrap();
-
-            let server_config = Arc::new(
-                tokio_rustls::rustls::ServerConfig::builder_with_protocol_versions(
-                    tokio_rustls::rustls::DEFAULT_VERSIONS,
-                )
-                .with_client_cert_verifier(client_cert_verifier)
-                .with_single_cert(cert_chain, key.into())
-                .unwrap(),
-            );
-
-            let key = cert.key_pair.serialize_pem();
-            let cert = cert.cert.pem();
-
-            (server_config, cert, key)
-        };
+        let (server_config, cert, key) =
+            create_rustls_server_config_and_cert([TLS_NAME.to_owned()]);
 
         Self {
             id: MatchOutId::new(),
             match_server,
-            server_config,
+            server_config: Arc::new(server_config),
             cert,
             key,
             config,
