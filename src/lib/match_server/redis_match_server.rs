@@ -4,8 +4,11 @@ use std::{
     time::Duration,
 };
 
+use aes_gcm::{aead::Aead, AeadCore, KeyInit as _};
 use futures::{future::ready, pin_mut, Stream, StreamExt as _};
+use itertools::Itertools;
 use redis::AsyncCommands;
+use sha2::Digest as _;
 
 use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
 
@@ -19,14 +22,16 @@ const MATCH_IN_DATA_EXPIRATION_IN_SECONDS: i64 = 30;
 
 pub struct RedisInMatchServer {
     redis: redis::Client,
+    cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
     match_name_to_active_out_id_set_map:
         tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<HashSet<MatchOutId>>>>>,
 }
 
 impl RedisInMatchServer {
-    pub fn new(redis: redis::Client) -> Self {
+    pub fn new(redis: redis::Client, key: Option<String>) -> Self {
         Self {
             redis,
+            cipher: create_cipher(key),
             match_name_to_active_out_id_set_map: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -46,8 +51,12 @@ impl InMatchServer for RedisInMatchServer {
 
         log::info!("accepting {match_name} OUT...");
 
-        let (mut connection, message_stream) =
-            get_connection_and_subscribe::<MatchOutId>(&self.redis, out_pattern).await?;
+        let (mut connection, message_stream) = get_connection_and_subscribe::<MatchOutId>(
+            &self.redis,
+            out_pattern,
+            self.cipher.clone(),
+        )
+        .await?;
 
         let active_out_id_set = self
             .match_name_to_active_out_id_set_map
@@ -125,8 +134,12 @@ impl InMatchServer for RedisInMatchServer {
 
         let match_key = uuid::Uuid::new_v4().to_string();
 
-        let (mut connection, subscription_stream) =
-            get_connection_and_subscribe::<MatchOut<TOutData>>(&self.redis, &match_key).await?;
+        let (mut connection, subscription_stream) = get_connection_and_subscribe::<
+            MatchOut<TOutData>,
+        >(
+            &self.redis, &match_key, self.cipher.clone()
+        )
+        .await?;
 
         if !connection.exists(out_key).await? {
             self.match_name_to_active_out_id_set_map
@@ -153,42 +166,49 @@ impl InMatchServer for RedisInMatchServer {
             })
         };
 
-        let announce_task = async move {
-            let announcement = InAnnouncement {
-                id: in_id,
-                match_key: match_key.clone(),
-            };
+        let announce_task = {
+            let cipher = self.cipher.clone();
 
-            connection
-                .send_packed_command(
-                    redis::cmd("SET")
-                        .arg(&match_key)
-                        .arg(serde_json::to_string(&in_data)?)
-                        .arg("NX")
-                        .arg("EX")
-                        .arg(MATCH_IN_DATA_EXPIRATION_IN_SECONDS),
-                )
-                .await?;
-
-            loop {
-                log::debug!("announcing {match_name} IN {in_id} with match key {match_key}...");
+            async move {
+                let announcement = InAnnouncement {
+                    id: in_id,
+                    match_key: match_key.clone(),
+                };
 
                 connection
-                    .publish(
-                        &in_announcement_channel_name,
-                        serde_json::to_string(&announcement)?,
+                    .send_packed_command(
+                        redis::cmd("SET")
+                            .arg(&match_key)
+                            .arg(encrypt(
+                                &cipher,
+                                serde_json::to_string(&in_data)?.as_bytes(),
+                            ))
+                            .arg("NX")
+                            .arg("EX")
+                            .arg(MATCH_IN_DATA_EXPIRATION_IN_SECONDS),
                     )
                     .await?;
 
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let encrypted_announcement =
+                    encrypt(&cipher, serde_json::to_string(&announcement)?.as_bytes());
 
-                connection
-                    .expire(&match_key, MATCH_IN_DATA_EXPIRATION_IN_SECONDS)
-                    .await?;
+                loop {
+                    log::debug!("announcing {match_name} IN {in_id} with match key {match_key}...");
+
+                    connection
+                        .publish(&in_announcement_channel_name, &encrypted_announcement)
+                        .await?;
+
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    connection
+                        .expire(&match_key, MATCH_IN_DATA_EXPIRATION_IN_SECONDS)
+                        .await?;
+                }
+
+                #[allow(unreachable_code)]
+                anyhow::Ok(())
             }
-
-            #[allow(unreachable_code)]
-            anyhow::Ok(())
         };
 
         let match_out = tokio::select! {
@@ -208,12 +228,21 @@ impl InMatchServer for RedisInMatchServer {
 
 pub struct RedisOutMatchServer {
     labels: Vec<String>,
+    cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
     redis: redis::Client,
 }
 
 impl RedisOutMatchServer {
-    pub async fn new(redis: redis::Client, labels: Vec<String>) -> anyhow::Result<Self> {
-        Ok(Self { labels, redis })
+    pub async fn new(
+        redis: redis::Client,
+        key: Option<String>,
+        labels: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            labels,
+            cipher: create_cipher(key),
+            redis,
+        })
     }
 }
 
@@ -236,31 +265,40 @@ impl OutMatchServerTrait for RedisOutMatchServer {
         let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name(&out_id);
         let out_key = <(TInData, TOutData)>::get_redis_out_key(&out_id);
 
-        let (connection, in_announcement_stream) =
-            get_connection_and_subscribe::<InAnnouncement>(&self.redis, &channel_name).await?;
+        let (connection, in_announcement_stream) = get_connection_and_subscribe::<InAnnouncement>(
+            &self.redis,
+            &channel_name,
+            self.cipher.clone(),
+        )
+        .await?;
 
         let connection = Arc::new(tokio::sync::Mutex::new(connection));
 
         let announce_task = {
             let connection = connection.clone();
+            let cipher = self.cipher.clone();
 
             async move {
                 {
                     let mut connection = connection.lock().await;
 
+                    // Actually it's not necessary as the OUT id is already in key (and it's
+                    // neither used), but we are using the same subscribe utility that does
+                    // decryption anyway.
+                    let encrypted_out_id =
+                        encrypt(&cipher, serde_json::to_string(&out_id)?.as_bytes());
+
                     connection
                         .send_packed_command(
                             redis::cmd("SET")
                                 .arg(&out_key)
-                                .arg(serde_json::to_string(&out_id)?)
+                                .arg(&encrypted_out_id)
                                 .arg("EX")
                                 .arg(MATCH_TIMEOUT_SECONDS),
                         )
                         .await?;
 
-                    connection
-                        .publish(&out_key, serde_json::to_string(&out_id)?)
-                        .await?;
+                    connection.publish(&out_key, &encrypted_out_id).await?;
                 }
 
                 loop {
@@ -282,6 +320,8 @@ impl OutMatchServerTrait for RedisOutMatchServer {
         let match_task = async {
             pin_mut!(in_announcement_stream);
 
+            let cipher = self.cipher.clone();
+
             while let Some(in_announcement) = in_announcement_stream.next().await {
                 let InAnnouncement { id, match_key } = in_announcement?;
 
@@ -295,7 +335,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                     .send_packed_command(
                         redis::cmd("SET")
                             .arg(&match_lock_key)
-                            .arg(serde_json::to_string(&out_data)?)
+                            .arg("")
                             .arg("NX")
                             .arg("EX")
                             .arg(MATCH_TIMEOUT_SECONDS),
@@ -308,9 +348,9 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                     continue;
                 }
 
-                let in_data: String = connection.get(&match_key).await?;
+                let in_data: Vec<u8> = connection.get(&match_key).await?;
 
-                let in_data: TInData = serde_json::from_str(&in_data)?;
+                let in_data: TInData = serde_json::from_slice(&decrypt(&cipher, &in_data)?)?;
 
                 let tunnel_id = TunnelId::new();
 
@@ -319,15 +359,19 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                 connection
                     .publish(
                         match_key,
-                        serde_json::to_string(&MatchOut {
-                            id: out_id,
-                            tunnel_id,
-                            tunnel_labels: self.labels.clone(),
-                            tunnel_priority: out_priority,
-                            routing_rules: out_routing_rules.to_vec(),
-                            routing_priority: out_routing_priority,
-                            data: out_data,
-                        })?,
+                        encrypt(
+                            &cipher,
+                            serde_json::to_string(&MatchOut {
+                                id: out_id,
+                                tunnel_id,
+                                tunnel_labels: self.labels.clone(),
+                                tunnel_priority: out_priority,
+                                routing_rules: out_routing_rules.to_vec(),
+                                routing_priority: out_routing_priority,
+                                data: out_data,
+                            })?
+                            .as_bytes(),
+                        ),
                     )
                     .await?;
 
@@ -362,6 +406,7 @@ struct InAnnouncement {
 async fn get_connection_and_subscribe<T: serde::de::DeserializeOwned>(
     redis: &redis::Client,
     channel_name: &str,
+    cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
 ) -> anyhow::Result<(
     redis::aio::MultiplexedConnection,
     impl Stream<Item = anyhow::Result<T>>,
@@ -386,11 +431,47 @@ async fn get_connection_and_subscribe<T: serde::de::DeserializeOwned>(
                 continue;
             };
 
-            let value: T = serde_json::from_slice(message.get_payload_bytes())?;
+            let value: T = serde_json::from_slice(
+                decrypt(&cipher, message.get_payload_bytes())?.as_slice(),
+            )?;
 
             yield Ok(value);
         }
     };
 
     Ok((connection, subscription_stream))
+}
+
+fn create_cipher(key: Option<String>) -> Option<Arc<aes_gcm::Aes256Gcm>> {
+    key.map(|key| {
+        let key = sha2::Sha256::digest(key.as_bytes());
+        let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&key);
+        Arc::new(aes_gcm::Aes256Gcm::new(key))
+    })
+}
+
+fn encrypt(cipher: &Option<Arc<aes_gcm::Aes256Gcm>>, data: &[u8]) -> Vec<u8> {
+    if let Some(cipher) = cipher {
+        let nonce = aes_gcm::Aes256Gcm::generate_nonce(aes_gcm::aead::OsRng);
+
+        let data = cipher.encrypt(&nonce, data).unwrap();
+
+        nonce.iter().copied().chain(data).collect_vec()
+    } else {
+        data.to_vec()
+    }
+}
+
+fn decrypt(cipher: &Option<Arc<aes_gcm::Aes256Gcm>>, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if let Some(cipher) = cipher {
+        let (nonce, data) = data.split_at(12);
+
+        let nonce = aes_gcm::Nonce::from_slice(nonce);
+
+        cipher
+            .decrypt(nonce, data)
+            .map_err(|error| anyhow::anyhow!("redis match decryption failed, wrong key? {error}"))
+    } else {
+        Ok(data.to_vec())
+    }
 }

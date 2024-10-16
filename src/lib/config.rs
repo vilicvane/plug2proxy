@@ -13,7 +13,9 @@ pub enum MatchServerConfig {
 impl MatchServerConfig {
     pub fn new_in_match_server(&self) -> anyhow::Result<AnyInMatchServer> {
         Ok(match self {
-            Self::Redis(config) => RedisInMatchServer::new(new_redis_client(config)?).into(),
+            Self::Redis(config) => {
+                RedisInMatchServer::new(new_redis_client(&config.url)?, config.key.clone()).into()
+            }
         })
     }
 
@@ -22,9 +24,11 @@ impl MatchServerConfig {
         labels: Vec<String>,
     ) -> anyhow::Result<OutMatchServer> {
         Ok(match self {
-            Self::Redis(config) => RedisOutMatchServer::new(new_redis_client(config)?, labels)
-                .await?
-                .into(),
+            Self::Redis(config) => {
+                RedisOutMatchServer::new(new_redis_client(&config.url)?, config.key.clone(), labels)
+                    .await?
+                    .into()
+            }
         })
     }
 }
@@ -32,11 +36,10 @@ impl MatchServerConfig {
 #[derive(Clone, serde::Deserialize)]
 pub struct RedisMatchServerConfig {
     pub url: String,
+    pub key: Option<String>,
 }
 
-fn new_redis_client(
-    RedisMatchServerConfig { url }: &RedisMatchServerConfig,
-) -> anyhow::Result<redis::Client> {
+fn new_redis_client(url: &str) -> anyhow::Result<redis::Client> {
     Ok(redis::Client::open(format!("{}?protocol=resp3", url))?)
 }
 
@@ -56,7 +59,9 @@ impl MatchServerUrlOrConfig {
                 let scheme = parsed_url.scheme();
 
                 match scheme {
-                    "redis" | "rediss" => MatchServerConfig::Redis(RedisMatchServerConfig { url }),
+                    "redis" | "rediss" => {
+                        MatchServerConfig::Redis(RedisMatchServerConfig { url, key: None })
+                    }
                     _ => panic!("unsupported match server url."),
                 }
             }
