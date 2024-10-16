@@ -8,8 +8,8 @@ use config::{InConfig, OutConfig};
 use constants::{
     dns_server_addresses_default, fake_ip_dns_db_path_default, fake_ipv4_net_default,
     fake_ipv6_net_default, geolite2_cache_path_default, geolite2_update_interval_default,
-    stun_server_addresses_default, tunneling_tcp_priority_default, tunneling_udp_priority_default,
-    DATA_DIR_DEFAULT,
+    stun_server_addresses_default, tunneling_http2_priority_default,
+    tunneling_quic_priority_default, DATA_DIR_DEFAULT,
 };
 use plug2proxy::{
     out,
@@ -95,13 +95,13 @@ async fn main() -> anyhow::Result<()> {
                             .map_or_else(stun_server_addresses_default, |address| address
                                 .into_vec()),
                         match_server_config: tunneling.match_server.into_config(),
-                        tunneling_tcp_enabled: tunneling.tcp.enabled,
-                        tunneling_tcp_connections: tunneling.tcp.connections,
-                        tunneling_tcp_priority: tunneling.tcp.priority,
-                        tunneling_tcp_priority_default: tunneling_tcp_priority_default(),
-                        tunneling_udp_enabled: tunneling.udp.enabled,
-                        tunneling_udp_priority: tunneling.udp.priority,
-                        tunneling_udp_priority_default: tunneling_udp_priority_default(),
+                        tunneling_http2_enabled: tunneling.http2.enabled,
+                        tunneling_http2_connections: tunneling.http2.connections,
+                        tunneling_http2_priority: tunneling.http2.priority,
+                        tunneling_http2_priority_default: tunneling_http2_priority_default(),
+                        tunneling_quic_enabled: tunneling.quic.enabled,
+                        tunneling_quic_priority: tunneling.quic.priority,
+                        tunneling_quic_priority_default: tunneling_quic_priority_default(),
                         routing_rules: routing.rules,
                         geolite2_cache_path: &geolite2_cache_path,
                         geolite2_url: routing.geolite2.url,
@@ -119,8 +119,8 @@ async fn main() -> anyhow::Result<()> {
         Config::Out(OutConfig { tunneling, routing }) => {
             out::up(out::Options {
                 labels: tunneling.label.map_or_else(Vec::new, OneOrMany::into_vec),
-                tcp_priority: tunneling.tcp.priority,
-                udp_priority: tunneling.udp.priority,
+                tcp_priority: tunneling.http2.priority,
+                udp_priority: tunneling.quic.priority,
                 stun_server_addresses: tunneling
                     .stun_server
                     .map_or_else(stun_server_addresses_default, |address| address.into_vec()),

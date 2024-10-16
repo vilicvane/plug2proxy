@@ -9,7 +9,7 @@ use plug2proxy::{
 use crate::constants::{
     fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
     transparent_proxy_address_default, transparent_proxy_traffic_mark_default,
-    tunneling_tcp_connections_default,
+    tunneling_http2_connections_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -73,38 +73,38 @@ pub struct InTunnelingConfig {
     pub stun_server: Option<OneOrMany<String>>,
     pub match_server: MatchServerUrlOrConfig,
     #[serde(default)]
-    pub tcp: InTunnelingTcpConfig,
+    pub http2: InTunnelingHttp2Config,
     #[serde(default)]
-    pub udp: InTunnelingUdpConfig,
+    pub quic: InTunnelingQuicConfig,
 }
 
 #[derive(serde::Deserialize)]
-pub struct InTunnelingTcpConfig {
+pub struct InTunnelingHttp2Config {
     #[serde(default = "true_default")]
     pub enabled: bool,
-    #[serde(default = "tunneling_tcp_connections_default")]
+    #[serde(default = "tunneling_http2_connections_default")]
     pub connections: usize,
     pub priority: Option<i64>,
 }
 
-impl Default for InTunnelingTcpConfig {
+impl Default for InTunnelingHttp2Config {
     fn default() -> Self {
         Self {
             enabled: true,
-            connections: tunneling_tcp_connections_default(),
+            connections: tunneling_http2_connections_default(),
             priority: None,
         }
     }
 }
 
 #[derive(serde::Deserialize)]
-pub struct InTunnelingUdpConfig {
+pub struct InTunnelingQuicConfig {
     #[serde(default = "true_default")]
     pub enabled: bool,
     pub priority: Option<i64>,
 }
 
-impl Default for InTunnelingUdpConfig {
+impl Default for InTunnelingQuicConfig {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -159,18 +159,18 @@ pub struct OutTunnelingConfig {
     pub stun_server: Option<OneOrMany<String>>,
     pub match_server: MatchServerUrlOrConfig,
     #[serde(default)]
-    pub tcp: OutTunnelingTcpConfig,
+    pub http2: OutTunnelingHttp2Config,
     #[serde(default)]
-    pub udp: OutTunnelingUdpConfig,
+    pub quic: OutTunnelingQuicConfig,
 }
 
 #[derive(Default, serde::Deserialize)]
-pub struct OutTunnelingTcpConfig {
+pub struct OutTunnelingHttp2Config {
     pub priority: Option<i64>,
 }
 
 #[derive(Default, serde::Deserialize)]
-pub struct OutTunnelingUdpConfig {
+pub struct OutTunnelingQuicConfig {
     pub priority: Option<i64>,
 }
 

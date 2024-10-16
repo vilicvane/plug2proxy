@@ -34,13 +34,13 @@ pub struct Options<'a> {
     pub fake_ipv6_net: ipnet::Ipv6Net,
     pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
-    pub tunneling_tcp_enabled: bool,
-    pub tunneling_tcp_connections: usize,
-    pub tunneling_tcp_priority: Option<i64>,
-    pub tunneling_tcp_priority_default: i64,
-    pub tunneling_udp_enabled: bool,
-    pub tunneling_udp_priority: Option<i64>,
-    pub tunneling_udp_priority_default: i64,
+    pub tunneling_http2_enabled: bool,
+    pub tunneling_http2_connections: usize,
+    pub tunneling_http2_priority: Option<i64>,
+    pub tunneling_http2_priority_default: i64,
+    pub tunneling_quic_enabled: bool,
+    pub tunneling_quic_priority: Option<i64>,
+    pub tunneling_quic_priority_default: i64,
     pub routing_rules: Vec<InRuleConfig>,
     pub geolite2_cache_path: &'a PathBuf,
     pub geolite2_url: String,
@@ -57,13 +57,13 @@ pub async fn up(
         fake_ipv6_net,
         stun_server_addresses,
         match_server_config,
-        tunneling_tcp_enabled,
-        tunneling_tcp_connections,
-        tunneling_tcp_priority,
-        tunneling_tcp_priority_default,
-        tunneling_udp_enabled,
-        tunneling_udp_priority,
-        tunneling_udp_priority_default,
+        tunneling_http2_enabled,
+        tunneling_http2_connections,
+        tunneling_http2_priority,
+        tunneling_http2_priority_default,
+        tunneling_quic_enabled,
+        tunneling_quic_priority,
+        tunneling_quic_priority_default,
         routing_rules,
         geolite2_cache_path,
         geolite2_url,
@@ -88,11 +88,11 @@ pub async fn up(
 
         let mut tunnel_providers = Vec::<Box<dyn InTunnelProvider + Send>>::new();
 
-        if tunneling_tcp_enabled {
+        if tunneling_http2_enabled {
             let config = Http2InTunnelConfig {
-                connections: tunneling_tcp_connections,
-                priority: tunneling_tcp_priority,
-                priority_default: tunneling_tcp_priority_default,
+                connections: tunneling_http2_connections,
+                priority: tunneling_http2_priority,
+                priority_default: tunneling_http2_priority_default,
                 traffic_mark,
             };
 
@@ -101,10 +101,10 @@ pub async fn up(
             ));
         }
 
-        if tunneling_udp_enabled {
+        if tunneling_quic_enabled {
             let config = QuicInTunnelConfig {
-                priority: tunneling_udp_priority,
-                priority_default: tunneling_udp_priority_default,
+                priority: tunneling_quic_priority,
+                priority_default: tunneling_quic_priority_default,
                 stun_server_addresses: stun_server_addresses.clone(),
                 traffic_mark,
             };

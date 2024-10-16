@@ -39,15 +39,15 @@ pub fn stun_server_addresses_default() -> Vec<String> {
     ]
 }
 
-pub fn tunneling_tcp_connections_default() -> usize {
+pub fn tunneling_http2_connections_default() -> usize {
     3
 }
 
-pub fn tunneling_tcp_priority_default() -> i64 {
+pub fn tunneling_http2_priority_default() -> i64 {
     0
 }
 
-pub fn tunneling_udp_priority_default() -> i64 {
+pub fn tunneling_quic_priority_default() -> i64 {
     10
 }
 
