@@ -10,7 +10,7 @@ pub fn init_log() {
     env_logger::Builder::from_env(
         Env::default().default_filter_or(format!("{}=info", env!("CARGO_PKG_NAME"))),
     )
-    .format(|f, record| {
+    .format(|formatter, record| {
         let timestamp = chrono::Local::now()
             .format("%Y-%m-%d %H:%M:%S.%3f")
             .to_string();
@@ -23,7 +23,7 @@ pub fn init_log() {
             Level::Trace => timestamp.dimmed(),
         };
 
-        writeln!(f, "{} {}", timestamp, record.args())
+        writeln!(formatter, "{} {}", timestamp, record.args())
     })
     .init();
 }
