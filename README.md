@@ -70,6 +70,7 @@ Checkout [src/config.rs](src/config.rs) for the complete configuration options a
 {
     "mode": "out",
     "tunneling": {
+        "label": "us",
         "match_server": "redis://username:password@redis-server/"
     },
     "outputs": [
