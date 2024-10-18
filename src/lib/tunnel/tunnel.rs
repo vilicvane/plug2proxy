@@ -1,6 +1,6 @@
 use std::{fmt, net::SocketAddr};
 
-use crate::match_server::MatchOutId;
+use crate::{match_server::MatchOutId, route::rule::Label};
 
 #[async_trait::async_trait]
 pub trait InTunnelLike: fmt::Display + Send + Sync {
@@ -21,7 +21,7 @@ pub trait InTunnel: InTunnelLike {
 
     fn out_id(&self) -> MatchOutId;
 
-    fn labels(&self) -> &[String];
+    fn labels(&self) -> &[Label];
 
     fn priority(&self) -> i64;
 

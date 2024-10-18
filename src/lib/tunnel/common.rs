@@ -3,9 +3,11 @@ use std::sync::Arc;
 use itertools::Itertools;
 use rustls::pki_types::pem::PemObject as _;
 
+use crate::route::rule::Label;
+
 use super::TunnelId;
 
-pub fn get_tunnel_string(r#type: &'static str, id: TunnelId, labels: &[String]) -> String {
+pub fn get_tunnel_string(r#type: &'static str, id: TunnelId, labels: &[Label]) -> String {
     let id_short = &id.0.as_bytes()[..4]
         .iter()
         .map(|byte| format!("{:02x}", byte))
@@ -16,7 +18,7 @@ pub fn get_tunnel_string(r#type: &'static str, id: TunnelId, labels: &[String]) 
     if labels.is_empty() {
         name
     } else {
-        format!("{} ({})", name, labels.join(","))
+        format!("{} ({})", name, labels.iter().join(","))
     }
 }
 

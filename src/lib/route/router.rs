@@ -10,7 +10,7 @@ use crate::tunnel::TunnelId;
 
 use super::{
     config::{InRuleConfig, OutRuleConfig},
-    rule::DynRuleBox,
+    rule::{DynRuleBox, Label},
 };
 
 pub struct Router {
@@ -38,7 +38,7 @@ impl Router {
         address: SocketAddr,
         domain: &Option<String>,
         region_codes: &Option<Vec<String>>,
-    ) -> Vec<Vec<(String, Option<String>)>> {
+    ) -> Vec<Vec<(Label, Option<String>)>> {
         let rules_groups = self.rules_groups_cache.lock().unwrap();
 
         rules_groups

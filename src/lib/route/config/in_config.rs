@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{
     route::rule::{
-        AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule,
+        AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule, Label,
     },
     utils::{net::parse_ip_net, OneOrMany},
 };
@@ -86,7 +86,7 @@ pub struct InGeoIpRuleConfig {
     pub r#match: OneOrMany<String>,
     #[serde(default)]
     pub negate: bool,
-    pub out: OneOrMany<String>,
+    pub out: OneOrMany<Label>,
     pub tag: Option<String>,
 }
 
@@ -96,7 +96,7 @@ pub struct InAddressRuleConfig {
     pub match_port: Option<OneOrMany<u16>>,
     #[serde(default)]
     pub negate: bool,
-    pub out: OneOrMany<String>,
+    pub out: OneOrMany<Label>,
     pub tag: Option<String>,
 }
 
@@ -105,7 +105,7 @@ pub struct InDomainRuleConfig {
     pub r#match: OneOrMany<String>,
     #[serde(default)]
     pub negate: bool,
-    pub out: OneOrMany<String>,
+    pub out: OneOrMany<Label>,
     pub tag: Option<String>,
 }
 
@@ -114,12 +114,12 @@ pub struct InDomainPatternRuleConfig {
     pub r#match: OneOrMany<String>,
     #[serde(default)]
     pub negate: bool,
-    pub out: OneOrMany<String>,
+    pub out: OneOrMany<Label>,
     pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
 pub struct InFallbackRuleConfig {
-    pub out: OneOrMany<String>,
+    pub out: OneOrMany<Label>,
     pub tag: Option<String>,
 }

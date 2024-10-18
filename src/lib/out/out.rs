@@ -11,7 +11,10 @@ use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
     out::direct_output::DirectOutput,
-    route::config::{OutOutputConfig, OutRuleConfig},
+    route::{
+        config::{OutOutputConfig, OutRuleConfig},
+        rule::Label,
+    },
     tunnel::{
         http2::{Http2OutTunnelConfig, Http2OutTunnelProvider},
         quic::{QuicOutTunnelConfig, QuicOutTunnelProvider},
@@ -23,7 +26,7 @@ use crate::{
 use super::output::{AnyOutput, Output as _};
 
 pub struct Options {
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub stun_server_addresses: Vec<String>,
     pub match_server_config: MatchServerConfig,
     pub tcp_priority: Option<i64>,

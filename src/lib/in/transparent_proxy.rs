@@ -12,7 +12,7 @@ use crate::{
         fake_ip_dns::FakeIpResolver,
         udp_forwarder::{UdpForwarder, UDP_BUFFER_SIZE},
     },
-    route::{config::InRuleConfig, geolite2::GeoLite2, router::Router},
+    route::{config::InRuleConfig, geolite2::GeoLite2, router::Router, rule::Label},
     tunnel::{
         http2::{Http2InTunnelConfig, Http2InTunnelProvider},
         quic::{QuicInTunnelConfig, QuicInTunnelProvider},
@@ -265,7 +265,7 @@ fn resolve_destination(
 ) -> (
     SocketAddr,
     Option<String>,
-    Vec<Vec<(String, Option<String>)>>,
+    Vec<Vec<(Label, Option<String>)>>,
 ) {
     if let Some((real_ip, name)) = fake_ip_resolver.resolve(&destination.ip()) {
         let real_destination = SocketAddr::new(real_ip, destination.port());
@@ -285,7 +285,7 @@ async fn handle_in_tcp_stream(
     source: SocketAddr,
     destination: SocketAddr,
     name: Option<String>,
-    labels_groups: Vec<Vec<(String, Option<String>)>>,
+    labels_groups: Vec<Vec<(Label, Option<String>)>>,
     tunnel_manager: &TunnelManager,
 ) -> anyhow::Result<()> {
     let destination_string = get_destination_string(destination, &name);
@@ -331,7 +331,7 @@ async fn handle_in_tcp_stream(
     Ok(())
 }
 
-fn stringify_labels_groups(labels_groups: &[Vec<(String, Option<String>)>]) -> String {
+fn stringify_labels_groups(labels_groups: &[Vec<(Label, Option<String>)>]) -> String {
     labels_groups
         .iter()
         .map(|labels| labels.iter().map(|(label, _)| label).join(","))

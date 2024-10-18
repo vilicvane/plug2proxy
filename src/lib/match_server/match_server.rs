@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
+use crate::{
+    route::{config::OutRuleConfig, rule::Label},
+    tunnel::TunnelId,
+};
 
 #[async_trait::async_trait]
 pub trait InMatchServer {
@@ -26,7 +29,7 @@ pub trait InMatchServer {
 pub struct MatchOut<TData> {
     pub id: MatchOutId,
     pub tunnel_id: TunnelId,
-    pub tunnel_labels: Vec<String>,
+    pub tunnel_labels: Vec<Label>,
     pub tunnel_priority: Option<i64>,
     pub routing_priority: i64,
     pub routing_rules: Vec<OutRuleConfig>,

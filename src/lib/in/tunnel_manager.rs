@@ -11,7 +11,10 @@ use itertools::Itertools;
 
 use crate::{
     match_server::MatchOutId,
-    route::router::Router,
+    route::{
+        router::Router,
+        rule::{BuiltInLabel, Label},
+    },
     tunnel::{
         direct_tunnel::DirectInTunnel, AnyInTunnelLikeArc, InTunnel, InTunnelLike,
         InTunnelProvider, TunnelId,
@@ -19,7 +22,7 @@ use crate::{
 };
 
 type TunnelMap = HashMap<TunnelId, Arc<Box<dyn InTunnel>>>;
-type LabelToTunnelsMap = HashMap<String, Vec<Arc<Box<dyn InTunnel>>>>;
+type LabelToTunnelsMap = HashMap<Label, Vec<Arc<Box<dyn InTunnel>>>>;
 
 pub struct TunnelManager {
     pub accept_handles: Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
@@ -76,7 +79,7 @@ impl TunnelManager {
 
     pub async fn select_tunnel(
         &self,
-        labels_groups: &[Vec<(String, Option<String>)>],
+        labels_groups: &[Vec<(Label, Option<String>)>],
     ) -> Option<(AnyInTunnelLikeArc, Option<String>)> {
         let index = self.select_index.fetch_add(1, atomic::Ordering::Relaxed);
 
@@ -87,20 +90,22 @@ impl TunnelManager {
             let mut label_any_presence = None;
 
             for (label, tag) in labels {
-                match label.as_str() {
-                    "DIRECT" => {
-                        return Some((self.direct_tunnel.clone().into(), tag.clone()));
-                    }
-                    "PROXY" => {
-                        if label_proxy_presence.is_none() {
-                            label_proxy_presence = Some(tag.clone());
+                match label {
+                    Label::BuiltIn(label) => match label {
+                        BuiltInLabel::Direct => {
+                            return Some((self.direct_tunnel.clone().into(), tag.clone()));
                         }
-                    }
-                    "ANY" => {
-                        if label_any_presence.is_none() {
-                            label_any_presence = Some(tag.clone());
+                        BuiltInLabel::Proxy => {
+                            if label_proxy_presence.is_none() {
+                                label_proxy_presence = Some(tag.clone());
+                            }
                         }
-                    }
+                        BuiltInLabel::Any => {
+                            if label_any_presence.is_none() {
+                                label_any_presence = Some(tag.clone());
+                            }
+                        }
+                    },
                     _ => {
                         if let Some(tunnels) = label_to_tunnels_map.get(label) {
                             let tunnel = select_from_tunnels(tunnels, index);
@@ -114,7 +119,7 @@ impl TunnelManager {
             }
 
             let proxy_tunnel = label_to_tunnels_map
-                .get("PROXY")
+                .get(&Label::BuiltIn(BuiltInLabel::Proxy))
                 .and_then(|tunnels| select_from_tunnels(tunnels, index));
 
             if let Some(tag) = label_proxy_presence {
@@ -253,7 +258,10 @@ impl TunnelManager {
         label_to_tunnels_map.clear();
 
         for (_, tunnel) in tunnel_map.iter() {
-            let extra_labels = ["PROXY".to_owned(), tunnel.out_id().to_string()];
+            let extra_labels = [
+                Label::BuiltIn(BuiltInLabel::Proxy),
+                Label::Custom(tunnel.out_id().to_string()),
+            ];
 
             let labels = tunnel.labels().iter().chain(&extra_labels);
 

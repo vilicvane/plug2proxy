@@ -2,7 +2,10 @@ use std::net::SocketAddr;
 
 use plug2proxy::{
     config::MatchServerUrlOrConfig,
-    route::config::{InFallbackRuleConfig, InRuleConfig, OutOutputConfig, OutRuleConfig},
+    route::{
+        config::{InFallbackRuleConfig, InRuleConfig, OutOutputConfig, OutRuleConfig},
+        rule::{BuiltInLabel, Label},
+    },
     utils::OneOrMany,
 };
 
@@ -156,7 +159,7 @@ pub struct OutConfig {
 
 #[derive(serde::Deserialize)]
 pub struct OutTunnelingConfig {
-    pub label: Option<OneOrMany<String>>,
+    pub label: Option<OneOrMany<Label>>,
     pub stun_server: Option<OneOrMany<String>>,
     pub match_server: MatchServerUrlOrConfig,
     #[serde(default)]
@@ -185,7 +188,7 @@ pub struct OutRoutingConfig {
 
 fn in_routing_rules_default() -> Vec<InRuleConfig> {
     vec![InRuleConfig::Fallback(InFallbackRuleConfig {
-        out: "ANY".to_owned().into(),
+        out: OneOrMany::One(Label::BuiltIn(BuiltInLabel::Any)),
         tag: None,
     })]
 }

@@ -10,7 +10,10 @@ use itertools::Itertools;
 use redis::AsyncCommands;
 use sha2::Digest as _;
 
-use crate::{route::config::OutRuleConfig, tunnel::TunnelId};
+use crate::{
+    route::{config::OutRuleConfig, rule::Label},
+    tunnel::TunnelId,
+};
 
 use super::{
     match_server::{InMatchServer, MatchIn, MatchOut, OutMatchServerTrait},
@@ -227,7 +230,7 @@ impl InMatchServer for RedisInMatchServer {
 }
 
 pub struct RedisOutMatchServer {
-    labels: Vec<String>,
+    labels: Vec<Label>,
     cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
     redis: redis::Client,
 }
@@ -236,7 +239,7 @@ impl RedisOutMatchServer {
     pub async fn new(
         redis: redis::Client,
         key: Option<String>,
-        labels: Vec<String>,
+        labels: Vec<Label>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             labels,

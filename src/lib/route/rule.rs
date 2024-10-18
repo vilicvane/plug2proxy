@@ -1,5 +1,45 @@
 use std::net::SocketAddr;
 
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::From,
+    derive_more::Display,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(untagged)]
+pub enum Label {
+    #[display("{_0}")]
+    BuiltIn(BuiltInLabel),
+    #[display("{_0}")]
+    Custom(String),
+}
+
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    derive_more::From,
+    derive_more::Display,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum BuiltInLabel {
+    #[display("DIRECT")]
+    Direct,
+    #[display("PROXY")]
+    Proxy,
+    #[display("ANY")]
+    Any,
+}
+
 pub trait Rule: Send + Sync {
     fn priority(&self) -> i64;
 
@@ -11,7 +51,7 @@ pub trait Rule: Send + Sync {
         domain: &Option<String>,
         region_codes: &Option<Vec<String>>,
         any_matched: bool,
-    ) -> Option<&[String]>;
+    ) -> Option<&[Label]>;
 }
 
 pub type DynRuleBox = Box<dyn Rule>;
@@ -19,7 +59,7 @@ pub type DynRuleBox = Box<dyn Rule>;
 #[derive(Clone)]
 pub struct GeoIpRule {
     pub matches: Vec<String>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub priority: i64,
     pub negate: bool,
     pub tag: Option<String>,
@@ -40,7 +80,7 @@ impl Rule for GeoIpRule {
         _domain: &Option<String>,
         region_codes: &Option<Vec<String>>,
         _any_matched: bool,
-    ) -> Option<&[String]> {
+    ) -> Option<&[Label]> {
         region_codes.as_ref().and_then(|region_codes| {
             let mut condition = self
                 .matches
@@ -64,7 +104,7 @@ impl Rule for GeoIpRule {
 pub struct AddressRule {
     pub match_ips: Option<Vec<ipnet::IpNet>>,
     pub match_ports: Option<Vec<u16>>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub priority: i64,
     pub negate: bool,
     pub tag: Option<String>,
@@ -85,7 +125,7 @@ impl Rule for AddressRule {
         _domain: &Option<String>,
         _region_codes: &Option<Vec<String>>,
         _any_matched: bool,
-    ) -> Option<&[String]> {
+    ) -> Option<&[Label]> {
         let port_matched = if let Some(match_ports) = &self.match_ports {
             match_ports.iter().any(|port| *port == address.port())
         } else {
@@ -115,7 +155,7 @@ impl Rule for AddressRule {
 #[derive(Clone)]
 pub struct DomainRule {
     pub matches: Vec<String>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub priority: i64,
     pub negate: bool,
     pub tag: Option<String>,
@@ -136,7 +176,7 @@ impl Rule for DomainRule {
         domain: &Option<String>,
         _region_codes: &Option<Vec<String>>,
         _any_matched: bool,
-    ) -> Option<&[String]> {
+    ) -> Option<&[Label]> {
         if let Some(domain) = domain {
             let mut condition = self.matches.iter().any(|match_domain| {
                 domain == match_domain
@@ -162,7 +202,7 @@ impl Rule for DomainRule {
 #[derive(Clone)]
 pub struct DomainPatternRule {
     pub matches: Vec<regex::Regex>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub priority: i64,
     pub negate: bool,
     pub tag: Option<String>,
@@ -183,7 +223,7 @@ impl Rule for DomainPatternRule {
         domain: &Option<String>,
         _region_codes: &Option<Vec<String>>,
         _any_matched: bool,
-    ) -> Option<&[String]> {
+    ) -> Option<&[Label]> {
         if let Some(domain) = domain {
             let mut condition = self.matches.iter().any(|pattern| pattern.is_match(domain));
 
@@ -204,7 +244,7 @@ impl Rule for DomainPatternRule {
 
 #[derive(Clone)]
 pub struct FallbackRule {
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub tag: Option<String>,
 }
 
@@ -223,7 +263,7 @@ impl Rule for FallbackRule {
         _domain: &Option<String>,
         _region_codes: &Option<Vec<String>>,
         any_matched: bool,
-    ) -> Option<&[String]> {
+    ) -> Option<&[Label]> {
         if any_matched {
             None
         } else {

@@ -5,7 +5,7 @@ use std::{
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use crate::{match_server::MatchOutId, tunnel::common::get_tunnel_string};
+use crate::{match_server::MatchOutId, route::rule::Label, tunnel::common::get_tunnel_string};
 
 use super::{InTunnel, InTunnelLike, OutTunnel, TunnelId};
 
@@ -27,7 +27,7 @@ pub struct ByteStreamInTunnel<TConnection> {
     r#type: &'static str,
     id: TunnelId,
     out_id: MatchOutId,
-    labels: Vec<String>,
+    labels: Vec<Label>,
     priority: i64,
     connection: TConnection,
 }
@@ -40,7 +40,7 @@ where
         r#type: &'static str,
         id: TunnelId,
         out_id: MatchOutId,
-        labels: Vec<String>,
+        labels: Vec<Label>,
         priority: i64,
         connection: TConnection,
     ) -> Self {
@@ -135,7 +135,7 @@ where
         self.out_id
     }
 
-    fn labels(&self) -> &[String] {
+    fn labels(&self) -> &[Label] {
         &self.labels
     }
 

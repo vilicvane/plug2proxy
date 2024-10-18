@@ -1,6 +1,9 @@
-use crate::match_server::{
-    redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
-    AnyInMatchServer, OutMatchServer,
+use crate::{
+    match_server::{
+        redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
+        AnyInMatchServer, OutMatchServer,
+    },
+    route::rule::Label,
 };
 
 #[derive(Clone, serde::Deserialize)]
@@ -19,10 +22,7 @@ impl MatchServerConfig {
         })
     }
 
-    pub async fn new_out_match_server(
-        &self,
-        labels: Vec<String>,
-    ) -> anyhow::Result<OutMatchServer> {
+    pub async fn new_out_match_server(&self, labels: Vec<Label>) -> anyhow::Result<OutMatchServer> {
         Ok(match self {
             Self::Redis(config) => {
                 RedisOutMatchServer::new(new_redis_client(&config.url)?, config.key.clone(), labels)

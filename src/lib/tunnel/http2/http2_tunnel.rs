@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     match_server::MatchOutId,
+    route::rule::Label,
     tunnel::{
         common::get_tunnel_string,
         http2::compat::{H2RecvStreamAsyncRead, H2SendStreamAsyncWrite},
@@ -33,7 +34,7 @@ type Http2ClientConnection =
 pub struct Http2InTunnel {
     id: TunnelId,
     out_id: MatchOutId,
-    labels: Vec<String>,
+    labels: Vec<Label>,
     priority: i64,
     request_sender: Arc<Mutex<h2::client::SendRequest<bytes::Bytes>>>,
     closed_notify: Arc<tokio::sync::Notify>,
@@ -44,7 +45,7 @@ impl Http2InTunnel {
     pub fn new(
         id: TunnelId,
         out_id: MatchOutId,
-        labels: Vec<String>,
+        labels: Vec<Label>,
         priority: i64,
         request_sender: h2::client::SendRequest<bytes::Bytes>,
         mut connection: Http2ClientConnection,
@@ -159,7 +160,7 @@ impl InTunnel for Http2InTunnel {
         self.out_id
     }
 
-    fn labels(&self) -> &[String] {
+    fn labels(&self) -> &[Label] {
         &self.labels
     }
 
