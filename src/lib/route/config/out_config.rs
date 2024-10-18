@@ -1,8 +1,9 @@
-use std::str::FromStr as _;
+use std::{net::SocketAddr, str::FromStr as _};
 
 use itertools::Itertools;
 
 use crate::{
+    out::{output::AnyOutput, socks5_output::Socks5Output},
     route::rule::{
         AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule,
     },
@@ -33,6 +34,7 @@ impl OutRuleConfig {
                 labels: vec![tunnel_id.to_string()],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
+                tag: config.tag,
             }),
             OutRuleConfig::Address(config) => Box::new(AddressRule {
                 match_ips: config.match_ip.map(|match_ip| {
@@ -50,12 +52,14 @@ impl OutRuleConfig {
                 labels: vec![tunnel_id.to_string()],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
+                tag: config.tag,
             }),
             OutRuleConfig::Domain(config) => Box::new(DomainRule {
                 matches: config.r#match.into_vec(),
                 labels: vec![tunnel_id.to_string()],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
+                tag: config.tag,
             }),
             OutRuleConfig::DomainPattern(config) => Box::new(DomainPatternRule {
                 matches: config
@@ -76,9 +80,11 @@ impl OutRuleConfig {
                 labels: vec![tunnel_id.to_string()],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
+                tag: config.tag,
             }),
-            OutRuleConfig::Fallback(_) => Box::new(FallbackRule {
+            OutRuleConfig::Fallback(config) => Box::new(FallbackRule {
                 labels: vec![tunnel_id.to_string()],
+                tag: config.tag,
             }),
         }
     }
@@ -90,6 +96,7 @@ pub struct OutGeoIpRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub priority: Option<i64>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -99,6 +106,7 @@ pub struct OutAddressRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub priority: Option<i64>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -107,6 +115,7 @@ pub struct OutDomainRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub priority: Option<i64>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -115,7 +124,42 @@ pub struct OutDomainPatternRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub priority: Option<i64>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct OutFallbackRuleConfig {}
+pub struct OutFallbackRuleConfig {
+    pub tag: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum OutOutputConfig {
+    #[serde(rename = "socks5")]
+    Socks5(OutSocks5OutputConfig),
+}
+
+impl OutOutputConfig {
+    pub fn tag(&self) -> &str {
+        match self {
+            OutOutputConfig::Socks5(config) => &config.tag,
+        }
+    }
+
+    pub fn into_output(self) -> AnyOutput {
+        match self {
+            OutOutputConfig::Socks5(config) => Socks5Output::new(config.address).into(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct OutSocks5OutputConfig {
+    pub tag: String,
+    #[serde(default = "out_socks5_output_address_default")]
+    pub address: SocketAddr,
+}
+
+fn out_socks5_output_address_default() -> SocketAddr {
+    "127.0.0.1:1080".parse().unwrap()
+}

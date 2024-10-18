@@ -262,7 +262,11 @@ fn resolve_destination(
     fake_ip_resolver: &FakeIpResolver,
     geolite2: &GeoLite2,
     router: &Router,
-) -> (SocketAddr, Option<String>, Vec<Vec<String>>) {
+) -> (
+    SocketAddr,
+    Option<String>,
+    Vec<Vec<(String, Option<String>)>>,
+) {
     if let Some((real_ip, name)) = fake_ip_resolver.resolve(&destination.ip()) {
         let real_destination = SocketAddr::new(real_ip, destination.port());
 
@@ -281,7 +285,7 @@ async fn handle_in_tcp_stream(
     source: SocketAddr,
     destination: SocketAddr,
     name: Option<String>,
-    labels_groups: Vec<Vec<String>>,
+    labels_groups: Vec<Vec<(String, Option<String>)>>,
     tunnel_manager: &TunnelManager,
 ) -> anyhow::Result<()> {
     let destination_string = get_destination_string(destination, &name);
@@ -291,7 +295,7 @@ async fn handle_in_tcp_stream(
         stringify_labels_groups(&labels_groups)
     );
 
-    let Some(tunnel) = tunnel_manager.select_tunnel(&labels_groups).await else {
+    let Some((tunnel, tag)) = tunnel_manager.select_tunnel(&labels_groups).await else {
         log::warn!(
             "connection from {source} to {destination_string} via {} rejected cause no matching tunnel.",
             stringify_labels_groups(&labels_groups)
@@ -309,7 +313,7 @@ async fn handle_in_tcp_stream(
     tokio::spawn({
         async move {
             let (mut tunnel_recv_stream, mut tunnel_send_stream) =
-                tunnel.connect(destination, name).await?;
+                tunnel.connect(destination, name, tag).await?;
 
             copy_bidirectional(
                 (&mut in_recv_stream, &mut tunnel_send_stream),
@@ -327,9 +331,9 @@ async fn handle_in_tcp_stream(
     Ok(())
 }
 
-fn stringify_labels_groups(labels_groups: &[Vec<String>]) -> String {
+fn stringify_labels_groups(labels_groups: &[Vec<(String, Option<String>)>]) -> String {
     labels_groups
         .iter()
-        .map(|labels| labels.join(","))
+        .map(|labels| labels.iter().map(|(label, _)| label).join(","))
         .join(";")
 }

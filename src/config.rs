@@ -2,14 +2,13 @@ use std::net::SocketAddr;
 
 use plug2proxy::{
     config::MatchServerUrlOrConfig,
-    route::config::{InRuleConfig, OutRuleConfig},
+    route::config::{InFallbackRuleConfig, InRuleConfig, OutOutputConfig, OutRuleConfig},
     utils::OneOrMany,
 };
 
 use crate::constants::{
-    fake_ip_dns_address_default, geolite2_url_default, in_routing_rules_default,
-    transparent_proxy_address_default, transparent_proxy_traffic_mark_default,
-    tunneling_http2_connections_default,
+    fake_ip_dns_address_default, geolite2_url_default, transparent_proxy_address_default,
+    transparent_proxy_traffic_mark_default, tunneling_http2_connections_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -151,6 +150,8 @@ pub struct OutConfig {
     pub tunneling: OutTunnelingConfig,
     #[serde(default)]
     pub routing: OutRoutingConfig,
+    #[serde(default)]
+    pub outputs: Vec<OutOutputConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -180,6 +181,13 @@ pub struct OutRoutingConfig {
     pub priority: i64,
     #[serde(default)]
     pub rules: Vec<OutRuleConfig>,
+}
+
+fn in_routing_rules_default() -> Vec<InRuleConfig> {
+    vec![InRuleConfig::Fallback(InFallbackRuleConfig {
+        out: "ANY".to_owned().into(),
+        tag: None,
+    })]
 }
 
 fn true_default() -> bool {

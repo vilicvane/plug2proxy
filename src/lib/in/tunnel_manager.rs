@@ -74,32 +74,39 @@ impl TunnelManager {
         }
     }
 
-    pub async fn select_tunnel(&self, labels_groups: &[Vec<String>]) -> Option<AnyInTunnelLikeArc> {
+    pub async fn select_tunnel(
+        &self,
+        labels_groups: &[Vec<(String, Option<String>)>],
+    ) -> Option<(AnyInTunnelLikeArc, Option<String>)> {
         let index = self.select_index.fetch_add(1, atomic::Ordering::Relaxed);
 
         let label_to_tunnels_map = self.label_to_tunnels_map.lock().await;
 
-        let mut label_proxy_exists = false;
-        let mut label_any_exists = false;
-
         for labels in labels_groups {
-            for label in labels {
+            let mut label_proxy_presence = None;
+            let mut label_any_presence = None;
+
+            for (label, tag) in labels {
                 match label.as_str() {
                     "DIRECT" => {
-                        return Some(self.direct_tunnel.clone().into());
+                        return Some((self.direct_tunnel.clone().into(), tag.clone()));
                     }
                     "PROXY" => {
-                        label_proxy_exists = true;
+                        if label_proxy_presence.is_none() {
+                            label_proxy_presence = Some(tag.clone());
+                        }
                     }
                     "ANY" => {
-                        label_any_exists = true;
+                        if label_any_presence.is_none() {
+                            label_any_presence = Some(tag.clone());
+                        }
                     }
                     _ => {
                         if let Some(tunnels) = label_to_tunnels_map.get(label) {
                             let tunnel = select_from_tunnels(tunnels, index);
 
                             if tunnel.is_some() {
-                                return tunnel;
+                                return tunnel.map(|tunnel| (tunnel, tag.clone()));
                             }
                         }
                     }
@@ -110,12 +117,14 @@ impl TunnelManager {
                 .get("PROXY")
                 .and_then(|tunnels| select_from_tunnels(tunnels, index));
 
-            if label_proxy_exists {
-                return proxy_tunnel;
+            if let Some(tag) = label_proxy_presence {
+                return proxy_tunnel.map(|tunnel| (tunnel, tag));
             }
 
-            if label_any_exists {
-                return proxy_tunnel.or_else(|| Some(self.direct_tunnel.clone().into()));
+            if let Some(tag) = label_any_presence {
+                return proxy_tunnel
+                    .or_else(|| Some(self.direct_tunnel.clone().into()))
+                    .map(|tunnel| (tunnel, tag));
             }
         }
 

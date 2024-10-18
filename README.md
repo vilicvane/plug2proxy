@@ -50,6 +50,12 @@ Checkout [src/config.rs](src/config.rs) for the complete configuration options a
                 "out": "DIRECT"
             },
             {
+                "type": "domain",
+                "match": "chatgpt.com",
+                "out": "us",
+                "tag": "warp"
+            },
+            {
                 "type": "fallback",
                 "out": "ANY"
             }
@@ -65,7 +71,14 @@ Checkout [src/config.rs](src/config.rs) for the complete configuration options a
     "mode": "out",
     "tunneling": {
         "match_server": "redis://username:password@redis-server/"
-    }
+    },
+    "outputs": [
+        {
+            "tag": "warp",
+            "type": "socks5",
+            "address": "127.0.0.1:1080"
+        }
+    ]
 }
 ```
 

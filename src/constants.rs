@@ -4,8 +4,6 @@ use std::{
     time::Duration,
 };
 
-use plug2proxy::route::config::{InFallbackRuleConfig, InRuleConfig};
-
 pub const DATA_DIR_DEFAULT: &str = ".plug2proxy";
 
 pub fn dns_server_addresses_default() -> Vec<String> {
@@ -65,10 +63,4 @@ pub fn geolite2_url_default() -> String {
 
 pub fn geolite2_update_interval_default() -> Duration {
     Duration::from_secs(24 * 60 * 60)
-}
-
-pub fn in_routing_rules_default() -> Vec<InRuleConfig> {
-    vec![InRuleConfig::Fallback(InFallbackRuleConfig {
-        out: "ANY".to_owned().into(),
-    })]
 }

@@ -113,6 +113,7 @@ impl InTunnelLike for Http2InTunnel {
         &self,
         destination_address: SocketAddr,
         destination_name: Option<String>,
+        tag: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -126,6 +127,10 @@ impl InTunnelLike for Http2InTunnel {
 
             if let Some(destination_name) = destination_name {
                 http_request = http_request.header("X-Name", destination_name);
+            }
+
+            if let Some(tag) = tag {
+                http_request = http_request.header("X-Tag", tag);
             }
 
             http_request.body(()).unwrap()
@@ -204,7 +209,7 @@ impl OutTunnel for Http2OutTunnel {
     async fn accept(
         &self,
     ) -> anyhow::Result<(
-        (SocketAddr, Option<String>),
+        (SocketAddr, Option<String>, Option<String>),
         (
             Box<dyn AsyncRead + Send + Unpin>,
             Box<dyn AsyncWrite + Send + Unpin>,
@@ -218,7 +223,7 @@ impl OutTunnel for Http2OutTunnel {
         let result = futures::future::poll_fn(|context| {
             match connection.poll_accept(context) {
                 Poll::Ready(Some(Ok((request, mut response_sender)))) => {
-                    let (destination_address, destination_name) = {
+                    let destination_tuple = {
                         let headers = request.headers();
 
                         (
@@ -229,6 +234,10 @@ impl OutTunnel for Http2OutTunnel {
                                 .ok_or_else(|| anyhow::anyhow!("missing X-Address header."))?,
                             headers
                                 .get("X-Name")
+                                .and_then(|value| value.to_str().ok())
+                                .map(|value| value.to_string()),
+                            headers
+                                .get("X-Tag")
                                 .and_then(|value| value.to_str().ok())
                                 .map(|value| value.to_string()),
                         )
@@ -242,7 +251,7 @@ impl OutTunnel for Http2OutTunnel {
                     let write_stream = H2SendStreamAsyncWrite::new(send_stream);
 
                     return Poll::Ready(Ok((
-                        (destination_address, destination_name),
+                        destination_tuple,
                         (
                             Box::new(read_stream) as Box<dyn AsyncRead + Send + Unpin>,
                             Box::new(write_stream) as Box<dyn AsyncWrite + Send + Unpin>,

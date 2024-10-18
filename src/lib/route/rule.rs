@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 pub trait Rule: Send + Sync {
     fn priority(&self) -> i64;
 
+    fn tag(&self) -> Option<&str>;
+
     fn r#match(
         &self,
         address: SocketAddr,
@@ -20,11 +22,16 @@ pub struct GeoIpRule {
     pub labels: Vec<String>,
     pub priority: i64,
     pub negate: bool,
+    pub tag: Option<String>,
 }
 
 impl Rule for GeoIpRule {
     fn priority(&self) -> i64 {
         self.priority
+    }
+
+    fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     fn r#match(
@@ -60,11 +67,16 @@ pub struct AddressRule {
     pub labels: Vec<String>,
     pub priority: i64,
     pub negate: bool,
+    pub tag: Option<String>,
 }
 
 impl Rule for AddressRule {
     fn priority(&self) -> i64 {
         self.priority
+    }
+
+    fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     fn r#match(
@@ -106,11 +118,16 @@ pub struct DomainRule {
     pub labels: Vec<String>,
     pub priority: i64,
     pub negate: bool,
+    pub tag: Option<String>,
 }
 
 impl Rule for DomainRule {
     fn priority(&self) -> i64 {
         self.priority
+    }
+
+    fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     fn r#match(
@@ -148,11 +165,16 @@ pub struct DomainPatternRule {
     pub labels: Vec<String>,
     pub priority: i64,
     pub negate: bool,
+    pub tag: Option<String>,
 }
 
 impl Rule for DomainPatternRule {
     fn priority(&self) -> i64 {
         self.priority
+    }
+
+    fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     fn r#match(
@@ -183,11 +205,16 @@ impl Rule for DomainPatternRule {
 #[derive(Clone)]
 pub struct FallbackRule {
     pub labels: Vec<String>,
+    pub tag: Option<String>,
 }
 
 impl Rule for FallbackRule {
     fn priority(&self) -> i64 {
         i64::MIN
+    }
+
+    fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
     }
 
     fn r#match(

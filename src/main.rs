@@ -116,7 +116,11 @@ async fn main() -> anyhow::Result<()> {
                 ),
             )?;
         }
-        Config::Out(OutConfig { tunneling, routing }) => {
+        Config::Out(OutConfig {
+            tunneling,
+            routing,
+            outputs,
+        }) => {
             out::up(out::Options {
                 labels: tunneling.label.map_or_else(Vec::new, OneOrMany::into_vec),
                 tcp_priority: tunneling.http2.priority,
@@ -127,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
                 match_server_config: tunneling.match_server.into_config(),
                 routing_rules: routing.rules,
                 routing_priority: routing.priority,
+                output_configs: outputs,
             })
             .await?
         }

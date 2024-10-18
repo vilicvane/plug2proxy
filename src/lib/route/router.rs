@@ -38,7 +38,7 @@ impl Router {
         address: SocketAddr,
         domain: &Option<String>,
         region_codes: &Option<Vec<String>>,
-    ) -> Vec<Vec<String>> {
+    ) -> Vec<Vec<(String, Option<String>)>> {
         let rules_groups = self.rules_groups_cache.lock().unwrap();
 
         rules_groups
@@ -53,7 +53,12 @@ impl Router {
                         region_codes,
                         already_matched || !labels.is_empty(),
                     ) {
-                        labels.extend_from_slice(matching_labels);
+                        labels.extend_from_slice(
+                            &matching_labels
+                                .iter()
+                                .map(|label| (label.clone(), rule.tag().map(|tag| tag.to_owned())))
+                                .collect_vec(),
+                        );
                     }
 
                     labels

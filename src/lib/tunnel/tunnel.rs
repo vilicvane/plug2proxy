@@ -8,6 +8,7 @@ pub trait InTunnelLike: fmt::Display + Send + Sync {
         &self,
         destination_address: SocketAddr,
         destination_name: Option<String>,
+        tag: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -36,7 +37,7 @@ pub trait OutTunnel: fmt::Display + Send {
     async fn accept(
         &self,
     ) -> anyhow::Result<(
-        (SocketAddr, Option<String>),
+        (SocketAddr, Option<String>, Option<String>),
         (
             Box<dyn tokio::io::AsyncRead + Send + Unpin>,
             Box<dyn tokio::io::AsyncWrite + Send + Unpin>,

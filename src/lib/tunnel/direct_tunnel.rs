@@ -18,6 +18,7 @@ impl InTunnelLike for DirectInTunnel {
         &self,
         destination_address: SocketAddr,
         _destination_name: Option<String>,
+        _tag: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,

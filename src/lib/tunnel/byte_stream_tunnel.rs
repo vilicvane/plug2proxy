@@ -74,6 +74,7 @@ where
         &self,
         destination_address: SocketAddr,
         destination_name: Option<String>,
+        tag: Option<String>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -96,12 +97,21 @@ where
 
             head.extend_from_slice(&destination_address.port().to_be_bytes());
 
-            let destination_name = destination_name.unwrap_or_else(|| "".to_owned());
+            {
+                let destination_name = destination_name.unwrap_or_else(|| "".to_owned());
+                let destination_name_length: u8 = destination_name.len().try_into()?;
 
-            let destination_name_length: u8 = destination_name.len().try_into()?;
+                head.push(destination_name_length);
+                head.extend_from_slice(destination_name.as_bytes());
+            }
 
-            head.push(destination_name_length);
-            head.extend_from_slice(destination_name.as_bytes());
+            {
+                let tag = tag.unwrap_or_else(|| "".to_owned());
+                let tag_length: u8 = tag.len().try_into()?;
+
+                head.push(tag_length);
+                head.extend_from_slice(tag.as_bytes());
+            }
 
             head
         };
@@ -192,7 +202,7 @@ where
     async fn accept(
         &self,
     ) -> anyhow::Result<(
-        (SocketAddr, Option<String>),
+        (SocketAddr, Option<String>, Option<String>),
         (
             Box<dyn tokio::io::AsyncRead + Send + Unpin>,
             Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -227,7 +237,18 @@ where
                 Some(String::from_utf8(buffer)?)
             };
 
-            (destination_address, destination_name)
+            let tag_length = read_stream.read_u8().await? as usize;
+            let tag = if tag_length == 0 {
+                None
+            } else {
+                let mut buffer = vec![0; tag_length];
+
+                read_stream.read_exact(&mut buffer).await?;
+
+                Some(String::from_utf8(buffer)?)
+            };
+
+            (destination_address, destination_name, tag)
         };
 
         Ok((destination_tuple, (read_stream, write_stream)))

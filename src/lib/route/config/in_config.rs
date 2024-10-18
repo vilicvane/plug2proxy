@@ -32,6 +32,7 @@ impl InRuleConfig {
                 labels: config.out.into_vec(),
                 priority: i64::MIN,
                 negate: config.negate,
+                tag: config.tag,
             }),
             InRuleConfig::Address(config) => Box::new(AddressRule {
                 match_ips: config.match_ip.map(|match_ip| {
@@ -47,12 +48,14 @@ impl InRuleConfig {
                 labels: config.out.into_vec(),
                 priority: i64::MIN,
                 negate: config.negate,
+                tag: config.tag,
             }),
             InRuleConfig::Domain(config) => Box::new(DomainRule {
                 matches: config.r#match.into_vec(),
                 labels: config.out.into_vec(),
                 priority: i64::MIN,
                 negate: config.negate,
+                tag: config.tag,
             }),
             InRuleConfig::DomainPattern(config) => Box::new(DomainPatternRule {
                 matches: config
@@ -68,9 +71,11 @@ impl InRuleConfig {
                 labels: config.out.into_vec(),
                 priority: i64::MIN,
                 negate: config.negate,
+                tag: config.tag,
             }),
             InRuleConfig::Fallback(config) => Box::new(FallbackRule {
                 labels: config.out.into_vec(),
+                tag: config.tag,
             }),
         }
     }
@@ -82,6 +87,7 @@ pub struct InGeoIpRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -91,6 +97,7 @@ pub struct InAddressRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -99,6 +106,7 @@ pub struct InDomainRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -107,9 +115,11 @@ pub struct InDomainPatternRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
 pub struct InFallbackRuleConfig {
     pub out: OneOrMany<String>,
+    pub tag: Option<String>,
 }

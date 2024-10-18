@@ -16,6 +16,7 @@ panic = "abort"
 collapsible_else_if = "allow"
 disallowed_macros = "warn"
 too_many_arguments = "allow"
+type_complexity = "allow"
 
 [dependencies]
 aes-gcm = "0.10.3"
@@ -61,6 +62,7 @@ socket2 = "0.5.7"
 stun = "0.6.0"
 tokio = { version = "1.40.0", features = ["full"] }
 tokio-rustls = "0.26.0"
+tokio-socks = "0.5.2"
 tokio-util = { version = "0.7.12", features = ["compat"] }
 url = "2.5.2"
 uuid = { version = "1.10.0", features = ["serde", "v4"] }
