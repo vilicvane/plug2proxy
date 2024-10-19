@@ -3,11 +3,11 @@ use std::{net::SocketAddr, str::FromStr as _};
 use itertools::Itertools;
 
 use crate::{
+    match_server::MatchOutId,
     out::{output::AnyOutput, socks5_output::Socks5Output},
     route::rule::{
         AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule, Label,
     },
-    tunnel::TunnelId,
     utils::{net::parse_ip_net, OneOrMany},
 };
 
@@ -27,11 +27,11 @@ pub enum OutRuleConfig {
 }
 
 impl OutRuleConfig {
-    pub fn into_rule(self, tunnel_id: TunnelId, priority_default: i64) -> DynRuleBox {
+    pub fn into_rule(self, out_id: MatchOutId, priority_default: i64) -> DynRuleBox {
         match self {
             OutRuleConfig::GeoIp(config) => Box::new(GeoIpRule {
                 matches: config.r#match.into_vec(),
-                labels: vec![Label::Custom(tunnel_id.to_string())],
+                labels: vec![Label::Custom(out_id.to_string())],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
                 tag: config.tag,
@@ -49,14 +49,14 @@ impl OutRuleConfig {
                         .collect_vec()
                 }),
                 match_ports: config.match_port.map(|match_port| match_port.into_vec()),
-                labels: vec![Label::Custom(tunnel_id.to_string())],
+                labels: vec![Label::Custom(out_id.to_string())],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
                 tag: config.tag,
             }),
             OutRuleConfig::Domain(config) => Box::new(DomainRule {
                 matches: config.r#match.into_vec(),
-                labels: vec![Label::Custom(tunnel_id.to_string())],
+                labels: vec![Label::Custom(out_id.to_string())],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
                 tag: config.tag,
@@ -77,13 +77,13 @@ impl OutRuleConfig {
                             .ok()
                     })
                     .collect_vec(),
-                labels: vec![Label::Custom(tunnel_id.to_string())],
+                labels: vec![Label::Custom(out_id.to_string())],
                 priority: config.priority.unwrap_or(priority_default),
                 negate: config.negate,
                 tag: config.tag,
             }),
             OutRuleConfig::Fallback(config) => Box::new(FallbackRule {
-                labels: vec![Label::Custom(tunnel_id.to_string())],
+                labels: vec![Label::Custom(out_id.to_string())],
                 tag: config.tag,
             }),
         }

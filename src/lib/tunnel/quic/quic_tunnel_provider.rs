@@ -4,8 +4,8 @@ use quinn::crypto::rustls::QuicServerConfig;
 
 use crate::{
     match_server::{
-        AnyInMatchServer, InMatchServer as _, MatchIn, MatchInId, MatchOut, MatchOutId,
-        OutMatchServer, OutMatchServerTrait as _,
+        AnyInMatchServer, InMatchServer as _, MatchIn, MatchOut, MatchOutId, OutMatchServer,
+        OutMatchServerTrait as _,
     },
     route::config::OutRuleConfig,
     tunnel::{
@@ -35,7 +35,6 @@ pub struct QuicInTunnelConfig {
 }
 
 pub struct QuicInTunnelProvider {
-    id: MatchInId,
     match_server: Arc<AnyInMatchServer>,
     config: QuicInTunnelConfig,
 }
@@ -43,7 +42,6 @@ pub struct QuicInTunnelProvider {
 impl QuicInTunnelProvider {
     pub fn new(match_server: Arc<AnyInMatchServer>, config: QuicInTunnelConfig) -> Self {
         Self {
-            id: MatchInId::new(),
             match_server,
             config,
         }
@@ -75,10 +73,7 @@ impl InTunnelProvider for QuicInTunnelProvider {
             routing_priority,
             routing_rules,
             data: QuicOutData { address, cert, key },
-        }) = self
-            .match_server
-            .match_out(out_id, self.id, QuicInData {})
-            .await?
+        }) = self.match_server.match_out(out_id, QuicInData {}).await?
         else {
             return Ok(None);
         };
@@ -116,7 +111,6 @@ pub struct QuicOutTunnelConfig {
 }
 
 pub struct QuicOutTunnelProvider {
-    id: MatchOutId,
     match_server: Arc<OutMatchServer>,
     server_config: Arc<QuicServerConfig>,
     cert: String,
@@ -130,7 +124,6 @@ impl QuicOutTunnelProvider {
             create_rustls_server_config_and_cert([TLS_NAME.to_owned()]);
 
         Self {
-            id: MatchOutId::new(),
             match_server,
             server_config: Arc::new(QuicServerConfig::try_from(server_config).unwrap()),
             cert,
@@ -156,7 +149,6 @@ impl OutTunnelProvider for QuicOutTunnelProvider {
         } = self
             .match_server
             .match_in(
-                self.id,
                 QuicOutData {
                     address: external_address,
                     cert: self.cert.clone(),

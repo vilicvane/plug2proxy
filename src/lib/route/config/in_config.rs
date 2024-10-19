@@ -30,7 +30,7 @@ impl InRuleConfig {
             InRuleConfig::GeoIp(config) => Box::new(GeoIpRule {
                 matches: config.r#match.into_vec(),
                 labels: config.out.into_vec(),
-                priority: i64::MIN,
+                priority: config.priority.unwrap_or(0),
                 negate: config.negate,
                 tag: config.tag,
             }),
@@ -46,14 +46,14 @@ impl InRuleConfig {
                 }),
                 match_ports: config.match_port.map(|match_port| match_port.into_vec()),
                 labels: config.out.into_vec(),
-                priority: i64::MIN,
+                priority: config.priority.unwrap_or(0),
                 negate: config.negate,
                 tag: config.tag,
             }),
             InRuleConfig::Domain(config) => Box::new(DomainRule {
                 matches: config.r#match.into_vec(),
                 labels: config.out.into_vec(),
-                priority: i64::MIN,
+                priority: config.priority.unwrap_or(0),
                 negate: config.negate,
                 tag: config.tag,
             }),
@@ -69,7 +69,7 @@ impl InRuleConfig {
                     })
                     .collect::<Vec<_>>(),
                 labels: config.out.into_vec(),
-                priority: i64::MIN,
+                priority: config.priority.unwrap_or(0),
                 negate: config.negate,
                 tag: config.tag,
             }),
@@ -87,6 +87,7 @@ pub struct InGeoIpRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<Label>,
+    pub priority: Option<i64>,
     pub tag: Option<String>,
 }
 
@@ -97,6 +98,7 @@ pub struct InAddressRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<Label>,
+    pub priority: Option<i64>,
     pub tag: Option<String>,
 }
 
@@ -106,6 +108,7 @@ pub struct InDomainRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<Label>,
+    pub priority: Option<i64>,
     pub tag: Option<String>,
 }
 
@@ -115,6 +118,7 @@ pub struct InDomainPatternRuleConfig {
     #[serde(default)]
     pub negate: bool,
     pub out: OneOrMany<Label>,
+    pub priority: Option<i64>,
     pub tag: Option<String>,
 }
 

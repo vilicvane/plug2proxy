@@ -2,7 +2,7 @@ use crate::route::config::OutRuleConfig;
 
 use super::{
     redis_match_server::{RedisInMatchServer, RedisOutMatchServer},
-    InMatchServer, MatchIn, MatchInId, MatchOut, MatchOutId, MatchPair, OutMatchServerTrait,
+    InMatchServer, MatchIn, MatchOut, MatchOutId, MatchPair, OutMatchServerTrait,
 };
 
 #[derive(derive_more::From)]
@@ -26,7 +26,6 @@ impl InMatchServer for AnyInMatchServer {
     async fn match_out<TInData, TOutData>(
         &self,
         out_id: MatchOutId,
-        in_id: MatchInId,
         in_data: TInData,
     ) -> anyhow::Result<Option<MatchOut<TOutData>>>
     where
@@ -35,7 +34,7 @@ impl InMatchServer for AnyInMatchServer {
         (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         match self {
-            Self::Redis(redis) => redis.match_out(out_id, in_id, in_data).await,
+            Self::Redis(redis) => redis.match_out(out_id, in_data).await,
         }
     }
 }
@@ -49,7 +48,6 @@ pub enum OutMatchServer {
 impl OutMatchServerTrait for OutMatchServer {
     async fn match_in<TInData, TOutData>(
         &self,
-        out_id: MatchOutId,
         out_data: TOutData,
         out_priority: Option<i64>,
         out_routing_rules: &[OutRuleConfig],
@@ -64,7 +62,6 @@ impl OutMatchServerTrait for OutMatchServer {
             Self::Redis(redis) => {
                 redis
                     .match_in(
-                        out_id,
                         out_data,
                         out_priority,
                         out_routing_rules,

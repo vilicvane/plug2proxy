@@ -199,7 +199,12 @@ impl TunnelManager {
 
                         Self::update_label_to_tunnels_map(&tunnel_map, &mut label_to_tunnels_map);
 
-                        router.register_tunnel(tunnel_id, out_routing_rules, out_routing_priority);
+                        router.register_tunnel(
+                            out_id,
+                            tunnel_id,
+                            out_routing_rules,
+                            out_routing_priority,
+                        );
                     }
 
                     let handle = tokio::spawn({
@@ -224,7 +229,7 @@ impl TunnelManager {
                                 &mut label_to_tunnels_map,
                             );
 
-                            router.unregister_tunnel(tunnel_id);
+                            router.unregister_tunnel(out_id, tunnel_id);
 
                             drop(permit);
                         }
@@ -233,14 +238,7 @@ impl TunnelManager {
                     handles.push(handle);
                 }
                 Ok(None) => {
-                    // OUT no longer active, abort all unfinished handles to avoid active tunnel to
-                    // this OUT lives (which could potentially result in connections exceeding the
-                    // desired number).
-
-                    for handle in handles {
-                        handle.abort();
-                    }
-
+                    // OUT no longer active.
                     break;
                 }
                 Err(error) => {
@@ -248,6 +246,13 @@ impl TunnelManager {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
+        }
+
+        // Abort all unfinished handles to avoid active tunnel to this OUT lives (which could
+        // potentially result in connections exceeding the desired number).
+
+        for handle in handles {
+            handle.abort();
         }
     }
 

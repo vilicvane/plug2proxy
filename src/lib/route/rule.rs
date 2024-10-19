@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 #[derive(
     Clone,
@@ -40,7 +40,7 @@ pub enum BuiltInLabel {
     Any,
 }
 
-pub trait Rule: Send + Sync {
+pub trait Rule: Send + Sync + fmt::Debug {
     fn priority(&self) -> i64;
 
     fn tag(&self) -> Option<&str>;
@@ -56,7 +56,7 @@ pub trait Rule: Send + Sync {
 
 pub type DynRuleBox = Box<dyn Rule>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GeoIpRule {
     pub matches: Vec<String>,
     pub labels: Vec<Label>,
@@ -100,7 +100,7 @@ impl Rule for GeoIpRule {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddressRule {
     pub match_ips: Option<Vec<ipnet::IpNet>>,
     pub match_ports: Option<Vec<u16>>,
@@ -152,7 +152,7 @@ impl Rule for AddressRule {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DomainRule {
     pub matches: Vec<String>,
     pub labels: Vec<Label>,
@@ -199,7 +199,7 @@ impl Rule for DomainRule {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DomainPatternRule {
     pub matches: Vec<regex::Regex>,
     pub labels: Vec<Label>,
@@ -242,7 +242,7 @@ impl Rule for DomainPatternRule {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FallbackRule {
     pub labels: Vec<Label>,
     pub tag: Option<String>,
@@ -250,7 +250,7 @@ pub struct FallbackRule {
 
 impl Rule for FallbackRule {
     fn priority(&self) -> i64 {
-        i64::MIN
+        i64::MAX
     }
 
     fn tag(&self) -> Option<&str> {

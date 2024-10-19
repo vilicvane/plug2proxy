@@ -16,7 +16,6 @@ pub trait InMatchServer {
     async fn match_out<TInData, TOutData>(
         &self,
         out_id: MatchOutId,
-        in_id: MatchInId,
         in_data: TInData,
     ) -> anyhow::Result<Option<MatchOut<TOutData>>>
     where
@@ -40,7 +39,6 @@ pub struct MatchOut<TData> {
 pub trait OutMatchServerTrait: Send {
     async fn match_in<TInData, TOutData>(
         &self,
-        out_id: MatchOutId,
         out_data: TOutData,
         out_priority: Option<i64>,
         out_routing_rules: &[OutRuleConfig],

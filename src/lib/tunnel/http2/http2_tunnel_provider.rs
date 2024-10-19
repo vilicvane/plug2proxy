@@ -7,8 +7,8 @@ use std::{
 
 use crate::{
     match_server::{
-        AnyInMatchServer, InMatchServer as _, MatchIn, MatchInId, MatchOut, MatchOutId,
-        OutMatchServer, OutMatchServerTrait as _,
+        AnyInMatchServer, InMatchServer as _, MatchIn, MatchOut, MatchOutId, OutMatchServer,
+        OutMatchServerTrait as _,
     },
     route::config::OutRuleConfig,
     tunnel::{
@@ -34,7 +34,6 @@ pub struct Http2InTunnelConfig {
 }
 
 pub struct Http2InTunnelProvider {
-    id: MatchInId,
     match_server: Arc<AnyInMatchServer>,
     config: Http2InTunnelConfig,
 }
@@ -45,7 +44,6 @@ impl Http2InTunnelProvider {
         config: Http2InTunnelConfig,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            id: MatchInId::new(),
             match_server,
             config,
         })
@@ -77,10 +75,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
             routing_priority,
             routing_rules,
             data: Http2OutData { address, cert, key },
-        }) = self
-            .match_server
-            .match_out(out_id, self.id, Http2InData {})
-            .await?
+        }) = self.match_server.match_out(out_id, Http2InData {}).await?
         else {
             return Ok(None);
         };
@@ -153,7 +148,6 @@ pub struct Http2OutTunnelConfig {
 }
 
 pub struct Http2OutTunnelProvider {
-    id: MatchOutId,
     match_server: Arc<OutMatchServer>,
     server_config: Arc<tokio_rustls::rustls::ServerConfig>,
     cert: String,
@@ -167,7 +161,6 @@ impl Http2OutTunnelProvider {
             create_rustls_server_config_and_cert([TLS_NAME.to_owned()]);
 
         Self {
-            id: MatchOutId::new(),
             match_server,
             server_config: Arc::new(server_config),
             cert,
@@ -193,7 +186,6 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
         } = self
             .match_server
             .match_in(
-                self.id,
                 Http2OutData {
                     address: external_address,
                     cert: self.cert.clone(),

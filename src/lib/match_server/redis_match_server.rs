@@ -24,6 +24,7 @@ const MATCH_TIMEOUT_SECONDS: i64 = 5;
 const MATCH_IN_DATA_EXPIRATION_IN_SECONDS: i64 = 30;
 
 pub struct RedisInMatchServer {
+    id: MatchInId,
     redis: redis::Client,
     cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
     match_name_to_active_out_id_set_map:
@@ -33,6 +34,7 @@ pub struct RedisInMatchServer {
 impl RedisInMatchServer {
     pub fn new(redis: redis::Client, key: Option<String>) -> Self {
         Self {
+            id: MatchInId::new(),
             redis,
             cipher: create_cipher(key),
             match_name_to_active_out_id_set_map: tokio::sync::Mutex::new(HashMap::new()),
@@ -121,7 +123,6 @@ impl InMatchServer for RedisInMatchServer {
     async fn match_out<TInData, TOutData>(
         &self,
         out_id: MatchOutId,
-        in_id: MatchInId,
         in_data: TInData,
     ) -> anyhow::Result<Option<MatchOut<TOutData>>>
     where
@@ -174,7 +175,7 @@ impl InMatchServer for RedisInMatchServer {
 
             async move {
                 let announcement = InAnnouncement {
-                    id: in_id,
+                    id: self.id,
                     match_key: match_key.clone(),
                 };
 
@@ -196,7 +197,10 @@ impl InMatchServer for RedisInMatchServer {
                     encrypt(&cipher, serde_json::to_string(&announcement)?.as_bytes());
 
                 loop {
-                    log::debug!("announcing {match_name} IN {in_id} with match key {match_key}...");
+                    log::debug!(
+                        "announcing {match_name} IN {} with match key {match_key}...",
+                        self.id
+                    );
 
                     connection
                         .publish(&in_announcement_channel_name, &encrypted_announcement)
@@ -230,6 +234,7 @@ impl InMatchServer for RedisInMatchServer {
 }
 
 pub struct RedisOutMatchServer {
+    id: MatchOutId,
     labels: Vec<Label>,
     cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
     redis: redis::Client,
@@ -242,6 +247,7 @@ impl RedisOutMatchServer {
         labels: Vec<Label>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
+            id: MatchOutId::new(),
             labels,
             cipher: create_cipher(key),
             redis,
@@ -254,7 +260,6 @@ impl RedisOutMatchServer {
 impl OutMatchServerTrait for RedisOutMatchServer {
     async fn match_in<TInData, TOutData>(
         &self,
-        out_id: MatchOutId,
         out_data: TOutData,
         out_priority: Option<i64>,
         out_routing_rules: &[OutRuleConfig],
@@ -265,8 +270,8 @@ impl OutMatchServerTrait for RedisOutMatchServer {
         TOutData: serde::Serialize + Send,
         (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
-        let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name(&out_id);
-        let out_key = <(TInData, TOutData)>::get_redis_out_key(&out_id);
+        let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name(&self.id);
+        let out_key = <(TInData, TOutData)>::get_redis_out_key(&self.id);
 
         let (connection, in_announcement_stream) = get_connection_and_subscribe::<InAnnouncement>(
             &self.redis,
@@ -289,7 +294,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                     // neither used), but we are using the same subscribe utility that does
                     // decryption anyway.
                     let encrypted_out_id =
-                        encrypt(&cipher, serde_json::to_string(&out_id)?.as_bytes());
+                        encrypt(&cipher, serde_json::to_string(&self.id)?.as_bytes());
 
                     connection
                         .send_packed_command(
@@ -314,7 +319,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                         .await?;
 
                     if ret == 0 {
-                        anyhow::bail!("OUT {out_id} expired.");
+                        anyhow::bail!("OUT {} expired.", self.id);
                     }
                 }
             }
@@ -365,7 +370,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                         encrypt(
                             &cipher,
                             serde_json::to_string(&MatchOut {
-                                id: out_id,
+                                id: self.id,
                                 tunnel_id,
                                 tunnel_labels: self.labels.clone(),
                                 tunnel_priority: out_priority,

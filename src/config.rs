@@ -152,9 +152,9 @@ impl Default for InRoutingGeoLite2Config {
 pub struct OutConfig {
     pub tunneling: OutTunnelingConfig,
     #[serde(default)]
-    pub routing: OutRoutingConfig,
-    #[serde(default)]
     pub outputs: Vec<OutOutputConfig>,
+    #[serde(default)]
+    pub routing: OutRoutingConfig,
 }
 
 #[derive(serde::Deserialize)]
