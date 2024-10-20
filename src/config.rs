@@ -188,7 +188,7 @@ pub struct OutRoutingConfig {
 
 fn in_routing_rules_default() -> Vec<InRuleConfig> {
     vec![InRuleConfig::Fallback(InFallbackRuleConfig {
-        out: OneOrMany::One(Label::BuiltIn(BuiltInLabel::Any)),
+        out: OneOrMany::One(Label::BuiltIn(BuiltInLabel::Direct)),
         tag: None,
     })]
 }
