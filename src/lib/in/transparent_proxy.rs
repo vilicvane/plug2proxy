@@ -220,7 +220,7 @@ pub async fn up(
             let real_destination = udp_forwarder
                 .get_associated_destination(&source, &original_destination)
                 .await
-                .unwrap_or_else(|| {
+                .or_else(|| {
                     let (real_destination, name, _) = resolve_destination(
                         original_destination,
                         &fake_ip_resolver,
@@ -228,21 +228,23 @@ pub async fn up(
                         &router,
                     );
 
-                    let destination_string = get_destination_string(real_destination, &name);
+                    real_destination.inspect(|&real_destination| {
+                        let destination_string = get_destination_string(real_destination, &name);
 
-                    log::info!("redirect datagrams from {source} to {destination_string}...");
-
-                    real_destination
+                        log::info!("redirect datagrams from {source} to {destination_string}...");
+                    })
                 });
 
-            udp_forwarder
-                .send(
-                    source,
-                    original_destination,
-                    real_destination,
-                    &buffer[..length],
-                )
-                .await?;
+            if let Some(real_destination) = real_destination {
+                udp_forwarder
+                    .send(
+                        source,
+                        original_destination,
+                        real_destination,
+                        &buffer[..length],
+                    )
+                    .await?;
+            }
         }
 
         #[allow(unreachable_code)]
@@ -262,7 +264,7 @@ fn resolve_destination(
     geolite2: &GeoLite2,
     router: &Router,
 ) -> (
-    SocketAddr,
+    Option<SocketAddr>,
     Option<String>,
     Vec<Vec<(Label, Option<String>)>>,
 ) {
@@ -273,20 +275,25 @@ fn resolve_destination(
 
         let labels_groups = router.r#match(real_destination, &name, &region_codes);
 
-        (real_destination, name, labels_groups)
+        (Some(real_destination), name, labels_groups)
     } else {
-        (destination, None, Vec::new())
+        (None, None, Vec::new())
     }
 }
 
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
     source: SocketAddr,
-    destination: SocketAddr,
+    destination: Option<SocketAddr>,
     name: Option<String>,
     labels_groups: Vec<Vec<(Label, Option<String>)>>,
     tunnel_manager: Arc<TunnelManager>,
 ) {
+    let Some(destination) = destination else {
+        let _ = stream.shutdown().await;
+        return;
+    };
+
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(

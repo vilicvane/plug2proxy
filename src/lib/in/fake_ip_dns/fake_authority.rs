@@ -67,19 +67,8 @@ impl FakeAuthority {
         }
     }
 
-    fn assign_fake_ip(
-        &self,
-        type_: RecordType,
-        name: &LowerName,
-        upstream_record: &Record,
-    ) -> IpAddr {
+    fn assign_fake_ip(&self, type_: RecordType, name: &LowerName, real_ip: &IpAddr) -> IpAddr {
         let now = ms_since_epoch();
-
-        let real_ip = match upstream_record.data().unwrap() {
-            RData::A(A(ip)) => IpAddr::V4(*ip),
-            RData::AAAA(AAAA(ip)) => IpAddr::V6(*ip),
-            _ => unreachable!(),
-        };
 
         let real_ip = match real_ip {
             IpAddr::V4(ipv4) => ipv4.octets().to_vec(),
@@ -207,7 +196,13 @@ impl Authority for FakeAuthority {
                     return Ok(ForwardLookup(lookup));
                 };
 
-                let fake_ip = self.assign_fake_ip(record_type, name, upstream_record);
+                let real_ip = match upstream_record.data().unwrap() {
+                    RData::A(A(ip)) => IpAddr::V4(*ip),
+                    RData::AAAA(AAAA(ip)) => IpAddr::V6(*ip),
+                    _ => unreachable!(),
+                };
+
+                let fake_ip = self.assign_fake_ip(record_type, name, &real_ip);
 
                 let mut record = Record::new();
 

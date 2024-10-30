@@ -1,13 +1,14 @@
 use std::{mem, net::SocketAddr, os::fd::AsRawFd, ptr};
 
-pub async fn read_udp_data_with_source_and_destination<TSocket: AsRawFd>(
+/// Requires socket to have `IP_RECVORIGDSTADDR` or `IPV6_RECVORIGDSTADDR` enabled.
+pub async fn receive_udp_data_with_source_and_destination<TSocket: AsRawFd>(
     fd: &tokio::io::unix::AsyncFd<TSocket>,
     buffer: &mut [u8],
 ) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
     loop {
         let mut read_guard = fd.readable().await?;
 
-        let result = receive_udp_data_with_source_and_destination(fd, buffer);
+        let result = receive_udp_data_with_source_and_destination_(fd, buffer);
 
         if let Err(ref error) = result {
             if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -20,7 +21,7 @@ pub async fn read_udp_data_with_source_and_destination<TSocket: AsRawFd>(
     }
 }
 
-fn receive_udp_data_with_source_and_destination<TSocket: AsRawFd>(
+fn receive_udp_data_with_source_and_destination_<TSocket: AsRawFd>(
     socket: &TSocket,
     buffer: &mut [u8],
 ) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
@@ -85,12 +86,12 @@ fn receive_udp_data_with_source_and_destination<TSocket: AsRawFd>(
                 },
                 Ok,
             )?,
-            get_destination_addr(&message_header)?,
+            get_destination(&message_header)?,
         ))
     }
 }
 
-fn get_destination_addr(message_header: &libc::msghdr) -> std::io::Result<SocketAddr> {
+fn get_destination(message_header: &libc::msghdr) -> std::io::Result<SocketAddr> {
     unsafe {
         let (_, address) = socket2::SockAddr::try_init(|address_storage, length| {
             let mut control_message_header_pointer = libc::CMSG_FIRSTHDR(message_header);
