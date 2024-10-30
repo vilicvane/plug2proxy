@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     os::fd::{AsFd, BorrowedFd},
     sync::{
-        atomic::{self, AtomicBool},
+        atomic::{self, AtomicBool, AtomicUsize},
         Arc, Mutex,
     },
     task::Poll,
@@ -36,7 +36,10 @@ pub struct Http2InTunnel {
     out_id: MatchOutId,
     labels: Vec<Label>,
     priority: i64,
-    request_sender: Arc<Mutex<h2::client::SendRequest<bytes::Bytes>>>,
+    request_sender: Arc<Mutex<Option<h2::client::SendRequest<bytes::Bytes>>>>,
+    active_permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
+    lifetime_streams: AtomicUsize,
+    active_streams: Arc<AtomicUsize>,
     closed_notify: Arc<tokio::sync::Notify>,
     closed: Arc<AtomicBool>,
 }
@@ -51,10 +54,14 @@ impl Http2InTunnel {
         mut connection: Http2ClientConnection,
         fd: i32,
     ) -> Self {
+        let active_permit = Arc::new(Mutex::new(None));
+
         let closed_notify = Arc::new(tokio::sync::Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
 
         tokio::spawn({
+            let active_permit = active_permit.clone();
+
             let closed_notify = closed_notify.clone();
             let closed = closed.clone();
 
@@ -73,6 +80,8 @@ impl Http2InTunnel {
                         Poll::Ready(_) => {
                             window_size_setter
                                 .set_window_size(H2ConnectionMutRef::Client(&mut connection));
+
+                            context.waker().wake_by_ref();
                         }
                         Poll::Pending => {}
                     }
@@ -80,6 +89,8 @@ impl Http2InTunnel {
                     Poll::Pending
                 })
                 .await;
+
+                active_permit.lock().unwrap().take();
 
                 closed.store(true, atomic::Ordering::Relaxed);
                 closed_notify.notify_waiters();
@@ -91,7 +102,10 @@ impl Http2InTunnel {
             out_id,
             labels,
             priority,
-            request_sender: Arc::new(Mutex::new(request_sender)),
+            request_sender: Arc::new(Mutex::new(Some(request_sender))),
+            active_permit,
+            lifetime_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
             closed_notify,
             closed,
         }
@@ -108,6 +122,8 @@ impl fmt::Display for Http2InTunnel {
     }
 }
 
+const LIFETIME_CONNECTION_LIMIT: usize = 1024;
+
 #[async_trait::async_trait]
 impl InTunnelLike for Http2InTunnel {
     async fn connect(
@@ -118,7 +134,20 @@ impl InTunnelLike for Http2InTunnel {
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+        tokio::sync::oneshot::Sender<()>,
     )> {
+        let lifetime_streams = self
+            .lifetime_streams
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            + 1;
+
+        // h2 might has some memory leak issue for long standing connections.
+        if lifetime_streams == LIFETIME_CONNECTION_LIMIT {
+            log::info!("tunnel {self} reached lifetime connection limit.");
+
+            self.active_permit.lock().unwrap().take();
+        }
+
         let http_request = {
             let mut http_request = http::Request::builder();
 
@@ -141,12 +170,42 @@ impl InTunnelLike for Http2InTunnel {
             .request_sender
             .lock()
             .unwrap()
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("http2 connection no longer available."))?
             .send_request(http_request, false)?;
 
         let read_stream = H2RecvStreamAsyncRead::new(response);
         let write_stream = H2SendStreamAsyncWrite::new(write_stream);
 
-        Ok((Box::new(read_stream), Box::new(write_stream)))
+        let active_streams = self.active_streams.clone();
+
+        active_streams.fetch_add(1, atomic::Ordering::Relaxed);
+
+        let (stream_closed_sender, stream_closed_receiver) = tokio::sync::oneshot::channel();
+
+        let active_permit = self.active_permit.clone();
+
+        let request_sender = self.request_sender.clone();
+
+        let tunnel_string = self.to_string();
+
+        tokio::spawn(async move {
+            stream_closed_receiver.await.ok();
+
+            let active_streams = active_streams.fetch_sub(1, atomic::Ordering::Relaxed) - 1;
+
+            if active_permit.lock().unwrap().is_none() && active_streams == 0 {
+                log::info!("closing inactive tunnel {tunnel_string}.");
+
+                request_sender.lock().unwrap().take();
+            }
+        });
+
+        Ok((
+            Box::new(read_stream),
+            Box::new(write_stream),
+            stream_closed_sender,
+        ))
     }
 }
 
@@ -166,6 +225,14 @@ impl InTunnel for Http2InTunnel {
 
     fn priority(&self) -> i64 {
         self.priority
+    }
+
+    fn set_active_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
+        *self.active_permit.lock().unwrap() = Some(permit);
+    }
+
+    fn is_active(&self) -> bool {
+        self.active_permit.lock().unwrap().is_some()
     }
 
     async fn closed(&self) {

@@ -27,6 +27,7 @@ impl InTunnelLike for AnyInTunnelLikeArc {
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+        tokio::sync::oneshot::Sender<()>,
     )> {
         match self {
             AnyInTunnelLikeArc::InTunnel(tunnel) => {

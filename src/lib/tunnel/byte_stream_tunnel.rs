@@ -1,6 +1,7 @@
 use std::{
     fmt,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    sync::{Arc, Mutex},
 };
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -29,12 +30,13 @@ pub struct ByteStreamInTunnel<TConnection> {
     out_id: MatchOutId,
     labels: Vec<Label>,
     priority: i64,
-    connection: TConnection,
+    connection: Arc<TConnection>,
+    active_permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
 }
 
 impl<TConnection> ByteStreamInTunnel<TConnection>
 where
-    TConnection: ByteStreamInTunnelConnection,
+    TConnection: ByteStreamInTunnelConnection + 'static,
 {
     pub fn new(
         r#type: &'static str,
@@ -44,6 +46,19 @@ where
         priority: i64,
         connection: TConnection,
     ) -> Self {
+        let connection = Arc::new(connection);
+        let active_permit = Arc::new(Mutex::new(None));
+
+        tokio::spawn({
+            let connection = connection.clone();
+            let active_permit = active_permit.clone();
+
+            async move {
+                connection.closed().await;
+                active_permit.lock().unwrap().take();
+            }
+        });
+
         ByteStreamInTunnel {
             r#type,
             id,
@@ -51,6 +66,7 @@ where
             labels,
             priority,
             connection,
+            active_permit,
         }
     }
 }
@@ -78,6 +94,7 @@ where
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+        tokio::sync::oneshot::Sender<()>,
     )> {
         let (read_stream, mut write_stream) = self.connection.open().await?;
 
@@ -118,7 +135,9 @@ where
 
         write_stream.write_all(&head).await?;
 
-        Ok((read_stream, write_stream))
+        let (stream_closed_sender, _) = tokio::sync::oneshot::channel();
+
+        Ok((read_stream, write_stream, stream_closed_sender))
     }
 }
 
@@ -141,6 +160,14 @@ where
 
     fn priority(&self) -> i64 {
         self.priority
+    }
+
+    fn set_active_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
+        *self.active_permit.lock().unwrap() = Some(permit);
+    }
+
+    fn is_active(&self) -> bool {
+        self.active_permit.lock().unwrap().is_some()
     }
 
     async fn closed(&self) {

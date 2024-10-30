@@ -135,7 +135,7 @@ async fn handle_tunnel(
         match tunnel.accept().await {
             Ok((
                 (destination_address, destination_name, tag),
-                (tunnel_recv_stream, tunnel_send_stream),
+                (tunnel_read_stream, tunnel_write_stream),
             )) => {
                 log::info!(
                     "accepted connection to {}.",
@@ -150,8 +150,8 @@ async fn handle_tunnel(
                     destination_address,
                     destination_name,
                     output.clone(),
-                    tunnel_recv_stream,
-                    tunnel_send_stream,
+                    tunnel_read_stream,
+                    tunnel_write_stream,
                 ));
             }
             Err(error) => {
@@ -183,11 +183,11 @@ async fn handle_tcp_stream(
         destination_address
     };
 
-    let (remote_read_stream, remote_write_stream) = output.connect(address).await?;
+    let (read_stream, write_stream) = output.connect(address).await?;
 
     copy_bidirectional(
-        (tunnel_read_stream, remote_write_stream),
-        (remote_read_stream, tunnel_write_stream),
+        (tunnel_read_stream, write_stream),
+        (read_stream, tunnel_write_stream),
     )
     .await?;
 

@@ -12,6 +12,7 @@ pub trait InTunnelLike: fmt::Display + Send + Sync {
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+        tokio::sync::oneshot::Sender<()>,
     )>;
 }
 
@@ -24,6 +25,10 @@ pub trait InTunnel: InTunnelLike {
     fn labels(&self) -> &[Label];
 
     fn priority(&self) -> i64;
+
+    fn set_active_permit(&self, permit: tokio::sync::OwnedSemaphorePermit);
+
+    fn is_active(&self) -> bool;
 
     async fn closed(&self);
 

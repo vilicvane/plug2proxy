@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use futures::{future::try_join_all, TryFutureExt};
+use futures::future::try_join_all;
 use itertools::Itertools;
 use tokio::io::AsyncWriteExt;
 
@@ -194,15 +194,14 @@ pub async fn up(
                 let (destination, name, labels_groups) =
                     resolve_destination(destination, &fake_ip_resolver, &geolite2, &router);
 
-                handle_in_tcp_stream(
+                tokio::spawn(handle_in_tcp_stream(
                     stream,
                     source,
                     destination,
                     name,
                     labels_groups,
-                    &tunnel_manager,
-                )
-                .await?;
+                    tunnel_manager.clone(),
+                ));
             }
 
             #[allow(unreachable_code)]
@@ -286,8 +285,8 @@ async fn handle_in_tcp_stream(
     destination: SocketAddr,
     name: Option<String>,
     labels_groups: Vec<Vec<(Label, Option<String>)>>,
-    tunnel_manager: &TunnelManager,
-) -> anyhow::Result<()> {
+    tunnel_manager: Arc<TunnelManager>,
+) {
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
@@ -301,34 +300,35 @@ async fn handle_in_tcp_stream(
             stringify_labels_groups(&labels_groups)
         );
 
-        stream.shutdown().await?;
+        let _ = stream.shutdown().await;
 
-        return Ok(());
+        return;
     };
 
     log::info!("connect {source} to {destination_string} via {tunnel}...");
 
-    let (mut in_recv_stream, mut in_send_stream) = stream.into_split();
+    if let Err(error) = async move {
+        let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =
+            tunnel.connect(destination, name, tag).await?;
 
-    tokio::spawn({
-        async move {
-            let (mut tunnel_recv_stream, mut tunnel_send_stream) =
-                tunnel.connect(destination, name, tag).await?;
+        let (mut read_stream, mut write_stream) = stream.into_split();
 
-            copy_bidirectional(
-                (&mut in_recv_stream, &mut tunnel_send_stream),
-                (&mut tunnel_recv_stream, &mut in_send_stream),
-            )
-            .await?;
+        let copy_result = copy_bidirectional(
+            (&mut read_stream, &mut tunnel_write_stream),
+            (&mut tunnel_read_stream, &mut write_stream),
+        )
+        .await;
 
-            anyhow::Ok(())
-        }
-        .inspect_err(move |error| {
-            log::debug!("connection from {source} to {destination_string} errored: {error}",)
-        })
-    });
+        stream_closed_sender.send(()).ok();
 
-    Ok(())
+        copy_result?;
+
+        anyhow::Ok(())
+    }
+    .await
+    {
+        log::debug!("connection from {source} to {destination_string} errored: {error}");
+    }
 }
 
 fn stringify_labels_groups(labels_groups: &[Vec<(Label, Option<String>)>]) -> String {

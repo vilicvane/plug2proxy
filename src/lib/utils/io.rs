@@ -22,14 +22,22 @@ pub async fn copy_bidirectional(
     };
 
     let b_to_a_task = async {
-        tokio::io::copy(&mut b_read, &mut a_write).await?;
+        let result = tokio::io::copy(&mut b_read, &mut a_write).await;
 
         let _ = a_write.shutdown().await;
+
+        result?;
 
         tokio::io::Result::Ok(())
     };
 
-    tokio::try_join!(a_to_b_task, b_to_a_task)?;
+    let result = tokio::try_join!(a_to_b_task, b_to_a_task);
+
+    // shutdown might not have been called if there's an error in the other task.
+    let _ = a_write.shutdown().await;
+    let _ = b_write.shutdown().await;
+
+    result?;
 
     Ok(())
 }

@@ -75,10 +75,12 @@ impl tokio::io::AsyncRead for H2RecvStreamAsyncRead {
                             pending.extend_from_slice(&data[length..]);
                         }
 
-                        Poll::Ready(Ok(recv_stream
+                        recv_stream
                             .flow_control()
                             .release_capacity(data.len())
-                            .map_err(h2_error_to_io_error)?))
+                            .map_err(h2_error_to_io_error)?;
+
+                        Poll::Ready(Ok(()))
                     } else {
                         Poll::Ready(Ok(()))
                     }

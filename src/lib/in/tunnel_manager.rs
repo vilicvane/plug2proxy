@@ -179,7 +179,7 @@ impl TunnelManager {
         let mut handles = Vec::<tokio::task::JoinHandle<()>>::new();
 
         loop {
-            let permit = semaphore.clone().acquire_owned().await;
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
 
             handles.retain(|handle| !handle.is_finished());
 
@@ -187,6 +187,8 @@ impl TunnelManager {
 
             match tunnel_provider.accept(out_id).await {
                 Ok(Some((tunnel, (out_routing_rules, out_routing_priority)))) => {
+                    tunnel.set_active_permit(permit);
+
                     let tunnel_id = tunnel.id();
                     let tunnel = Arc::new(tunnel);
 
@@ -230,8 +232,6 @@ impl TunnelManager {
                             );
 
                             router.unregister_tunnel(out_id, tunnel_id);
-
-                            drop(permit);
                         }
                     });
 
@@ -298,6 +298,11 @@ fn select_from_tunnels(
     tunnels: &[Arc<Box<dyn InTunnel>>],
     index: usize,
 ) -> Option<AnyInTunnelLikeArc> {
+    let tunnels = tunnels
+        .iter()
+        .filter(|tunnel| tunnel.is_active())
+        .collect_vec();
+
     if tunnels.is_empty() {
         return None;
     }

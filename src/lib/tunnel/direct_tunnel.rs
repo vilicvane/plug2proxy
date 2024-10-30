@@ -22,6 +22,7 @@ impl InTunnelLike for DirectInTunnel {
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+        tokio::sync::oneshot::Sender<()>,
     )> {
         let socket = match destination_address {
             SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
@@ -36,7 +37,13 @@ impl InTunnelLike for DirectInTunnel {
 
         let (read_stream, write_stream) = stream.into_split();
 
-        Ok((Box::new(read_stream), Box::new(write_stream)))
+        let (stream_closed_sender, _) = tokio::sync::oneshot::channel();
+
+        Ok((
+            Box::new(read_stream),
+            Box::new(write_stream),
+            stream_closed_sender,
+        ))
     }
 }
 
