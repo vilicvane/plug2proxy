@@ -122,7 +122,7 @@ impl fmt::Display for Http2InTunnel {
     }
 }
 
-const LIFETIME_CONNECTION_LIMIT: usize = 1024;
+const LIFETIME_STREAMS_LIMIT: usize = 128;
 
 #[async_trait::async_trait]
 impl InTunnelLike for Http2InTunnel {
@@ -142,7 +142,7 @@ impl InTunnelLike for Http2InTunnel {
             + 1;
 
         // h2 might has some memory leak issue for long standing connections.
-        if lifetime_streams == LIFETIME_CONNECTION_LIMIT {
+        if lifetime_streams == LIFETIME_STREAMS_LIMIT {
             log::info!("tunnel {self} reached lifetime connection limit.");
 
             self.active_permit.lock().unwrap().take();
