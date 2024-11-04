@@ -3,7 +3,7 @@ use std::{
     mem,
     net::SocketAddr,
     os::fd::{AsFd as _, AsRawFd as _},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -13,6 +13,8 @@ use crate::utils::net::{get_any_address, socket::receive_udp_data_with_source_an
 
 pub struct UdpForwarder {
     proxy_socket: tokio::io::unix::AsyncFd<socket2::Socket>,
+    original_destination_to_response_socket_map:
+        Arc<Mutex<HashMap<SocketAddr, Arc<tokio::net::UdpSocket>>>>,
     association_map: Arc<
         tokio::sync::Mutex<
             HashMap<
@@ -60,6 +62,7 @@ impl UdpForwarder {
 
         Ok(Self {
             proxy_socket: tokio::io::unix::AsyncFd::new(proxy_socket)?,
+            original_destination_to_response_socket_map: Arc::new(Mutex::new(HashMap::new())),
             traffic_mark,
             association_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -87,13 +90,26 @@ impl UdpForwarder {
             tokio::spawn({
                 let association_map = self.association_map.clone();
 
+                let original_destination_to_response_socket_map =
+                    self.original_destination_to_response_socket_map.clone();
+
                 async move {
                     timeout_receiver.await.ok();
                     association_map.lock().await.remove(&source_address);
+
+                    original_destination_to_response_socket_map
+                        .lock()
+                        .unwrap()
+                        .retain(|_, response_socket| Arc::strong_count(response_socket) > 1);
                 }
             });
 
-            Association::new(source_address, self.traffic_mark, timeout_sender)
+            Association::new(
+                source_address,
+                self.original_destination_to_response_socket_map.clone(),
+                self.traffic_mark,
+                timeout_sender,
+            )
         });
 
         association
@@ -141,6 +157,9 @@ struct Association {
 impl Association {
     fn new(
         source_address: SocketAddr,
+        original_destination_to_response_socket_map: Arc<
+            Mutex<HashMap<SocketAddr, Arc<tokio::net::UdpSocket>>>,
+        >,
         traffic_mark: u32,
         timeout_sender: tokio::sync::oneshot::Sender<()>,
     ) -> Self {
@@ -164,10 +183,10 @@ impl Association {
         let real_to_original_destination_map = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let original_to_real_destination_map = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
-        let mut original_destination_to_response_socket_map = HashMap::new();
-
         let (activity_signal_sender, mut activity_signal_receiver) =
             tokio::sync::mpsc::unbounded_channel();
+
+        let related_original_destination_to_response_socket_map = Mutex::new(HashMap::new());
 
         let read_task = {
             let delegate_socket = delegate_socket.clone();
@@ -192,10 +211,15 @@ impl Association {
                         .unwrap_or(&real_destination);
 
                     let response_socket = Self::assign_response_socket(
-                        &mut original_destination_to_response_socket_map,
+                        &mut original_destination_to_response_socket_map.lock().unwrap(),
                         &original_destination,
                         traffic_mark,
                     );
+
+                    related_original_destination_to_response_socket_map
+                        .lock()
+                        .unwrap()
+                        .insert(original_destination, response_socket.clone());
 
                     response_socket
                         .send_to(&buffer[..length], source_address)
