@@ -2,7 +2,7 @@
 
 target=""
 
-while getopts "t::m:c::d:" flag; do
+while getopts "t::m:r::d:" flag; do
     case $flag in
     t)
         target=$OPTARG
@@ -10,14 +10,14 @@ while getopts "t::m:c::d:" flag; do
     m)
         mode=$OPTARG
         ;;
-    c)
+    r)
         resources=(${OPTARG//,/ })
         ;;
     d)
         destination=$OPTARG
         ;;
     ?)
-        echo "Usage: [-t target] -m <mode> -c <resource,...> -d <destination>"
+        echo "Usage: [-t target] -m <mode> -r <resource,...> -d <destination>"
         exit 1
         ;;
     esac

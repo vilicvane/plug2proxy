@@ -122,7 +122,7 @@ impl fmt::Display for Http2InTunnel {
     }
 }
 
-const LIFETIME_STREAMS_LIMIT: usize = 128;
+const LIFETIME_STREAMS_LIMIT: usize = 1024;
 
 #[async_trait::async_trait]
 impl InTunnelLike for Http2InTunnel {

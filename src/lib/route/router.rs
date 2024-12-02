@@ -126,10 +126,9 @@ impl Router {
         let mut rules = {
             let out_rules_map = self.out_rules_map.lock().unwrap();
 
-            out_rules_map
-                .values()
-                .flat_map(|(rules, _)| rules)
-                .chain(self.in_rules.iter())
+            self.in_rules
+                .iter()
+                .chain(out_rules_map.values().flat_map(|(rules, _)| rules))
                 .cloned()
                 .collect_vec()
         };

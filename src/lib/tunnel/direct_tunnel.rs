@@ -30,6 +30,7 @@ impl InTunnelLike for DirectInTunnel {
         }?;
 
         socket.set_nodelay(true)?;
+        socket.set_keepalive(true)?;
 
         nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &self.traffic_mark)?;
 

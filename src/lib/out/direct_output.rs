@@ -29,6 +29,8 @@ impl Output for DirectOutput {
 
         stream.set_nodelay(true)?;
 
+        nix::sys::socket::setsockopt(&stream, nix::sys::socket::sockopt::KeepAlive, &true)?;
+
         let (read_stream, write_stream) = stream.into_split();
 
         Ok((Box::new(read_stream), Box::new(write_stream)))

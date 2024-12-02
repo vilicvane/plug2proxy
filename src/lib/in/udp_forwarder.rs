@@ -214,7 +214,7 @@ impl Association {
                         &mut original_destination_to_response_socket_map.lock().unwrap(),
                         &original_destination,
                         traffic_mark,
-                    );
+                    )?;
 
                     related_original_destination_to_response_socket_map
                         .lock()
@@ -291,11 +291,11 @@ impl Association {
         >,
         original_destination_address: &SocketAddr,
         traffic_mark: u32,
-    ) -> Arc<tokio::net::UdpSocket> {
+    ) -> anyhow::Result<Arc<tokio::net::UdpSocket>> {
         if let Some(socket) =
             original_destination_to_response_socket_map.get(original_destination_address)
         {
-            return socket.clone();
+            return Ok(socket.clone());
         }
 
         let socket = socket2::Socket::new(
@@ -310,9 +310,7 @@ impl Association {
         socket.set_mark(traffic_mark).unwrap();
         socket.set_nonblocking(true).unwrap();
 
-        socket
-            .bind(&(*original_destination_address).into())
-            .unwrap();
+        socket.bind(&(*original_destination_address).into())?;
 
         let socket = tokio::net::UdpSocket::from_std(socket.into()).unwrap();
 
@@ -321,7 +319,7 @@ impl Association {
         original_destination_to_response_socket_map
             .insert(*original_destination_address, socket.clone());
 
-        socket
+        Ok(socket)
     }
 }
 
