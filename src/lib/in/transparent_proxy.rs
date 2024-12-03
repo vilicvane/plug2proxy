@@ -313,7 +313,12 @@ async fn handle_in_tcp_stream(
         return;
     };
 
-    log::info!("connect {source} to {destination_string} via {tunnel}...");
+    log::info!(
+        "connect {source} to {destination_string} via {tunnel}{tagged}...",
+        tagged = tag
+            .as_deref()
+            .map_or_else(|| "".to_owned(), |tag| format!(" ({tag})"))
+    );
 
     if let Err(error) = async move {
         let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =

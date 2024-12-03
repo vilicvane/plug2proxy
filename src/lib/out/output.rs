@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use super::{direct_output::DirectOutput, socks5_output::Socks5Output};
+use super::{local_output::LocalOutput, socks5_output::Socks5Output};
 
 #[async_trait::async_trait]
 pub trait Output {
@@ -15,7 +15,7 @@ pub trait Output {
 
 #[derive(derive_more::From)]
 pub enum AnyOutput {
-    Direct(DirectOutput),
+    Local(LocalOutput),
     Socks5(Socks5Output),
 }
 
@@ -29,7 +29,7 @@ impl Output for AnyOutput {
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     )> {
         match self {
-            AnyOutput::Direct(output) => output.connect(address).await,
+            AnyOutput::Local(output) => output.connect(address).await,
             AnyOutput::Socks5(output) => output.connect(address).await,
         }
     }

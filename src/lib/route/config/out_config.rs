@@ -1,10 +1,17 @@
-use std::{net::SocketAddr, str::FromStr as _};
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr as _,
+};
 
 use itertools::Itertools;
 
 use crate::{
     match_server::MatchOutId,
-    out::{output::AnyOutput, socks5_output::Socks5Output},
+    out::{
+        local_output::{LocalIpOrInterface, LocalOutput},
+        output::AnyOutput,
+        socks5_output::Socks5Output,
+    },
     route::rule::{
         AddressRule, DomainPatternRule, DomainRule, DynRuleBox, FallbackRule, GeoIpRule, Label,
     },
@@ -135,6 +142,8 @@ pub struct OutFallbackRuleConfig {
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum OutOutputConfig {
+    #[serde(rename = "local")]
+    Local(OutLocalOutputConfig),
     #[serde(rename = "socks5")]
     Socks5(OutSocks5OutputConfig),
 }
@@ -142,15 +151,23 @@ pub enum OutOutputConfig {
 impl OutOutputConfig {
     pub fn tag(&self) -> &str {
         match self {
+            OutOutputConfig::Local(config) => &config.tag,
             OutOutputConfig::Socks5(config) => &config.tag,
         }
     }
 
     pub fn into_output(self) -> AnyOutput {
         match self {
+            OutOutputConfig::Local(config) => LocalOutput::new(Some(config.bind)).into(),
             OutOutputConfig::Socks5(config) => Socks5Output::new(config.address).into(),
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct OutLocalOutputConfig {
+    pub tag: String,
+    pub bind: LocalIpOrInterface,
 }
 
 #[derive(serde::Deserialize)]

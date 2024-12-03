@@ -1,4 +1,4 @@
-mod direct_output;
+pub mod local_output;
 #[allow(clippy::module_inception)]
 mod out;
 pub mod output;

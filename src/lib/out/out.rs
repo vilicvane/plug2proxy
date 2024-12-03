@@ -10,7 +10,7 @@ use itertools::Itertools as _;
 use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
-    out::direct_output::DirectOutput,
+    out::local_output::LocalOutput,
     route::{
         config::{OutOutputConfig, OutRuleConfig},
         rule::Label,
@@ -85,7 +85,7 @@ pub async fn up(
             .collect::<HashMap<_, _>>(),
     );
 
-    let direct_output = Arc::new(AnyOutput::Direct(DirectOutput::new()));
+    let direct_output = Arc::new(AnyOutput::Local(LocalOutput::default()));
 
     let tunneling_tasks = tunnel_providers
         .into_iter()
@@ -138,8 +138,11 @@ async fn handle_tunnel(
                 (tunnel_read_stream, tunnel_write_stream),
             )) => {
                 log::info!(
-                    "accepted connection to {}.",
-                    get_destination_string(destination_address, &destination_name)
+                    "accepted connection{tagged} to {destination}.",
+                    tagged = tag
+                        .as_deref()
+                        .map_or_else(|| "".to_owned(), |tag| format!(" ({tag})")),
+                    destination = get_destination_string(destination_address, &destination_name),
                 );
 
                 let output = tag
