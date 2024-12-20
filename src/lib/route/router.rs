@@ -86,15 +86,14 @@ impl Router {
         {
             let mut out_rules_map = self.out_rules_map.lock().unwrap();
 
-            let (_, tunnel_id_set) = out_rules_map.entry(out_id).or_insert_with(|| {
-                (
-                    rules
-                        .into_iter()
-                        .map(|config| Arc::new(config.into_rule(out_id, priority)))
-                        .collect_vec(),
-                    HashSet::new(),
-                )
-            });
+            let (out_rules, tunnel_id_set) = out_rules_map
+                .entry(out_id)
+                .or_insert_with(|| (Vec::new(), HashSet::new()));
+
+            *out_rules = rules
+                .into_iter()
+                .map(|config| Arc::new(config.into_rule(out_id, priority)))
+                .collect_vec();
 
             tunnel_id_set.insert(tunnel_id);
         }
