@@ -57,6 +57,7 @@
         "sockaddr",
         "socklen",
         "sockopt",
+        "svcb",
         "tproxy",
         "webrtc",
         "xoraddr",

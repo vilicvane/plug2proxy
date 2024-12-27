@@ -9,8 +9,11 @@ use hickory_client::{
     op::Query,
     proto::rr::LowerName,
     rr::{
-        rdata::{A, AAAA},
-        DNSClass, RData, Record, RecordType,
+        rdata::{
+            svcb::{IpHint, SvcParamKey, SvcParamValue},
+            A, AAAA, HTTPS, SVCB,
+        },
+        RData, RecordType,
     },
 };
 use hickory_resolver::{lookup::Lookup, TokioAsyncResolver};
@@ -67,12 +70,12 @@ impl FakeAuthority {
         }
     }
 
-    fn assign_fake_ip(&self, type_: RecordType, name: &LowerName, real_ip: &IpAddr) -> IpAddr {
+    fn assign_fake_ip(&self, name: &LowerName, real_ip: &IpAddr) -> IpAddr {
         let now = ms_since_epoch();
 
-        let real_ip = match real_ip {
-            IpAddr::V4(ipv4) => ipv4.octets().to_vec(),
-            IpAddr::V6(ipv6) => ipv6.octets().to_vec(),
+        let (record_type, real_ip_octets) = match real_ip {
+            IpAddr::V4(ipv4) => ("A", ipv4.octets().to_vec()),
+            IpAddr::V6(ipv6) => ("AAAA", ipv6.octets().to_vec()),
         };
 
         let expires_at = now + FAKE_IP_EXPIRATION_TIME_IN_MS;
@@ -85,7 +88,7 @@ impl FakeAuthority {
             let id: Option<i64> = connection
                 .query_row(
                     "SELECT id FROM records WHERE type = ? AND name = ?",
-                    rusqlite::params![type_.to_string(), name.to_string()],
+                    rusqlite::params![record_type, name.to_string()],
                     |row| row.get("id"),
                 )
                 .optional()
@@ -95,11 +98,11 @@ impl FakeAuthority {
                 connection
                     .execute(
                         "UPDATE records SET real_ip = ?, expires_at = ? WHERE id = ?",
-                        rusqlite::params![real_ip, expires_at, id],
+                        rusqlite::params![real_ip_octets, expires_at, id],
                     )
                     .unwrap();
 
-                return self.convert_id_to_fake_ip(id, type_);
+                return self.convert_id_to_fake_ip(id, real_ip);
             }
         }
 
@@ -119,11 +122,11 @@ impl FakeAuthority {
                 connection
                     .execute(
                         "UPDATE records SET type = ?, name = ?, real_ip = ?, expires_at = ? WHERE id = ?",
-                        rusqlite::params![type_.to_string(), name.to_string(), real_ip, expires_at, id],
+                        rusqlite::params![record_type, name.to_string(), real_ip_octets, expires_at, id],
                     )
                     .unwrap();
 
-                return self.convert_id_to_fake_ip(id, type_);
+                return self.convert_id_to_fake_ip(id, real_ip);
             }
         }
 
@@ -133,27 +136,26 @@ impl FakeAuthority {
             connection
                 .execute(
                     "INSERT INTO records (type, name, real_ip, expires_at) VALUES (?, ?, ?, ?)",
-                    rusqlite::params![type_.to_string(), name.to_string(), real_ip, expires_at],
+                    rusqlite::params![record_type, name.to_string(), real_ip_octets, expires_at],
                 )
                 .unwrap();
 
             let id = connection.last_insert_rowid();
 
-            self.convert_id_to_fake_ip(id, type_)
+            self.convert_id_to_fake_ip(id, real_ip)
         }
     }
 
-    fn convert_id_to_fake_ip(&self, id: i64, type_: RecordType) -> IpAddr {
-        match type_ {
-            RecordType::A => {
+    fn convert_id_to_fake_ip(&self, id: i64, real_ip: &IpAddr) -> IpAddr {
+        match real_ip {
+            IpAddr::V4(_) => {
                 let bits = self.fake_ip_v4_start + id as u32;
                 IpAddr::V4(bits.into())
             }
-            RecordType::AAAA => {
+            IpAddr::V6(_) => {
                 let bits = self.fake_ip_v6_start + id as u128;
                 IpAddr::V6(bits.into())
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -199,24 +201,83 @@ impl Authority for FakeAuthority {
                 let real_ip = match upstream_record.data().unwrap() {
                     RData::A(A(ip)) => IpAddr::V4(*ip),
                     RData::AAAA(AAAA(ip)) => IpAddr::V6(*ip),
-                    _ => unreachable!(),
+                    _ => return Ok(ForwardLookup(lookup)),
                 };
 
-                let fake_ip = self.assign_fake_ip(record_type, name, &real_ip);
+                let fake_ip = self.assign_fake_ip(name, &real_ip);
 
-                let mut record = Record::new();
+                let mut record = upstream_record.clone();
 
                 let data = match fake_ip {
                     IpAddr::V4(ipv4) => RData::A(A::from(ipv4)),
                     IpAddr::V6(ipv6) => RData::AAAA(AAAA::from(ipv6)),
                 };
 
-                record
-                    .set_name(name.into())
-                    .set_rr_type(record_type)
-                    .set_dns_class(DNSClass::IN)
-                    .set_ttl(60)
-                    .set_data(Some(data));
+                record.set_ttl(60).set_data(Some(data));
+
+                Ok(ForwardLookup(Lookup::new_with_max_ttl(
+                    Query::query(name.into(), record_type),
+                    Arc::new([record]),
+                )))
+            }
+            RecordType::HTTPS => {
+                let upstream_record = lookup
+                    .record_iter()
+                    .find(|record| record.record_type() == record_type);
+
+                let Some(upstream_record) = upstream_record else {
+                    return Ok(ForwardLookup(lookup));
+                };
+
+                let svcb = match upstream_record.data().unwrap() {
+                    RData::HTTPS(HTTPS(svcb)) => svcb,
+                    _ => return Ok(ForwardLookup(lookup)),
+                };
+
+                let mut svcb_params = Vec::new();
+
+                for (key, value) in svcb.svc_params().iter() {
+                    let real_ip = match key {
+                        SvcParamKey::Ipv4Hint => match value {
+                            SvcParamValue::Ipv4Hint(IpHint(items)) => match items.first() {
+                                Some(A(ip)) => IpAddr::V4(*ip),
+                                _ => return Ok(ForwardLookup(lookup)),
+                            },
+                            _ => return Ok(ForwardLookup(lookup)),
+                        },
+                        SvcParamKey::Ipv6Hint => match value {
+                            SvcParamValue::Ipv6Hint(IpHint(items)) => match items.first() {
+                                Some(AAAA(ip)) => IpAddr::V6(*ip),
+                                _ => return Ok(ForwardLookup(lookup)),
+                            },
+                            _ => return Ok(ForwardLookup(lookup)),
+                        },
+                        _ => {
+                            svcb_params.push((*key, value.clone()));
+
+                            continue;
+                        }
+                    };
+
+                    let fake_ip = self.assign_fake_ip(name, &real_ip);
+
+                    let value = match fake_ip {
+                        IpAddr::V4(ipv4) => SvcParamValue::Ipv4Hint(IpHint(vec![A(ipv4)])),
+                        IpAddr::V6(ipv6) => SvcParamValue::Ipv6Hint(IpHint(vec![AAAA(ipv6)])),
+                    };
+
+                    svcb_params.push((*key, value));
+                }
+
+                let mut record = upstream_record.clone();
+
+                let data = RData::HTTPS(HTTPS(SVCB::new(
+                    svcb.svc_priority(),
+                    svcb.target_name().clone(),
+                    svcb_params,
+                )));
+
+                record.set_ttl(60).set_data(Some(data));
 
                 Ok(ForwardLookup(Lookup::new_with_max_ttl(
                     Query::query(name.into(), record_type),
