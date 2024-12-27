@@ -13,7 +13,7 @@ use hickory_client::{
             svcb::{IpHint, SvcParamKey, SvcParamValue},
             A, AAAA, HTTPS, SVCB,
         },
-        RData, RecordType,
+        RData, Record, RecordType,
     },
 };
 use hickory_resolver::{lookup::Lookup, TokioAsyncResolver};
@@ -206,14 +206,22 @@ impl Authority for FakeAuthority {
 
                 let fake_ip = self.assign_fake_ip(name, &real_ip);
 
-                let mut record = upstream_record.clone();
-
                 let data = match fake_ip {
                     IpAddr::V4(ipv4) => RData::A(A::from(ipv4)),
                     IpAddr::V6(ipv6) => RData::AAAA(AAAA::from(ipv6)),
                 };
 
-                record.set_ttl(60).set_data(Some(data));
+                // notice that upstream_record could be a CNAME record, thus cannot directly use
+                // its name/type etc.
+
+                let mut record = Record::new();
+
+                record
+                    .set_name(name.into())
+                    .set_rr_type(record_type)
+                    .set_dns_class(upstream_record.dns_class())
+                    .set_ttl(60)
+                    .set_data(Some(data));
 
                 Ok(ForwardLookup(Lookup::new_with_max_ttl(
                     Query::query(name.into(), record_type),
