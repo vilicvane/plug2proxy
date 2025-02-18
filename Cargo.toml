@@ -70,4 +70,4 @@ url = "2.5.2"
 uuid = { version = "1.10.0", features = ["serde", "v4"] }
 
 [patch.crates-io]
-h2 = { "git" = "https://github.com/vilicvane/h2.git" }
+h2 = { "git" = "https://github.com/vilicvane/h2.git", "rev" = "dd1a954" }
