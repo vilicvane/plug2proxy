@@ -906,8 +906,8 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "h2"
-version = "0.4.7"
-source = "git+https://github.com/vilicvane/h2.git?rev=dd1a954#dd1a95405621540ff4fb3f561362c0d1fed5c1c8"
+version = "0.4.10"
+source = "git+https://github.com/vilicvane/h2.git?rev=a49ba5b#a49ba5b9bf146e056753c99d1897cbf0b9ed8819"
 dependencies = [
  "atomic-waker",
  "bytes",
