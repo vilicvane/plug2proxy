@@ -1,7 +1,4 @@
-use std::{
-    net::{IpAddr, SocketAddr},
-    str::FromStr as _,
-};
+use std::{net::SocketAddr, str::FromStr as _};
 
 use itertools::Itertools;
 

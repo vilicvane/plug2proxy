@@ -97,7 +97,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
 
         let stream = socket.connect(address).await?;
 
-        log::debug!("http2 tunnel {tunnel_id} underlying TCP connected.");
+        log::info!("http2 tunnel {tunnel_id} underlying TCP connected.");
 
         let client_config = {
             let mut client_config = create_rustls_client_config(&cert, &key)?;
