@@ -12,6 +12,7 @@
         "AUTOINCREMENT",
         "axfr",
         "bilibili",
+        "boostable",
         "datagrams",
         "DGRAM",
         "formatcp",

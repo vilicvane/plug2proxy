@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::future::try_join_all;
 use itertools::Itertools;
@@ -21,10 +21,14 @@ use crate::{
     utils::{
         io::copy_bidirectional,
         net::socket::{get_socket_original_destination, IpFamily},
+        semaphore_rate_limiter::{SemaphoreRateLimiter, SemaphoreRateLimiterArc},
     },
 };
 
 use super::tunnel_manager::TunnelManager;
+
+const TARGET_TCP_BOOSTABLE_CONNECTIONS: usize = 4;
+const TARGET_TCP_CONNECT_DELAY: Duration = Duration::from_secs(1);
 
 pub struct Options<'a> {
     pub listen_address: SocketAddr,
@@ -188,12 +192,26 @@ pub async fn up(
                 socket.listen(64)?
             };
 
-            while let Ok((stream, source)) = tcp_listener.accept().await {
+            let mut rate_limiter_map = HashMap::new();
+
+            while let Ok((mut stream, source)) = tcp_listener.accept().await {
                 let destination = get_socket_original_destination(&stream, IpFamily::V4)
                     .unwrap_or_else(|_| stream.local_addr().unwrap());
 
                 let (destination, name, labels_groups) =
                     resolve_destination(destination, &fake_ip_resolver, &geolite2, &router);
+
+                let Some(destination) = destination else {
+                    tokio::spawn(async move { stream.shutdown().await });
+                    continue;
+                };
+
+                let rate_limiter = rate_limiter_map.entry(destination).or_insert_with(|| {
+                    SemaphoreRateLimiter::new_arc(
+                        TARGET_TCP_BOOSTABLE_CONNECTIONS,
+                        TARGET_TCP_CONNECT_DELAY,
+                    )
+                });
 
                 tokio::spawn(handle_in_tcp_stream(
                     stream,
@@ -202,6 +220,7 @@ pub async fn up(
                     name,
                     labels_groups,
                     tunnel_manager.clone(),
+                    rate_limiter.clone(),
                 ));
             }
 
@@ -285,16 +304,12 @@ fn resolve_destination(
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
     source: SocketAddr,
-    destination: Option<SocketAddr>,
+    destination: SocketAddr,
     name: Option<String>,
     labels_groups: Vec<Vec<(Label, Option<String>)>>,
     tunnel_manager: Arc<TunnelManager>,
+    rate_limiter: SemaphoreRateLimiterArc,
 ) {
-    let Some(destination) = destination else {
-        let _ = stream.shutdown().await;
-        return;
-    };
-
     let destination_string = get_destination_string(destination, &name);
 
     log::debug!(
@@ -319,6 +334,8 @@ async fn handle_in_tcp_stream(
             .as_deref()
             .map_or_else(|| "".to_owned(), |tag| format!(" ({tag})"))
     );
+
+    rate_limiter.acquire().await;
 
     if let Err(error) = async move {
         let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =

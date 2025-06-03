@@ -1,11 +1,13 @@
 #!/bin/bash
 
+command="cargo"
 target=""
 
 while getopts "t::m:r::d:" flag; do
     case $flag in
     t)
         target=$OPTARG
+        command="cross"
         ;;
     m)
         mode=$OPTARG
@@ -24,9 +26,9 @@ while getopts "t::m:r::d:" flag; do
 done
 
 if [ -n "$target" ]; then
-    cargo build --target $target --release
+    $command build --target $target --release
 else
-    cargo build --release
+    $command build --release
 fi
 
 if [ -n "$target" ]; then
