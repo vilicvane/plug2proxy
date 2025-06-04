@@ -206,12 +206,15 @@ pub async fn up(
                     continue;
                 };
 
-                let rate_limiter = rate_limiter_map.entry(destination).or_insert_with(|| {
-                    SemaphoreRateLimiter::new_arc(
-                        TARGET_TCP_BOOSTABLE_CONNECTIONS,
-                        TARGET_TCP_CONNECT_DELAY,
-                    )
-                });
+                let rate_limiter = rate_limiter_map
+                    .entry(destination)
+                    .or_insert_with(|| {
+                        SemaphoreRateLimiter::new_arc(
+                            TARGET_TCP_BOOSTABLE_CONNECTIONS,
+                            TARGET_TCP_CONNECT_DELAY,
+                        )
+                    })
+                    .clone();
 
                 tokio::spawn(handle_in_tcp_stream(
                     stream,
@@ -220,7 +223,7 @@ pub async fn up(
                     name,
                     labels_groups,
                     tunnel_manager.clone(),
-                    rate_limiter.clone(),
+                    rate_limiter,
                 ));
             }
 
@@ -328,14 +331,14 @@ async fn handle_in_tcp_stream(
         return;
     };
 
+    rate_limiter.acquire().await;
+
     log::info!(
         "connect {source} to {destination_string} via {tunnel}{tagged}...",
         tagged = tag
             .as_deref()
             .map_or_else(|| "".to_owned(), |tag| format!(" ({tag})"))
     );
-
-    rate_limiter.acquire().await;
 
     if let Err(error) = async move {
         let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =
@@ -357,7 +360,7 @@ async fn handle_in_tcp_stream(
     }
     .await
     {
-        log::debug!("connection from {source} to {destination_string} errored: {error}");
+        log::warn!("connection from {source} to {destination_string} errored: {error}");
     }
 }
 
