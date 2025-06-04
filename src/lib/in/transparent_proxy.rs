@@ -27,8 +27,9 @@ use crate::{
 
 use super::tunnel_manager::TunnelManager;
 
-const TARGET_TCP_BOOSTABLE_CONNECTIONS: usize = 4;
-const TARGET_TCP_CONNECT_DELAY: Duration = Duration::from_secs(1);
+const TARGET_TCP_CONCURRENT_CONNECTIONS: usize = 128;
+const TARGET_TCP_RATE_LIMIT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const TARGET_TCP_BOOSTABLE_CONNECTIONS: usize = 32;
 
 pub struct Options<'a> {
     pub listen_address: SocketAddr,
@@ -210,8 +211,9 @@ pub async fn up(
                     .entry(destination)
                     .or_insert_with(|| {
                         SemaphoreRateLimiter::new_arc(
+                            TARGET_TCP_CONCURRENT_CONNECTIONS,
                             TARGET_TCP_BOOSTABLE_CONNECTIONS,
-                            TARGET_TCP_CONNECT_DELAY,
+                            TARGET_TCP_RATE_LIMIT_INITIAL_DELAY,
                         )
                     })
                     .clone();
@@ -331,7 +333,7 @@ async fn handle_in_tcp_stream(
         return;
     };
 
-    rate_limiter.acquire().await;
+    let _permit = rate_limiter.acquire().await;
 
     log::info!(
         "connect {source} to {destination_string} via {tunnel}{tagged}...",
