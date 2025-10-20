@@ -1,6 +1,9 @@
+use std::time::Instant;
+
 use tokio::io::AsyncWriteExt as _;
 
 pub async fn copy_bidirectional(
+    label: &str,
     a_b: (
         impl tokio::io::AsyncRead + Send + Unpin,
         impl tokio::io::AsyncWrite + Send + Unpin,
@@ -13,10 +16,17 @@ pub async fn copy_bidirectional(
     let (mut a_read, mut b_write) = a_b;
     let (mut b_read, mut a_write) = b_a;
 
+    let started_at = Instant::now();
+
+    let mut a_to_b_bytes = 0;
+    let mut b_to_a_bytes = 0;
+
     let a_to_b_task = async {
-        tokio::io::copy(&mut a_read, &mut b_write).await?;
+        let result = tokio::io::copy(&mut a_read, &mut b_write).await;
 
         let _ = b_write.shutdown().await;
+
+        a_to_b_bytes = result?;
 
         tokio::io::Result::Ok(())
     };
@@ -26,16 +36,16 @@ pub async fn copy_bidirectional(
 
         let _ = a_write.shutdown().await;
 
-        result?;
+        b_to_a_bytes = result?;
 
         tokio::io::Result::Ok(())
     };
 
     let result = tokio::try_join!(a_to_b_task, b_to_a_task);
 
-    // shutdown might not have been called if there's an error in the other task.
-    let _ = a_write.shutdown().await;
-    let _ = b_write.shutdown().await;
+    let elapsed = started_at.elapsed();
+
+    log::info!("[{label}] copy bidirectional took {elapsed:?}, {a_to_b_bytes} / {b_to_a_bytes}");
 
     result?;
 

@@ -82,7 +82,7 @@ pub struct InTunnelingConfig {
 
 #[derive(serde::Deserialize)]
 pub struct InTunnelingHttp2Config {
-    #[serde(default = "true_default")]
+    #[serde(default = "constant_true")]
     pub enabled: bool,
     #[serde(default = "tunneling_http2_connections_default")]
     pub connections: usize,
@@ -99,20 +99,11 @@ impl Default for InTunnelingHttp2Config {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
 pub struct InTunnelingQuicConfig {
-    #[serde(default = "true_default")]
     pub enabled: bool,
     pub priority: Option<i64>,
-}
-
-impl Default for InTunnelingQuicConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            priority: None,
-        }
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -193,6 +184,6 @@ fn in_routing_rules_default() -> Vec<InRuleConfig> {
     })]
 }
 
-fn true_default() -> bool {
+fn constant_true() -> bool {
     true
 }

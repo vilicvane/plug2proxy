@@ -21,16 +21,13 @@ pub fn get_any_port_address(ip: &IpAddr) -> SocketAddr {
 }
 
 pub fn parse_ip_net(ip_net: &str) -> anyhow::Result<ipnet::IpNet> {
-    ip_net
-        .parse()
-        .or_else(|_| {
-            let ip = ip_net.parse::<IpAddr>()?;
-            let prefix_length = match ip {
-                IpAddr::V4(_) => 32,
-                IpAddr::V6(_) => 128,
-            };
+    ip_net.parse().or_else(|_| {
+        let ip = ip_net.parse::<IpAddr>()?;
+        let prefix_length = match ip {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
 
-            anyhow::Ok(ipnet::IpNet::new(ip, prefix_length)?)
-        })
-        .map_err(Into::into)
+        anyhow::Ok(ipnet::IpNet::new(ip, prefix_length)?)
+    })
 }

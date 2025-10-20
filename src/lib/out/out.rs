@@ -177,7 +177,7 @@ async fn handle_tcp_stream(
     tunnel_read_stream: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     tunnel_write_stream: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
 ) -> anyhow::Result<()> {
-    let address = if let Some(destination_name) = destination_name {
+    let address = if let Some(destination_name) = &destination_name {
         tokio::net::lookup_host(format!("{destination_name}:{}", destination_address.port()))
             .await?
             .next()
@@ -189,6 +189,7 @@ async fn handle_tcp_stream(
     let (read_stream, write_stream) = output.connect(address).await?;
 
     copy_bidirectional(
+        &get_destination_string(address, &destination_name),
         (tunnel_read_stream, write_stream),
         (read_stream, tunnel_write_stream),
     )

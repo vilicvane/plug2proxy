@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::future::try_join_all;
 use itertools::Itertools;
@@ -21,15 +21,10 @@ use crate::{
     utils::{
         io::copy_bidirectional,
         net::socket::{get_socket_original_destination, IpFamily},
-        semaphore_rate_limiter::{SemaphoreRateLimiter, SemaphoreRateLimiterArc},
     },
 };
 
 use super::tunnel_manager::TunnelManager;
-
-const TARGET_TCP_CONCURRENT_CONNECTIONS: usize = 128;
-const TARGET_TCP_RATE_LIMIT_INITIAL_DELAY: Duration = Duration::from_millis(100);
-const TARGET_TCP_BOOSTABLE_CONNECTIONS: usize = 32;
 
 pub struct Options<'a> {
     pub listen_address: SocketAddr,
@@ -193,8 +188,6 @@ pub async fn up(
                 socket.listen(64)?
             };
 
-            let mut rate_limiter_map = HashMap::new();
-
             while let Ok((mut stream, source)) = tcp_listener.accept().await {
                 let destination = get_socket_original_destination(&stream, IpFamily::V4)
                     .unwrap_or_else(|_| stream.local_addr().unwrap());
@@ -207,17 +200,6 @@ pub async fn up(
                     continue;
                 };
 
-                let rate_limiter = rate_limiter_map
-                    .entry(destination)
-                    .or_insert_with(|| {
-                        SemaphoreRateLimiter::new_arc(
-                            TARGET_TCP_CONCURRENT_CONNECTIONS,
-                            TARGET_TCP_BOOSTABLE_CONNECTIONS,
-                            TARGET_TCP_RATE_LIMIT_INITIAL_DELAY,
-                        )
-                    })
-                    .clone();
-
                 tokio::spawn(handle_in_tcp_stream(
                     stream,
                     source,
@@ -225,7 +207,6 @@ pub async fn up(
                     name,
                     labels_groups,
                     tunnel_manager.clone(),
-                    rate_limiter,
                 ));
             }
 
@@ -313,7 +294,6 @@ async fn handle_in_tcp_stream(
     name: Option<String>,
     labels_groups: Vec<Vec<(Label, Option<String>)>>,
     tunnel_manager: Arc<TunnelManager>,
-    rate_limiter: SemaphoreRateLimiterArc,
 ) {
     let destination_string = get_destination_string(destination, &name);
 
@@ -333,8 +313,6 @@ async fn handle_in_tcp_stream(
         return;
     };
 
-    let _permit = rate_limiter.acquire().await;
-
     log::info!(
         "connect {source} to {destination_string} via {tunnel}{tagged}...",
         tagged = tag
@@ -342,23 +320,28 @@ async fn handle_in_tcp_stream(
             .map_or_else(|| "".to_owned(), |tag| format!(" ({tag})"))
     );
 
-    if let Err(error) = async move {
-        let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =
-            tunnel.connect(destination, name, tag).await?;
+    if let Err(error) = {
+        let destination_string = destination_string.clone();
 
-        let (mut read_stream, mut write_stream) = stream.into_split();
+        async move {
+            let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =
+                tunnel.connect(destination, name, tag).await?;
 
-        let copy_result = copy_bidirectional(
-            (&mut read_stream, &mut tunnel_write_stream),
-            (&mut tunnel_read_stream, &mut write_stream),
-        )
-        .await;
+            let (mut read_stream, mut write_stream) = stream.into_split();
 
-        stream_closed_sender.send(()).ok();
+            let copy_result = copy_bidirectional(
+                &destination_string,
+                (&mut read_stream, &mut tunnel_write_stream),
+                (&mut tunnel_read_stream, &mut write_stream),
+            )
+            .await;
 
-        copy_result?;
+            stream_closed_sender.send(()).ok();
 
-        anyhow::Ok(())
+            copy_result?;
+
+            anyhow::Ok(())
+        }
     }
     .await
     {
