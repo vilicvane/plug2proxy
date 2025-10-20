@@ -2,16 +2,12 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::future::try_join_all;
 use itertools::Itertools;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
-    r#in::{
-        dns_resolver::convert_to_socket_addresses,
-        fake_ip_dns::FakeIpResolver,
-        udp_forwarder::{UdpForwarder, UDP_BUFFER_SIZE},
-    },
+    r#in::{dns_resolver::convert_to_socket_addresses, fake_ip_dns::FakeIpResolver},
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router, rule::Label},
     tunnel::{
         http2::{Http2InTunnelConfig, Http2InTunnelProvider},
@@ -185,29 +181,45 @@ pub async fn up(
 
                 socket.bind(listen_address)?;
 
-                socket.listen(64)?
+                socket.listen(1024)?
             };
 
             while let Ok((mut stream, source)) = tcp_listener.accept().await {
                 let destination = get_socket_original_destination(&stream, IpFamily::V4)
                     .unwrap_or_else(|_| stream.local_addr().unwrap());
 
-                let (destination, name, labels_groups) =
-                    resolve_destination(destination, &fake_ip_resolver, &geolite2, &router);
+                let fake_ip_resolver = fake_ip_resolver.clone();
+                let geolite2 = geolite2.clone();
+                let router = router.clone();
+                let tunnel_manager = tunnel_manager.clone();
 
-                let Some(destination) = destination else {
-                    tokio::spawn(async move { stream.shutdown().await });
-                    continue;
-                };
+                tokio::spawn(async move {
+                    let (resolved_destination, name, labels_groups, sniff_buffer) =
+                        resolve_destination(
+                            destination,
+                            &fake_ip_resolver,
+                            &mut stream,
+                            &geolite2,
+                            &router,
+                        )
+                        .await;
 
-                tokio::spawn(handle_in_tcp_stream(
-                    stream,
-                    source,
-                    destination,
-                    name,
-                    labels_groups,
-                    tunnel_manager.clone(),
-                ));
+                    let Some(resolved_destination) = resolved_destination else {
+                        let _ = stream.shutdown().await;
+                        return;
+                    };
+
+                    handle_in_tcp_stream(
+                        stream,
+                        sniff_buffer,
+                        source,
+                        resolved_destination,
+                        name,
+                        labels_groups,
+                        tunnel_manager,
+                    )
+                    .await;
+                });
             }
 
             #[allow(unreachable_code)]
@@ -215,80 +227,104 @@ pub async fn up(
         }
     };
 
-    let listen_udp_task = async move {
-        let udp_forwarder = UdpForwarder::new(listen_address, traffic_mark)?;
-
-        let mut buffer = [0u8; UDP_BUFFER_SIZE];
-
-        while let Ok((length, source, original_destination)) =
-            udp_forwarder.receive(&mut buffer).await
-        {
-            let real_destination = udp_forwarder
-                .get_associated_destination(&source, &original_destination)
-                .await
-                .or_else(|| {
-                    let (real_destination, name, _) = resolve_destination(
-                        original_destination,
-                        &fake_ip_resolver,
-                        &geolite2,
-                        &router,
-                    );
-
-                    real_destination.inspect(|&real_destination| {
-                        let destination_string = get_destination_string(real_destination, &name);
-
-                        log::info!("redirect datagrams from {source} to {destination_string}...");
-                    })
-                });
-
-            if let Some(real_destination) = real_destination {
-                udp_forwarder
-                    .send(
-                        source,
-                        original_destination,
-                        real_destination,
-                        &buffer[..length],
-                    )
-                    .await?;
-            }
-        }
-
-        #[allow(unreachable_code)]
-        anyhow::Ok(())
-    };
-
     log::info!("transparent proxy listening on {listen_address}...");
 
-    tokio::try_join!(tunnel_task, listen_tcp_task, listen_udp_task)?;
+    tokio::try_join!(tunnel_task, listen_tcp_task)?;
 
     Ok(())
 }
 
-fn resolve_destination(
+async fn resolve_destination(
     destination: SocketAddr,
     fake_ip_resolver: &FakeIpResolver,
+    stream: &mut tokio::net::TcpStream,
     geolite2: &GeoLite2,
     router: &Router,
 ) -> (
     Option<SocketAddr>,
     Option<String>,
     Vec<Vec<(Label, Option<String>)>>,
+    Vec<u8>,
 ) {
-    if let Some((real_ip, name)) = fake_ip_resolver.resolve(&destination.ip()) {
-        let real_destination = SocketAddr::new(real_ip, destination.port());
+    let mut sniff_buffer = Vec::new();
 
-        let region_codes = geolite2.lookup(real_ip);
+    let Some((real_ip, mut name)) = fake_ip_resolver.resolve(&destination.ip()) else {
+        return (None, None, Vec::new(), sniff_buffer);
+    };
 
-        let labels_groups = router.r#match(real_destination, &name, &region_codes);
+    if name.is_none() {
+        const READ_BUFFER_SIZE: usize = 4096;
 
-        (Some(real_destination), name, labels_groups)
-    } else {
-        (None, None, Vec::new())
+        let mut read_buffer = [0; READ_BUFFER_SIZE];
+
+        loop {
+            match stream.read(&mut read_buffer).await {
+                Ok(read_length) => {
+                    sniff_buffer.extend_from_slice(&read_buffer[..read_length]);
+
+                    match extract_sni_hostname(&sniff_buffer) {
+                        Some(hostname) => {
+                            name = hostname;
+                            break;
+                        }
+                        None => {
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::warn!("connection to {real_ip} errored: {error}");
+                    break;
+                }
+            }
+        }
     }
+
+    let real_destination = SocketAddr::new(real_ip, destination.port());
+
+    let region_codes = geolite2.lookup(real_ip);
+
+    let labels_groups = router.r#match(real_destination, &name, &region_codes);
+
+    (Some(real_destination), name, labels_groups, sniff_buffer)
+}
+
+fn extract_sni_hostname(buffer: &[u8]) -> Option<Option<String>> {
+    let plaintext = match tls_parser::parse_tls_plaintext(buffer) {
+        Ok((_, plaintext)) => plaintext,
+        Err(error) => {
+            if error.is_incomplete() {
+                return None;
+            } else {
+                return Some(None);
+            }
+        }
+    };
+
+    for message in plaintext.msg {
+        if let tls_parser::TlsMessage::Handshake(tls_parser::TlsMessageHandshake::ClientHello(
+            hello,
+        )) = message
+        {
+            let (_, extensions) = tls_parser::parse_tls_client_hello_extensions(hello.ext?).ok()?;
+            for extension in extensions {
+                if let tls_parser::TlsExtension::SNI(names) = extension {
+                    for (sni_type, name_bytes) in names {
+                        if sni_type == tls_parser::SNIType::HostName {
+                            return Some(String::from_utf8(name_bytes.to_vec()).ok());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(None)
 }
 
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
+    sniff_buffer: Vec<u8>,
     source: SocketAddr,
     destination: SocketAddr,
     name: Option<String>,
@@ -328,6 +364,8 @@ async fn handle_in_tcp_stream(
                 tunnel.connect(destination, name, tag).await?;
 
             let (mut read_stream, mut write_stream) = stream.into_split();
+
+            tunnel_write_stream.write_all(&sniff_buffer).await?;
 
             let copy_result = copy_bidirectional(
                 &destination_string,

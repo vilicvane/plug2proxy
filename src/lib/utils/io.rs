@@ -45,7 +45,7 @@ pub async fn copy_bidirectional(
 
     let elapsed = started_at.elapsed();
 
-    log::info!("[{label}] copy bidirectional took {elapsed:?}, {a_to_b_bytes} / {b_to_a_bytes}");
+    log::debug!("[{label}] copy bidirectional took {elapsed:?}, {a_to_b_bytes} / {b_to_a_bytes}");
 
     result?;
 
