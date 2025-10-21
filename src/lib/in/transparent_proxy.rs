@@ -2,7 +2,8 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::future::try_join_all;
 use itertools::Itertools;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use lits::duration;
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     common::get_destination_string,
@@ -257,25 +258,51 @@ async fn resolve_destination(
 
         let mut read_buffer = [0; READ_BUFFER_SIZE];
 
+        const READ_ATTEMPTS_LIMIT: usize = 5;
+        const READ_ATTEMPTS_INTERVAL: Duration = duration!("200ms");
+
+        let mut read_attempts = 0;
+
         loop {
-            match stream.read(&mut read_buffer).await {
+            match stream.try_read(&mut read_buffer) {
                 Ok(read_length) => {
+                    if read_length == 0 {
+                        break;
+                    }
+
                     sniff_buffer.extend_from_slice(&read_buffer[..read_length]);
 
-                    match extract_sni_hostname(&sniff_buffer) {
-                        Some(hostname) => {
-                            name = hostname;
-                            break;
-                        }
-                        None => {
-                            continue;
-                        }
+                    let sniff_buffer_length = sniff_buffer.len();
+
+                    if sniff_buffer_length >= 1 && sniff_buffer[0] != 0x16
+                        || sniff_buffer_length >= 2 && sniff_buffer[1] != 0x03
+                    {
+                        break;
+                    }
+
+                    if let Some(hostname) = extract_sni_hostname(&sniff_buffer) {
+                        name = hostname;
+                        break;
                     }
                 }
                 Err(error) => {
-                    log::warn!("connection to {real_ip} errored: {error}");
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        if read_attempts < READ_ATTEMPTS_LIMIT {
+                            read_attempts += 1;
+                            tokio::time::sleep(READ_ATTEMPTS_INTERVAL).await;
+                            continue;
+                        }
+                    } else {
+                        log::warn!("connection to {real_ip} read errored: {error}");
+                    }
+
                     break;
                 }
+            }
+
+            if let Err(error) = stream.readable().await {
+                log::warn!("connection to {real_ip} errored: {error}");
+                break;
             }
         }
     }
@@ -307,6 +334,7 @@ fn extract_sni_hostname(buffer: &[u8]) -> Option<Option<String>> {
         )) = message
         {
             let (_, extensions) = tls_parser::parse_tls_client_hello_extensions(hello.ext?).ok()?;
+
             for extension in extensions {
                 if let tls_parser::TlsExtension::SNI(names) = extension {
                     for (sni_type, name_bytes) in names {
@@ -365,11 +393,9 @@ async fn handle_in_tcp_stream(
 
             let (mut read_stream, mut write_stream) = stream.into_split();
 
-            tunnel_write_stream.write_all(&sniff_buffer).await?;
-
             let copy_result = copy_bidirectional(
                 &destination_string,
-                (&mut read_stream, &mut tunnel_write_stream),
+                (&mut read_stream, &mut tunnel_write_stream, sniff_buffer),
                 (&mut tunnel_read_stream, &mut write_stream),
             )
             .await;

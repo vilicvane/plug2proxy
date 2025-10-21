@@ -7,13 +7,14 @@ pub async fn copy_bidirectional(
     a_b: (
         impl tokio::io::AsyncRead + Send + Unpin,
         impl tokio::io::AsyncWrite + Send + Unpin,
+        Vec<u8>,
     ),
     b_a: (
         impl tokio::io::AsyncRead + Send + Unpin,
         impl tokio::io::AsyncWrite + Send + Unpin,
     ),
 ) -> Result<(), tokio::io::Error> {
-    let (mut a_read, mut b_write) = a_b;
+    let (mut a_read, mut b_write, a_b_buffer) = a_b;
     let (mut b_read, mut a_write) = b_a;
 
     let started_at = Instant::now();
@@ -22,6 +23,10 @@ pub async fn copy_bidirectional(
     let mut b_to_a_bytes = 0;
 
     let a_to_b_task = async {
+        if !a_b_buffer.is_empty() {
+            b_write.write_all(&a_b_buffer).await?;
+        }
+
         let result = tokio::io::copy(&mut a_read, &mut b_write).await;
 
         let _ = b_write.shutdown().await;

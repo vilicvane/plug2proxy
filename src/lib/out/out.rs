@@ -190,7 +190,7 @@ async fn handle_tcp_stream(
 
     copy_bidirectional(
         &get_destination_string(address, &destination_name),
-        (tunnel_read_stream, write_stream),
+        (tunnel_read_stream, write_stream, Vec::new()),
         (read_stream, tunnel_write_stream),
     )
     .await?;
