@@ -24,6 +24,7 @@ impl InTunnelLike for AnyInTunnelLikeArc {
         destination_address: SocketAddr,
         destination_name: Option<String>,
         tag: Option<String>,
+        sniff_buffer: Option<Vec<u8>>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -32,12 +33,12 @@ impl InTunnelLike for AnyInTunnelLikeArc {
         match self {
             AnyInTunnelLikeArc::InTunnel(tunnel) => {
                 tunnel
-                    .connect(destination_address, destination_name, tag)
+                    .connect(destination_address, destination_name, tag, sniff_buffer)
                     .await
             }
             AnyInTunnelLikeArc::InTunnelLike(tunnel) => {
                 tunnel
-                    .connect(destination_address, destination_name, tag)
+                    .connect(destination_address, destination_name, tag, sniff_buffer)
                     .await
             }
         }

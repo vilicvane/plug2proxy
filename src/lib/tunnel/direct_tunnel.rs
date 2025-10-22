@@ -1,5 +1,7 @@
 use std::{fmt, net::SocketAddr};
 
+use tokio::io::AsyncWriteExt;
+
 use super::InTunnelLike;
 
 pub struct DirectInTunnel {
@@ -19,6 +21,7 @@ impl InTunnelLike for DirectInTunnel {
         destination_address: SocketAddr,
         _destination_name: Option<String>,
         _tag: Option<String>,
+        sniff_buffer: Option<Vec<u8>>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -34,7 +37,11 @@ impl InTunnelLike for DirectInTunnel {
 
         nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &self.traffic_mark)?;
 
-        let stream = socket.connect(destination_address).await?;
+        let mut stream = socket.connect(destination_address).await?;
+
+        if let Some(sniff_buffer) = sniff_buffer {
+            stream.write_all(&sniff_buffer).await?;
+        }
 
         let (read_stream, write_stream) = stream.into_split();
 

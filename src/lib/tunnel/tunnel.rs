@@ -9,6 +9,7 @@ pub trait InTunnelLike: fmt::Display + Send + Sync {
         destination_address: SocketAddr,
         destination_name: Option<String>,
         tag: Option<String>,
+        sniff_buffer: Option<Vec<u8>>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,

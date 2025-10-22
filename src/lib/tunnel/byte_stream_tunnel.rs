@@ -91,6 +91,7 @@ where
         destination_address: SocketAddr,
         destination_name: Option<String>,
         tag: Option<String>,
+        sniff_buffer: Option<Vec<u8>>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -134,6 +135,10 @@ where
         };
 
         write_stream.write_all(&head).await?;
+
+        if let Some(sniff_buffer) = sniff_buffer {
+            write_stream.write_all(&sniff_buffer).await?;
+        }
 
         let (stream_closed_sender, _) = tokio::sync::oneshot::channel();
 

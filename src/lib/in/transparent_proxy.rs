@@ -195,7 +195,7 @@ pub async fn up(
                 let tunnel_manager = tunnel_manager.clone();
 
                 tokio::spawn(async move {
-                    let (resolved_destination, name, labels_groups, sniff_buffer) =
+                    let (resolved_destination, name, labels_groups, sniff_buffer, end) =
                         resolve_destination(
                             destination,
                             &fake_ip_resolver,
@@ -213,6 +213,7 @@ pub async fn up(
                     handle_in_tcp_stream(
                         stream,
                         sniff_buffer,
+                        end,
                         source,
                         resolved_destination,
                         name,
@@ -245,13 +246,15 @@ async fn resolve_destination(
     Option<SocketAddr>,
     Option<String>,
     Vec<Vec<(Label, Option<String>)>>,
-    Vec<u8>,
+    Option<Vec<u8>>,
+    bool,
 ) {
-    let mut sniff_buffer = Vec::new();
-
     let Some((real_ip, mut name)) = fake_ip_resolver.resolve(&destination.ip()) else {
-        return (None, None, Vec::new(), sniff_buffer);
+        return (None, None, Vec::new(), None, false);
     };
+
+    let mut sniff_buffer = Vec::new();
+    let mut end = false;
 
     if name.is_none() {
         const READ_BUFFER_SIZE: usize = 4096;
@@ -259,37 +262,55 @@ async fn resolve_destination(
         let mut read_buffer = [0; READ_BUFFER_SIZE];
 
         const READ_ATTEMPTS_LIMIT: usize = 5;
-        const READ_ATTEMPTS_INTERVAL: Duration = duration!("200ms");
+        const READ_ATTEMPTS_INTERVAL: Duration = duration!("100ms");
 
         let mut read_attempts = 0;
+
+        let mut determined = false;
 
         loop {
             match stream.try_read(&mut read_buffer) {
                 Ok(read_length) => {
                     if read_length == 0 {
+                        end = true;
                         break;
                     }
 
                     sniff_buffer.extend_from_slice(&read_buffer[..read_length]);
 
+                    if determined {
+                        // 已经确定，但是尝试把 buffer 读完。
+                        continue;
+                    }
+
                     let sniff_buffer_length = sniff_buffer.len();
 
+                    #[allow(unused_assignments)]
                     if sniff_buffer_length >= 1 && sniff_buffer[0] != 0x16
                         || sniff_buffer_length >= 2 && sniff_buffer[1] != 0x03
                     {
+                        determined = true;
                         break;
                     }
 
+                    #[allow(unused_assignments)]
                     if let Some(hostname) = extract_sni_hostname(&sniff_buffer) {
                         name = hostname;
+                        determined = true;
                         break;
                     }
                 }
                 Err(error) => {
                     if error.kind() == std::io::ErrorKind::WouldBlock {
+                        if determined {
+                            break;
+                        }
+
                         if read_attempts < READ_ATTEMPTS_LIMIT {
-                            read_attempts += 1;
                             tokio::time::sleep(READ_ATTEMPTS_INTERVAL).await;
+
+                            read_attempts += 1;
+
                             continue;
                         }
                     } else {
@@ -300,10 +321,7 @@ async fn resolve_destination(
                 }
             }
 
-            if let Err(error) = stream.readable().await {
-                log::warn!("connection to {real_ip} errored: {error}");
-                break;
-            }
+            tokio::time::sleep(READ_ATTEMPTS_INTERVAL).await;
         }
     }
 
@@ -313,7 +331,17 @@ async fn resolve_destination(
 
     let labels_groups = router.r#match(real_destination, &name, &region_codes);
 
-    (Some(real_destination), name, labels_groups, sniff_buffer)
+    (
+        Some(real_destination),
+        name,
+        labels_groups,
+        if sniff_buffer.is_empty() {
+            None
+        } else {
+            Some(sniff_buffer)
+        },
+        end,
+    )
 }
 
 fn extract_sni_hostname(buffer: &[u8]) -> Option<Option<String>> {
@@ -352,7 +380,8 @@ fn extract_sni_hostname(buffer: &[u8]) -> Option<Option<String>> {
 
 async fn handle_in_tcp_stream(
     mut stream: tokio::net::TcpStream,
-    sniff_buffer: Vec<u8>,
+    sniff_buffer: Option<Vec<u8>>,
+    end: bool,
     source: SocketAddr,
     destination: SocketAddr,
     name: Option<String>,
@@ -389,13 +418,13 @@ async fn handle_in_tcp_stream(
 
         async move {
             let (mut tunnel_read_stream, mut tunnel_write_stream, stream_closed_sender) =
-                tunnel.connect(destination, name, tag).await?;
+                tunnel.connect(destination, name, tag, sniff_buffer).await?;
 
             let (mut read_stream, mut write_stream) = stream.into_split();
 
             let copy_result = copy_bidirectional(
                 &destination_string,
-                (&mut read_stream, &mut tunnel_write_stream, sniff_buffer),
+                (&mut read_stream, &mut tunnel_write_stream, end),
                 (&mut tunnel_read_stream, &mut write_stream),
             )
             .await;

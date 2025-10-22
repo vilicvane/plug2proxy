@@ -11,7 +11,7 @@ use std::{
 };
 
 use futures::FutureExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     match_server::MatchOutId,
@@ -131,6 +131,7 @@ impl InTunnelLike for Http2InTunnel {
         destination_address: SocketAddr,
         destination_name: Option<String>,
         tag: Option<String>,
+        sniff_buffer: Option<Vec<u8>>,
     ) -> anyhow::Result<(
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
@@ -175,7 +176,11 @@ impl InTunnelLike for Http2InTunnel {
             .send_request(http_request, false)?;
 
         let read_stream = H2RecvStreamAsyncRead::new(response);
-        let write_stream = H2SendStreamAsyncWrite::new(write_stream);
+        let mut write_stream = H2SendStreamAsyncWrite::new(write_stream);
+
+        if let Some(sniff_buffer) = sniff_buffer {
+            write_stream.write_all(&sniff_buffer).await?;
+        }
 
         let active_streams = self.active_streams.clone();
 
