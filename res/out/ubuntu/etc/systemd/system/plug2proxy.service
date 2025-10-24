@@ -6,6 +6,7 @@ User=root
 ExecStart=/usr/sbin/plug2proxy /etc/plug2proxy/config.json --data-dir /etc/plug2proxy
 Restart=always
 RestartSec=5
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target

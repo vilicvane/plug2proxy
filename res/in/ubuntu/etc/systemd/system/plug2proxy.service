@@ -8,6 +8,7 @@ ExecStartPre=nft --file /etc/plug2proxy/nftables.conf
 ExecStopPost=nft flush table ip plug2proxy
 Restart=always
 RestartSec=5
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
