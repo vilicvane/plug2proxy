@@ -42,6 +42,7 @@ pub struct Http2InTunnel {
     active_streams: Arc<AtomicUsize>,
     closed_notify: Arc<tokio::sync::Notify>,
     closed: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 impl Http2InTunnel {
@@ -59,7 +60,7 @@ impl Http2InTunnel {
         let closed_notify = Arc::new(tokio::sync::Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn({
+        let handle = tokio::spawn({
             let active_permit = active_permit.clone();
 
             let closed_notify = closed_notify.clone();
@@ -108,7 +109,14 @@ impl Http2InTunnel {
             active_streams: Arc::new(AtomicUsize::new(0)),
             closed_notify,
             closed,
+            handle,
         }
+    }
+}
+
+impl Drop for Http2InTunnel {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
