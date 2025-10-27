@@ -1,5 +1,6 @@
 [Unit]
 Description=Plug2Proxy
+After=network.target
 
 [Service]
 User=root
