@@ -416,14 +416,14 @@ async fn get_connection_and_subscribe<T: serde::de::DeserializeOwned>(
     channel_name: &str,
     cipher: Option<Arc<aes_gcm::Aes256Gcm>>,
 ) -> anyhow::Result<(
-    redis::aio::MultiplexedConnection,
+    redis::aio::ConnectionManager,
     impl Stream<Item = anyhow::Result<T>>,
 )> {
     let (push_sender, mut push_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let mut connection = redis
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::default().set_push_sender(push_sender),
+        .get_connection_manager_with_config(
+            redis::aio::ConnectionManagerConfig::default().set_push_sender(push_sender),
         )
         .await?;
 
