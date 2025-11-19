@@ -433,19 +433,18 @@ async fn get_connection_and_subscribe<T: serde::de::DeserializeOwned>(
         connection.subscribe(channel_name).await?;
     }
 
-    let subscription_stream = async_stream::stream! {
+    let subscription_stream = async_stream::try_stream!({
         while let Some(push) = push_receiver.recv().await {
             let Some(message) = redis::Msg::from_push_info(push) else {
                 continue;
             };
 
-            let value: T = serde_json::from_slice(
-                decrypt(&cipher, message.get_payload_bytes())?.as_slice(),
-            )?;
+            let value: T =
+                serde_json::from_slice(decrypt(&cipher, message.get_payload_bytes())?.as_slice())?;
 
-            yield Ok(value);
+            yield value;
         }
-    };
+    });
 
     Ok((connection, subscription_stream))
 }
