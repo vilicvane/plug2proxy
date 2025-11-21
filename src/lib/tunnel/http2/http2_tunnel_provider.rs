@@ -17,7 +17,7 @@ use crate::{
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel,
     },
-    utils::stun::probe_external_ip,
+    utils::{net::socket::set_keepalive_options, stun::probe_external_ip},
 };
 
 use super::match_pair::{Http2InData, Http2OutData};
@@ -92,6 +92,9 @@ impl InTunnelProvider for Http2InTunnelProvider {
         )?;
 
         socket.set_nodelay(true)?;
+        socket.set_keepalive(true)?;
+
+        set_keepalive_options(&socket, 60, 10, 5)?;
 
         let fd = socket.as_fd().as_raw_fd();
 

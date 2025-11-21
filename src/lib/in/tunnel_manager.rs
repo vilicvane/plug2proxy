@@ -176,12 +176,8 @@ impl TunnelManager {
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(connections));
 
-        let mut handles = Vec::<tokio::task::JoinHandle<()>>::new();
-
         loop {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
-
-            handles.retain(|handle| !handle.is_finished());
 
             log::info!("accepting {tunnel_name} tunnel...");
 
@@ -209,7 +205,7 @@ impl TunnelManager {
                         );
                     }
 
-                    let handle = tokio::spawn({
+                    tokio::spawn({
                         let tunnel_map = tunnel_map.clone();
                         let label_to_tunnels_map = label_to_tunnels_map.clone();
 
@@ -234,8 +230,6 @@ impl TunnelManager {
                             router.unregister_tunnel(out_id, tunnel_id);
                         }
                     });
-
-                    handles.push(handle);
                 }
                 Ok(None) => {
                     // OUT no longer active.
@@ -246,13 +240,6 @@ impl TunnelManager {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
-        }
-
-        // Abort all unfinished handles to avoid active tunnel to this OUT lives (which could
-        // potentially result in connections exceeding the desired number).
-
-        for handle in handles {
-            handle.abort();
         }
     }
 

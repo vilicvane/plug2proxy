@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, SocketAddr},
-    os::fd::AsFd,
+    os::fd::{AsFd, AsRawFd},
 };
 
 pub enum IpFamily {
@@ -26,4 +26,57 @@ pub fn get_socket_original_destination<TSocket: AsFd>(
             Ok(SocketAddr::new(ip, address.sin6_port.to_be()))
         }
     }
+}
+
+pub fn set_keepalive_options<TSocket: AsFd>(
+    socket: &TSocket,
+    idle: u32,
+    interval: u32,
+    count: u32,
+) -> anyhow::Result<()> {
+    let fd = socket.as_fd().as_raw_fd();
+
+    let idle_result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPIDLE,
+            &idle as *const _ as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+
+    if idle_result != 0 {
+        anyhow::bail!("failed to set TCP_KEEPIDLE: {}", nix::errno::Errno::last());
+    }
+
+    let interval_result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPINTVL,
+            &interval as *const _ as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+
+    if interval_result != 0 {
+        anyhow::bail!("failed to set TCP_KEEPINTVL: {}", nix::errno::Errno::last());
+    }
+
+    let count_result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPCNT,
+            &count as *const _ as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+
+    if count_result != 0 {
+        anyhow::bail!("failed to set TCP_KEEPCNT: {}", nix::errno::Errno::last());
+    }
+
+    Ok(())
 }
