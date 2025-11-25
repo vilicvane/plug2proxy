@@ -2,6 +2,8 @@ use std::{fmt, net::SocketAddr};
 
 use tokio::io::AsyncWriteExt;
 
+use crate::utils::net::socket::set_keepalive_options;
+
 use super::InTunnelLike;
 
 pub struct DirectInTunnel {
@@ -34,6 +36,8 @@ impl InTunnelLike for DirectInTunnel {
 
         socket.set_nodelay(true)?;
         socket.set_keepalive(true)?;
+
+        set_keepalive_options(&socket, 60, 10, 5)?;
 
         nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &self.traffic_mark)?;
 

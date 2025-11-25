@@ -17,7 +17,7 @@ use crate::{
     },
     utils::{
         io::copy_bidirectional,
-        net::socket::{get_socket_original_destination, IpFamily},
+        net::socket::{get_socket_original_destination, set_keepalive_options, IpFamily},
     },
 };
 
@@ -179,6 +179,8 @@ pub async fn up(
                 socket.set_reuseport(true)?;
                 socket.set_nodelay(true)?;
                 socket.set_keepalive(true)?;
+
+                set_keepalive_options(&socket, 60, 10, 5)?;
 
                 socket.bind(listen_address)?;
 

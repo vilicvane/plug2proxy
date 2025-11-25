@@ -1,5 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
+use crate::utils::net::socket::set_keepalive_options;
+
 use super::output::Output;
 
 pub enum LocalIpOrInterface {
@@ -54,6 +56,8 @@ impl Output for LocalOutput {
 
         socket.set_nodelay(true)?;
         socket.set_keepalive(true)?;
+
+        set_keepalive_options(&socket, 60, 10, 5)?;
 
         match &self.ip_or_interface {
             Some(LocalIpOrInterface::Ip(ip)) => {
