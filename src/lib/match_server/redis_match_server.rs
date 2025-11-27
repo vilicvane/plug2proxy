@@ -423,7 +423,9 @@ async fn get_connection_and_subscribe<T: serde::de::DeserializeOwned>(
 
     let mut connection = redis
         .get_connection_manager_with_config(
-            redis::aio::ConnectionManagerConfig::default().set_push_sender(push_sender),
+            redis::aio::ConnectionManagerConfig::default()
+                .set_push_sender(push_sender)
+                .set_automatic_resubscription(),
         )
         .await?;
 
