@@ -196,7 +196,7 @@ impl InTunnelLike for Http2InTunnel {
 
         let (stream_closed_sender, stream_closed_receiver) = tokio::sync::oneshot::channel();
 
-        let active_permit = self.active_permit.clone();
+        let active_permit = Arc::downgrade(&self.active_permit);
 
         let request_sender = self.request_sender.clone();
 
@@ -206,6 +206,10 @@ impl InTunnelLike for Http2InTunnel {
             stream_closed_receiver.await.ok();
 
             let active_streams = active_streams.fetch_sub(1, atomic::Ordering::Relaxed) - 1;
+
+            let Some(active_permit) = active_permit.upgrade() else {
+                return;
+            };
 
             if active_permit.lock().unwrap().is_none() && active_streams == 0 {
                 log::info!("closing inactive tunnel {tunnel_string}.");
