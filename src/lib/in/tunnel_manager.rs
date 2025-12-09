@@ -53,19 +53,6 @@ impl TunnelManager {
                     tunnel_map,
                     label_to_tunnels_map,
                 ))
-
-                // tokio::task::spawn_blocking(move || {
-                //     tokio::runtime::Builder::new_current_thread()
-                //         .enable_all()
-                //         .build()
-                //         .unwrap()
-                //         .block_on(Self::handle_tunnel_provider(
-                //             tunnel_provider,
-                //             router,
-                //             tunnel_map,
-                //             label_to_tunnels_map,
-                //         ));
-                // })
             })
             .collect_vec();
 
@@ -85,9 +72,10 @@ impl TunnelManager {
 
         let label_to_tunnels_map = self.label_to_tunnels_map.lock().await;
 
+        let mut direct_tag = None;
+
         for labels in labels_groups {
-            let mut label_proxy_presence = None;
-            let mut label_any_presence = None;
+            let mut proxy_tag = None;
 
             for (label, tag) in labels {
                 match label {
@@ -96,14 +84,16 @@ impl TunnelManager {
                             return Some((self.direct_tunnel.clone().into(), tag.clone()));
                         }
                         BuiltInLabel::Proxy => {
-                            if label_proxy_presence.is_none() {
-                                label_proxy_presence = Some(tag.clone());
+                            if proxy_tag.is_none() {
+                                proxy_tag = Some(tag.clone());
                             }
                         }
                         BuiltInLabel::Any => {
-                            if label_any_presence.is_none() {
-                                label_any_presence = Some(tag.clone());
+                            if proxy_tag.is_none() {
+                                proxy_tag = Some(tag.clone());
                             }
+
+                            direct_tag = Some(tag.clone());
                         }
                     },
                     _ => {
@@ -122,15 +112,15 @@ impl TunnelManager {
                 .get(&Label::BuiltIn(BuiltInLabel::Proxy))
                 .and_then(|tunnels| select_from_tunnels(tunnels, index));
 
-            if let Some(tag) = label_proxy_presence {
-                return proxy_tunnel.map(|tunnel| (tunnel, tag));
+            if let Some(tag) = proxy_tag {
+                if let Some(tunnel) = proxy_tunnel {
+                    return Some((tunnel, tag));
+                }
             }
+        }
 
-            if let Some(tag) = label_any_presence {
-                return proxy_tunnel
-                    .or_else(|| Some(self.direct_tunnel.clone().into()))
-                    .map(|tunnel| (tunnel, tag));
-            }
+        if let Some(tag) = direct_tag {
+            return Some((self.direct_tunnel.clone().into(), tag));
         }
 
         None
