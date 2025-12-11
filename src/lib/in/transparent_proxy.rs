@@ -8,7 +8,11 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     common::get_destination_string,
     config::MatchServerConfig,
-    r#in::{dns_resolver::convert_to_socket_addresses, fake_ip_dns::FakeIpResolver},
+    r#in::{
+        dns_resolver::convert_to_socket_addresses,
+        fake_ip_dns::FakeIpResolver,
+        udp_forwarder::{UdpForwarder, UDP_BUFFER_SIZE},
+    },
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router, rule::Label},
     tunnel::{
         http2::{Http2InTunnelConfig, Http2InTunnelProvider},
@@ -198,7 +202,7 @@ pub async fn up(
 
                 tokio::spawn(async move {
                     let (resolved_destination, name, labels_groups, sniff_buffer, end) =
-                        resolve_destination(
+                        resolve_tcp_destination(
                             destination,
                             &fake_ip_resolver,
                             &mut stream,
@@ -231,14 +235,56 @@ pub async fn up(
         }
     };
 
+    let listen_udp_task = async move {
+        let udp_forwarder = UdpForwarder::new(listen_address, traffic_mark)?;
+
+        let mut buffer = [0u8; UDP_BUFFER_SIZE];
+
+        while let Ok((length, source, original_destination)) =
+            udp_forwarder.receive(&mut buffer).await
+        {
+            let real_destination = udp_forwarder
+                .get_associated_destination(&source, &original_destination)
+                .await
+                .or_else(|| {
+                    let (real_destination, name, _) = resolve_udp_destination(
+                        original_destination,
+                        &fake_ip_resolver,
+                        &geolite2,
+                        &router,
+                    );
+
+                    real_destination.inspect(|&real_destination| {
+                        let destination_string = get_destination_string(real_destination, &name);
+
+                        log::info!("redirect datagrams from {source} to {destination_string}...");
+                    })
+                });
+
+            if let Some(real_destination) = real_destination {
+                udp_forwarder
+                    .send(
+                        source,
+                        original_destination,
+                        real_destination,
+                        &buffer[..length],
+                    )
+                    .await?;
+            }
+        }
+
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+    };
+
     log::info!("transparent proxy listening on {listen_address}...");
 
-    tokio::try_join!(tunnel_task, listen_tcp_task)?;
+    tokio::try_join!(tunnel_task, listen_tcp_task, listen_udp_task)?;
 
     Ok(())
 }
 
-async fn resolve_destination(
+async fn resolve_tcp_destination(
     destination: SocketAddr,
     fake_ip_resolver: &FakeIpResolver,
     stream: &mut tokio::net::TcpStream,
@@ -344,6 +390,29 @@ async fn resolve_destination(
         },
         end,
     )
+}
+
+fn resolve_udp_destination(
+    destination: SocketAddr,
+    fake_ip_resolver: &FakeIpResolver,
+    geolite2: &GeoLite2,
+    router: &Router,
+) -> (
+    Option<SocketAddr>,
+    Option<String>,
+    Vec<Vec<(Label, Option<String>)>>,
+) {
+    if let Some((real_ip, name)) = fake_ip_resolver.resolve(&destination.ip()) {
+        let real_destination = SocketAddr::new(real_ip, destination.port());
+
+        let region_codes = geolite2.lookup(real_ip);
+
+        let labels_groups = router.r#match(real_destination, &name, &region_codes);
+
+        (Some(real_destination), name, labels_groups)
+    } else {
+        (None, None, Vec::new())
+    }
 }
 
 fn extract_sni_hostname(buffer: &[u8]) -> Option<Option<String>> {
