@@ -196,11 +196,10 @@ impl Association {
             let receive_signal_sender = activity_signal_sender.clone();
 
             async move {
-                loop {
-                    let mut buffer = Vec::with_capacity(UDP_BUFFER_SIZE);
+                let mut buffer = [0u8; UDP_BUFFER_SIZE];
 
-                    let (length, real_destination) =
-                        delegate_socket.recv_buf_from(&mut buffer).await?;
+                loop {
+                    let (length, real_destination) = delegate_socket.recv_from(&mut buffer).await?;
 
                     let _ = receive_signal_sender.send(());
 
