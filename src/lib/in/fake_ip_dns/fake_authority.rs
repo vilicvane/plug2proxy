@@ -199,8 +199,20 @@ impl Authority for FakeAuthority {
                 };
 
                 let real_ip = match upstream_record.data().unwrap() {
-                    RData::A(A(ip)) => IpAddr::V4(*ip),
-                    RData::AAAA(AAAA(ip)) => IpAddr::V6(*ip),
+                    RData::A(A(ip)) => {
+                        if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                            return Ok(ForwardLookup(lookup));
+                        }
+
+                        IpAddr::V4(*ip)
+                    }
+                    RData::AAAA(AAAA(ip)) => {
+                        if ip.is_loopback() {
+                            return Ok(ForwardLookup(lookup));
+                        }
+
+                        IpAddr::V6(*ip)
+                    }
                     _ => return Ok(ForwardLookup(lookup)),
                 };
 
@@ -248,14 +260,26 @@ impl Authority for FakeAuthority {
                     let real_ip = match key {
                         SvcParamKey::Ipv4Hint => match value {
                             SvcParamValue::Ipv4Hint(IpHint(items)) => match items.first() {
-                                Some(A(ip)) => IpAddr::V4(*ip),
+                                Some(A(ip)) => {
+                                    if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                                        return Ok(ForwardLookup(lookup));
+                                    }
+
+                                    IpAddr::V4(*ip)
+                                }
                                 _ => return Ok(ForwardLookup(lookup)),
                             },
                             _ => return Ok(ForwardLookup(lookup)),
                         },
                         SvcParamKey::Ipv6Hint => match value {
                             SvcParamValue::Ipv6Hint(IpHint(items)) => match items.first() {
-                                Some(AAAA(ip)) => IpAddr::V6(*ip),
+                                Some(AAAA(ip)) => {
+                                    if ip.is_loopback() {
+                                        return Ok(ForwardLookup(lookup));
+                                    }
+
+                                    IpAddr::V6(*ip)
+                                }
                                 _ => return Ok(ForwardLookup(lookup)),
                             },
                             _ => return Ok(ForwardLookup(lookup)),
