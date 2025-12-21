@@ -200,7 +200,7 @@ impl Authority for FakeAuthority {
 
                 let real_ip = match upstream_record.data().unwrap() {
                     RData::A(A(ip)) => {
-                        if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                        if ip.is_private() || ip.is_loopback() {
                             return Ok(ForwardLookup(lookup));
                         }
 
@@ -261,7 +261,7 @@ impl Authority for FakeAuthority {
                         SvcParamKey::Ipv4Hint => match value {
                             SvcParamValue::Ipv4Hint(IpHint(items)) => match items.first() {
                                 Some(A(ip)) => {
-                                    if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                                    if ip.is_private() || ip.is_loopback() {
                                         return Ok(ForwardLookup(lookup));
                                     }
 
