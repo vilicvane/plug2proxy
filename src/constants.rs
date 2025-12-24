@@ -42,7 +42,19 @@ pub fn tunneling_http2_connections_default() -> usize {
 }
 
 pub fn tunneling_http2_priority_default() -> i64 {
-    0
+    10
+}
+
+pub fn tunneling_plug_http2_listen_address_default() -> SocketAddr {
+    "0.0.0.0:8443".parse().unwrap()
+}
+
+pub fn tunneling_plug_http2_connections_default() -> usize {
+    3
+}
+
+pub fn tunneling_plug_http2_priority_default() -> i64 {
+    100
 }
 
 pub fn tunneling_quic_priority_default() -> i64 {

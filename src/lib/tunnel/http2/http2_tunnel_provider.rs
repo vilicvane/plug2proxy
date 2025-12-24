@@ -1,14 +1,17 @@
 use std::{
     net::SocketAddr,
     os::fd::{AsFd as _, AsRawFd as _},
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
+use itertools::Itertools;
+
 use crate::{
     match_server::{
-        AnyInMatchServer, InMatchServer as _, MatchIn, MatchOut, MatchOutId, OutMatchServer,
-        OutMatchServerTrait as _,
+        AnyInMatchServer, InMatchServer as _, MatchIn, MatchOut, MatchOutId, MatchPair,
+        OutMatchServer, OutMatchServerTrait as _,
     },
     route::config::OutRuleConfig,
     tunnel::{
@@ -19,8 +22,6 @@ use crate::{
     },
     utils::{net::socket::set_keepalive_options, stun::probe_external_ip},
 };
-
-use super::match_pair::{Http2InData, Http2OutData};
 
 const TUNNEL_NAME: &str = "http2";
 
@@ -92,9 +93,8 @@ impl InTunnelProvider for Http2InTunnelProvider {
         )?;
 
         socket.set_nodelay(true)?;
-        socket.set_keepalive(true)?;
 
-        set_keepalive_options(&socket, 60, 10, 5)?;
+        set_keepalive_options(&socket, 5, 5, 3)?;
 
         let fd = socket.as_fd().as_raw_fd();
 
@@ -128,6 +128,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
             .unwrap_or(tunnel_priority.unwrap_or(self.config.priority_default));
 
         let tunnel = Http2InTunnel::new(
+            TUNNEL_NAME,
             tunnel_id,
             id,
             tunnel_labels,
@@ -152,7 +153,7 @@ pub struct Http2OutTunnelConfig {
 
 pub struct Http2OutTunnelProvider {
     match_server: Arc<OutMatchServer>,
-    server_config: Arc<tokio_rustls::rustls::ServerConfig>,
+    tls_server_config: Arc<tokio_rustls::rustls::ServerConfig>,
     cert: String,
     key: String,
     config: Http2OutTunnelConfig,
@@ -165,7 +166,7 @@ impl Http2OutTunnelProvider {
 
         Self {
             match_server,
-            server_config: Arc::new(server_config),
+            tls_server_config: Arc::new(server_config),
             cert,
             key,
             config,
@@ -204,9 +205,11 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
 
         stream.set_nodelay(true)?;
 
+        set_keepalive_options(&stream, 5, 5, 3)?;
+
         let fd = stream.as_fd().as_raw_fd();
 
-        let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.server_config.clone());
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.tls_server_config.clone());
 
         let stream = tls_acceptor.accept(stream).await?;
 
@@ -216,10 +219,47 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
             .handshake(stream)
             .await?;
 
-        let tunnel = Http2OutTunnel::new(tunnel_id, connection, fd);
+        let tunnel = Http2OutTunnel::new(TUNNEL_NAME, tunnel_id, connection, fd);
 
         log::info!("tunnel {tunnel} established.");
 
         return Ok(Box::new(tunnel));
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Http2InData {}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Http2OutData {
+    pub address: SocketAddr,
+    pub cert: String,
+    pub key: String,
+}
+
+impl MatchPair<Http2InData, Http2OutData> for (Http2InData, Http2OutData) {
+    fn get_match_name() -> &'static str {
+        "http2"
+    }
+
+    fn get_redis_out_pattern() -> &'static str {
+        "http2:out:*"
+    }
+
+    fn get_redis_out_key(out_id: &MatchOutId) -> String {
+        format!("http2:out:{}", out_id)
+    }
+
+    fn get_out_id_from_redis_out_key(out_key: &str) -> anyhow::Result<MatchOutId> {
+        out_key
+            .split(":")
+            .collect_vec()
+            .last()
+            .map(|out_id| MatchOutId::from_str(out_id))
+            .unwrap()
+    }
+
+    fn get_redis_in_announcement_channel_name(out_id: &MatchOutId) -> String {
+        format!("http2:in:out:{}", out_id)
     }
 }

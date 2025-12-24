@@ -16,7 +16,10 @@ use crate::{
         rule::Label,
     },
     tunnel::{
-        http2::{Http2OutTunnelConfig, Http2OutTunnelProvider},
+        http2::{
+            Http2OutTunnelConfig, Http2OutTunnelProvider, PlugHttp2OutTunnelConfig,
+            PlugHttp2OutTunnelProvider,
+        },
         quic::{QuicOutTunnelConfig, QuicOutTunnelProvider},
         OutTunnel, OutTunnelProvider,
     },
@@ -62,6 +65,14 @@ pub async fn up(
             match_server.clone(),
             Http2OutTunnelConfig {
                 stun_server_addresses: stun_server_addresses.clone(),
+                priority: tcp_priority,
+                routing_priority,
+                routing_rules: routing_rules.clone(),
+            },
+        )),
+        Box::new(PlugHttp2OutTunnelProvider::new(
+            match_server.clone(),
+            PlugHttp2OutTunnelConfig {
                 priority: tcp_priority,
                 routing_priority,
                 routing_rules: routing_rules.clone(),

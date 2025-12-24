@@ -15,7 +15,10 @@ use crate::{
     },
     route::{config::InRuleConfig, geolite2::GeoLite2, router::Router, rule::Label},
     tunnel::{
-        http2::{Http2InTunnelConfig, Http2InTunnelProvider},
+        http2::{
+            Http2InTunnelConfig, Http2InTunnelProvider, PlugHttp2InTunnelConfig,
+            PlugHttp2InTunnelProvider,
+        },
         quic::{QuicInTunnelConfig, QuicInTunnelProvider},
         InTunnelLike as _, InTunnelProvider,
     },
@@ -39,6 +42,12 @@ pub struct Options<'a> {
     pub tunneling_http2_connections: usize,
     pub tunneling_http2_priority: Option<i64>,
     pub tunneling_http2_priority_default: i64,
+    pub tunneling_plug_http2_enabled: bool,
+    pub tunneling_plug_http2_listen_address: SocketAddr,
+    pub tunneling_plug_http2_external_port: Option<u16>,
+    pub tunneling_plug_http2_connections: usize,
+    pub tunneling_plug_http2_priority: Option<i64>,
+    pub tunneling_plug_http2_priority_default: i64,
     pub tunneling_quic_enabled: bool,
     pub tunneling_quic_priority: Option<i64>,
     pub tunneling_quic_priority_default: i64,
@@ -62,6 +71,12 @@ pub async fn up(
         tunneling_http2_connections,
         tunneling_http2_priority,
         tunneling_http2_priority_default,
+        tunneling_plug_http2_enabled,
+        tunneling_plug_http2_listen_address,
+        tunneling_plug_http2_external_port,
+        tunneling_plug_http2_connections,
+        tunneling_plug_http2_priority,
+        tunneling_plug_http2_priority_default,
         tunneling_quic_enabled,
         tunneling_quic_priority,
         tunneling_quic_priority_default,
@@ -99,6 +114,22 @@ pub async fn up(
 
             tunnel_providers.push(Box::new(
                 Http2InTunnelProvider::new(match_server.clone(), config).await?,
+            ));
+        }
+
+        if tunneling_plug_http2_enabled {
+            let config = PlugHttp2InTunnelConfig {
+                listen_address: tunneling_plug_http2_listen_address,
+                external_port: tunneling_plug_http2_external_port,
+                connections: tunneling_plug_http2_connections,
+                priority: tunneling_plug_http2_priority,
+                priority_default: tunneling_plug_http2_priority_default,
+                stun_server_addresses: stun_server_addresses.clone(),
+                traffic_mark,
+            };
+
+            tunnel_providers.push(Box::new(
+                PlugHttp2InTunnelProvider::new(match_server.clone(), config).await?,
             ));
         }
 
@@ -182,7 +213,6 @@ pub async fn up(
 
                 socket.set_reuseport(true)?;
                 socket.set_nodelay(true)?;
-                socket.set_keepalive(true)?;
 
                 set_keepalive_options(&socket, 60, 10, 5)?;
 

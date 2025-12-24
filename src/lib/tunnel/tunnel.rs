@@ -71,4 +71,14 @@ impl TunnelId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
+
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+}
+
+impl From<[u8; 16]> for TunnelId {
+    fn from(value: [u8; 16]) -> Self {
+        Self(uuid::Uuid::from_bytes(value))
+    }
 }

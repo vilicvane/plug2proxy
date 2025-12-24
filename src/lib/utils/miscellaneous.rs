@@ -1,3 +1,5 @@
+use std::{sync::Arc, time::Duration};
+
 #[derive(Clone, derive_more::From, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum OneOrMany<T> {
@@ -12,4 +14,15 @@ impl<T> OneOrMany<T> {
             OneOrMany::Many(v) => v,
         }
     }
+}
+
+pub fn keep_arc_for_duration<T>(value: Arc<T>, duration: Duration)
+where
+    T: Sync + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::time::sleep(duration).await;
+
+        drop(value);
+    });
 }

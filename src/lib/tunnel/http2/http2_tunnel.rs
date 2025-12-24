@@ -25,13 +25,12 @@ use crate::{
 
 const WINDOW_SIZE_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 
-type Http2ServerConnection =
-    h2::server::Connection<tokio_rustls::server::TlsStream<tokio::net::TcpStream>, bytes::Bytes>;
+type Http2ServerConnection<TTlsStream> = h2::server::Connection<TTlsStream, bytes::Bytes>;
 
-type Http2ClientConnection =
-    h2::client::Connection<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, bytes::Bytes>;
+type Http2ClientConnection<TTlsStream> = h2::client::Connection<TTlsStream, bytes::Bytes>;
 
 pub struct Http2InTunnel {
+    tunnel_type: &'static str,
     id: TunnelId,
     out_id: MatchOutId,
     labels: Vec<Label>,
@@ -46,15 +45,19 @@ pub struct Http2InTunnel {
 }
 
 impl Http2InTunnel {
-    pub fn new(
+    pub fn new<TTlsStream>(
+        tunnel_type: &'static str,
         id: TunnelId,
         out_id: MatchOutId,
         labels: Vec<Label>,
         priority: i64,
         request_sender: h2::client::SendRequest<bytes::Bytes>,
-        mut connection: Http2ClientConnection,
+        mut connection: Http2ClientConnection<TTlsStream>,
         fd: i32,
-    ) -> Self {
+    ) -> Self
+    where
+        TTlsStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+    {
         let active_permit = Arc::new(Mutex::new(None));
 
         let closed_notify = Arc::new(tokio::sync::Notify::new());
@@ -99,6 +102,7 @@ impl Http2InTunnel {
         });
 
         Http2InTunnel {
+            tunnel_type,
             id,
             out_id,
             labels,
@@ -125,7 +129,7 @@ impl fmt::Display for Http2InTunnel {
         write!(
             formatter,
             "{}",
-            get_tunnel_string("http2", self.id(), self.labels())
+            get_tunnel_string(self.tunnel_type, self.id(), self.labels())
         )
     }
 }
@@ -180,7 +184,7 @@ impl InTunnelLike for Http2InTunnel {
             .lock()
             .unwrap()
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("http2 connection no longer available."))?
+            .ok_or_else(|| anyhow::anyhow!("{} connection no longer available.", self.tunnel_type))?
             .send_request(http_request, false)?;
 
         let read_stream = H2RecvStreamAsyncRead::new(response);
@@ -261,16 +265,26 @@ impl InTunnel for Http2InTunnel {
     }
 }
 
-pub struct Http2OutTunnel {
+pub struct Http2OutTunnel<TTlsStream> {
+    tunnel_type: &'static str,
     id: TunnelId,
-    connection: Arc<tokio::sync::Mutex<Http2ServerConnection>>,
+    connection: Arc<tokio::sync::Mutex<Http2ServerConnection<TTlsStream>>>,
     closed: AtomicBool,
     fd: i32,
 }
 
-impl Http2OutTunnel {
-    pub fn new(id: TunnelId, connection: Http2ServerConnection, fd: i32) -> Self {
+impl<TTlsStream> Http2OutTunnel<TTlsStream>
+where
+    TTlsStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    pub fn new(
+        tunnel_type: &'static str,
+        id: TunnelId,
+        connection: Http2ServerConnection<TTlsStream>,
+        fd: i32,
+    ) -> Self {
         Http2OutTunnel {
+            tunnel_type,
             id,
             connection: Arc::new(tokio::sync::Mutex::new(connection)),
             closed: AtomicBool::new(false),
@@ -279,14 +293,24 @@ impl Http2OutTunnel {
     }
 }
 
-impl fmt::Display for Http2OutTunnel {
+impl<TTlsStream> fmt::Display for Http2OutTunnel<TTlsStream>
+where
+    TTlsStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", get_tunnel_string("http2", self.id(), &[]))
+        write!(
+            formatter,
+            "{}",
+            get_tunnel_string(self.tunnel_type, self.id(), &[])
+        )
     }
 }
 
 #[async_trait::async_trait]
-impl OutTunnel for Http2OutTunnel {
+impl<TTlsStream> OutTunnel for Http2OutTunnel<TTlsStream>
+where
+    TTlsStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
     fn id(&self) -> TunnelId {
         self.id
     }
@@ -345,7 +369,10 @@ impl OutTunnel for Http2OutTunnel {
                 }
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
                 Poll::Ready(None) => {
-                    return Poll::Ready(Err(anyhow::anyhow!("http2 connection closed.")))
+                    return Poll::Ready(Err(anyhow::anyhow!(
+                        "{} connection closed.",
+                        self.tunnel_type
+                    )))
                 }
                 Poll::Pending => {}
             }
@@ -398,7 +425,10 @@ impl WindowSizeSetter {
         }
     }
 
-    fn set_window_size(&mut self, connection: H2ConnectionMutRef) {
+    fn set_window_size<TTlsStream>(&mut self, connection: H2ConnectionMutRef<TTlsStream>)
+    where
+        TTlsStream: AsyncRead + AsyncWrite + Unpin,
+    {
         let receive_buffer_size =
             nix::sys::socket::getsockopt(&self.fd, nix::sys::socket::sockopt::RcvBuf).unwrap()
                 as u32;
@@ -425,7 +455,7 @@ impl WindowSizeSetter {
     }
 }
 
-enum H2ConnectionMutRef<'a> {
-    Server(&'a mut Http2ServerConnection),
-    Client(&'a mut Http2ClientConnection),
+enum H2ConnectionMutRef<'a, TTlsStream> {
+    Server(&'a mut Http2ServerConnection<TTlsStream>),
+    Client(&'a mut Http2ClientConnection<TTlsStream>),
 }

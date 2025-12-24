@@ -35,7 +35,6 @@ impl InTunnelLike for DirectInTunnel {
         }?;
 
         socket.set_nodelay(true)?;
-        socket.set_keepalive(true)?;
 
         set_keepalive_options(&socket, 60, 10, 5)?;
 

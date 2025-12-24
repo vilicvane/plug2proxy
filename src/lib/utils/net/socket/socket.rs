@@ -36,6 +36,20 @@ pub fn set_keepalive_options<TSocket: AsFd>(
 ) -> anyhow::Result<()> {
     let fd = socket.as_fd().as_raw_fd();
 
+    let keepalive_result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_KEEPALIVE,
+            &1 as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if keepalive_result != 0 {
+        anyhow::bail!("failed to set SO_KEEPALIVE: {}", nix::errno::Errno::last());
+    }
+
     let idle_result = unsafe {
         libc::setsockopt(
             fd,

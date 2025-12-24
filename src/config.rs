@@ -12,6 +12,7 @@ use plug2proxy::{
 use crate::constants::{
     fake_ip_dns_address_default, geolite2_url_default, transparent_proxy_address_default,
     transparent_proxy_traffic_mark_default, tunneling_http2_connections_default,
+    tunneling_plug_http2_connections_default, tunneling_plug_http2_listen_address_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -77,12 +78,14 @@ pub struct InTunnelingConfig {
     #[serde(default)]
     pub http2: InTunnelingHttp2Config,
     #[serde(default)]
+    pub plug_http2: InTunnelingPlugHttp2Config,
+    #[serde(default)]
     pub quic: InTunnelingQuicConfig,
 }
 
 #[derive(serde::Deserialize)]
 pub struct InTunnelingHttp2Config {
-    #[serde(default = "constant_true")]
+    #[serde(default = "constant_false")]
     pub enabled: bool,
     #[serde(default = "tunneling_http2_connections_default")]
     pub connections: usize,
@@ -92,8 +95,32 @@ pub struct InTunnelingHttp2Config {
 impl Default for InTunnelingHttp2Config {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             connections: tunneling_http2_connections_default(),
+            priority: None,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct InTunnelingPlugHttp2Config {
+    #[serde(default = "constant_true")]
+    pub enabled: bool,
+    #[serde(default = "tunneling_plug_http2_listen_address_default")]
+    pub listen_address: SocketAddr,
+    pub external_port: Option<u16>,
+    #[serde(default = "tunneling_plug_http2_connections_default")]
+    pub connections: usize,
+    pub priority: Option<i64>,
+}
+
+impl Default for InTunnelingPlugHttp2Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_address: tunneling_plug_http2_listen_address_default(),
+            external_port: None,
+            connections: tunneling_plug_http2_connections_default(),
             priority: None,
         }
     }
@@ -186,4 +213,8 @@ fn in_routing_rules_default() -> Vec<InRuleConfig> {
 
 fn constant_true() -> bool {
     true
+}
+
+fn constant_false() -> bool {
+    false
 }

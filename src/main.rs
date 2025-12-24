@@ -18,6 +18,8 @@ use plug2proxy::{
 };
 use tokio::fs;
 
+use crate::constants::tunneling_plug_http2_priority_default;
+
 #[derive(clap::Parser)]
 struct Cli {
     config: String,
@@ -99,6 +101,13 @@ async fn main() -> anyhow::Result<()> {
                         tunneling_http2_connections: tunneling.http2.connections,
                         tunneling_http2_priority: tunneling.http2.priority,
                         tunneling_http2_priority_default: tunneling_http2_priority_default(),
+                        tunneling_plug_http2_enabled: tunneling.plug_http2.enabled,
+                        tunneling_plug_http2_listen_address: tunneling.plug_http2.listen_address,
+                        tunneling_plug_http2_external_port: tunneling.plug_http2.external_port,
+                        tunneling_plug_http2_connections: tunneling.plug_http2.connections,
+                        tunneling_plug_http2_priority: tunneling.plug_http2.priority,
+                        tunneling_plug_http2_priority_default:
+                            tunneling_plug_http2_priority_default(),
                         tunneling_quic_enabled: tunneling.quic.enabled,
                         tunneling_quic_priority: tunneling.quic.priority,
                         tunneling_quic_priority_default: tunneling_quic_priority_default(),
