@@ -32,7 +32,8 @@ pub async fn up(
         Some(socket2::Protocol::UDP),
     )?;
 
-    socket.set_reuse_port(true)?;
+    // Be permissive on restart; harmless on Linux and helps avoid rare bind races.
+    socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
 
     socket.bind(&listen_address.into())?;

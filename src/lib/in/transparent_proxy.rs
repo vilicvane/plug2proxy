@@ -211,7 +211,7 @@ pub async fn up(
                     &true,
                 )?;
 
-                socket.set_reuseport(true)?;
+                socket.set_reuseaddr(true)?;
                 socket.set_nodelay(true)?;
 
                 set_keepalive_options(&socket, 60, 10, 5)?;
