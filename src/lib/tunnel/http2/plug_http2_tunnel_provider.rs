@@ -21,7 +21,10 @@ use crate::{
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel, TunnelId,
     },
-    utils::{net::socket::set_keepalive_options, stun::probe_external_ip},
+    utils::{
+        net::{bind_tcp_listener_reuseaddr, socket::set_keepalive_options},
+        stun::probe_external_ip,
+    },
 };
 
 const TUNNEL_NAME: &str = "plug-http2";
@@ -42,8 +45,14 @@ pub struct PlugHttp2InTunnelProvider {
     match_server: Arc<AnyInMatchServer>,
     config: PlugHttp2InTunnelConfig,
     external_port: u16,
-    pending_socket: Arc<tokio::sync::Mutex<Option<(TunnelId, tokio::net::TcpStream)>>>,
-    tls_server_config: Arc<tokio_rustls::rustls::ServerConfig>,
+    pending_stream: Arc<
+        tokio::sync::Mutex<
+            Option<(
+                TunnelId,
+                tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+            )>,
+        >,
+    >,
     cert: String,
     key: String,
     handle: tokio::task::JoinHandle<()>,
@@ -54,23 +63,25 @@ impl PlugHttp2InTunnelProvider {
         match_server: Arc<AnyInMatchServer>,
         config: PlugHttp2InTunnelConfig,
     ) -> anyhow::Result<Self> {
-        let (server_config, cert, key) =
+        let (tls_server_config, cert, key) =
             create_rustls_server_config_and_cert([TLS_NAME.to_owned()]);
+
+        let tls_server_config = Arc::new(tls_server_config);
 
         let external_port = config
             .external_port
             .unwrap_or_else(|| config.listen_address.port());
 
-        let listener = tokio::net::TcpListener::bind(config.listen_address).await?;
+        let listener = bind_tcp_listener_reuseaddr(config.listen_address)?;
 
-        let pending_socket = Arc::new(tokio::sync::Mutex::new(None));
+        let pending_stream = Arc::new(tokio::sync::Mutex::new(None));
 
         let handle = tokio::spawn({
-            let pending_socket = pending_socket.clone();
+            let pending_stream = pending_stream.clone();
 
             async move {
                 loop {
-                    let mut stream = match listener.accept().await {
+                    let stream = match listener.accept().await {
                         Ok((stream, _)) => stream,
                         Err(error) => {
                             log::error!("error accepting plug-http2 socket: {:?}", error);
@@ -79,7 +90,26 @@ impl PlugHttp2InTunnelProvider {
                         }
                     };
 
-                    set_keepalive_options(&stream, 5, 5, 3).ok();
+                    nix::sys::socket::setsockopt(
+                        &stream,
+                        nix::sys::socket::sockopt::Mark,
+                        &config.traffic_mark,
+                    )
+                    .unwrap();
+
+                    stream.set_nodelay(true).unwrap();
+
+                    set_keepalive_options(&stream, 5, 5, 3).unwrap();
+
+                    let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_server_config.clone());
+
+                    let mut stream = match tls_acceptor.accept(stream).await {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            log::error!("error accepting plug-http2 TLS stream: {:?}", error);
+                            continue;
+                        }
+                    };
 
                     let mut tunnel_id_buffer = [0; 16];
 
@@ -102,7 +132,7 @@ impl PlugHttp2InTunnelProvider {
                         }
                     };
 
-                    pending_socket.lock().await.replace((tunnel_id, stream));
+                    pending_stream.lock().await.replace((tunnel_id, stream));
                 }
             }
         });
@@ -111,17 +141,19 @@ impl PlugHttp2InTunnelProvider {
             match_server,
             config,
             external_port,
-            pending_socket,
-            tls_server_config: Arc::new(server_config),
+            pending_stream,
             cert,
             key,
             handle,
         })
     }
 
-    async fn wait_for_pending_socket(&self, tunnel_id: TunnelId) -> tokio::net::TcpStream {
+    async fn wait_for_pending_stream(
+        &self,
+        tunnel_id: TunnelId,
+    ) -> tokio_rustls::server::TlsStream<tokio::net::TcpStream> {
         loop {
-            let Some((pending_tunnel_id, stream)) = self.pending_socket.lock().await.take() else {
+            let Some((pending_tunnel_id, stream)) = self.pending_stream.lock().await.take() else {
                 tokio::time::sleep(duration!("100ms")).await;
                 continue;
             };
@@ -182,25 +214,9 @@ impl InTunnelProvider for PlugHttp2InTunnelProvider {
         };
 
         let stream =
-            tokio::time::timeout(duration!("3s"), self.wait_for_pending_socket(tunnel_id)).await?;
+            tokio::time::timeout(duration!("3s"), self.wait_for_pending_stream(tunnel_id)).await?;
 
-        nix::sys::socket::setsockopt(
-            &stream,
-            nix::sys::socket::sockopt::Mark,
-            &self.config.traffic_mark,
-        )?;
-
-        stream.set_nodelay(true)?;
-
-        let fd = stream.as_fd().as_raw_fd();
-
-        log::info!("plug-http2 tunnel {tunnel_id} underlying TCP connected.");
-
-        let tls_acceptor = tokio_rustls::TlsAcceptor::from(self.tls_server_config.clone());
-
-        let stream = tls_acceptor.accept(stream).await?;
-
-        log::debug!("plug-http2 tunnel {tunnel_id} underlying TLS connection established.");
+        let fd = stream.as_raw_fd();
 
         let (request_sender, h2_connection) = h2::client::Builder::new()
             .initial_connection_window_size(4 * 1024 * 1024)
@@ -278,9 +294,7 @@ impl OutTunnelProvider for PlugHttp2OutTunnelProvider {
 
         let fd = socket.as_fd().as_raw_fd();
 
-        let mut stream = socket.connect(address).await?;
-
-        stream.write_all(tunnel_id.as_bytes()).await?;
+        let stream = socket.connect(address).await?;
 
         let client_config = {
             let mut client_config = create_rustls_client_config(&cert, &key)?;
@@ -292,7 +306,9 @@ impl OutTunnelProvider for PlugHttp2OutTunnelProvider {
 
         let tls_connector = tokio_rustls::TlsConnector::from(client_config);
 
-        let stream = tls_connector.connect(TLS_NAME.try_into()?, stream).await?;
+        let mut stream = tls_connector.connect(TLS_NAME.try_into()?, stream).await?;
+
+        stream.write_all(tunnel_id.as_bytes()).await?;
 
         let connection = h2::server::Builder::new()
             .initial_connection_window_size(4 * 1024 * 1024)

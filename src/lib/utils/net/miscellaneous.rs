@@ -1,5 +1,24 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
+pub fn bind_tcp_listener_reuseaddr(address: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(address),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+
+    // Must be set before bind() (esp. on Windows semantics; harmless on Unix).
+    socket.set_reuse_address(true)?;
+
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(1024)?;
+
+    let listener = tokio::net::TcpListener::from_std(socket.into())?;
+
+    Ok(listener)
+}
+
 pub const ANY_ADDRESS_IPV4: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
 

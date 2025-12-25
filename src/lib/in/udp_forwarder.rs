@@ -39,6 +39,7 @@ impl UdpForwarder {
             Some(socket2::Protocol::UDP),
         )?;
 
+        proxy_socket.set_reuse_address(true)?;
         proxy_socket.set_ip_transparent(true)?;
         proxy_socket.set_nonblocking(true)?;
 

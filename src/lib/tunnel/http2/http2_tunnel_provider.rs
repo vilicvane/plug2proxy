@@ -20,7 +20,10 @@ use crate::{
         tunnel_provider::{InTunnelProvider, OutTunnelProvider},
         InTunnel, OutTunnel,
     },
-    utils::{net::socket::set_keepalive_options, stun::probe_external_ip},
+    utils::{
+        net::{bind_tcp_listener_reuseaddr, socket::set_keepalive_options},
+        stun::probe_external_ip,
+    },
 };
 
 const TUNNEL_NAME: &str = "http2";
@@ -179,7 +182,7 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
     async fn accept(&self) -> anyhow::Result<Box<dyn OutTunnel>> {
         let ip = probe_external_ip(&self.config.stun_server_addresses).await?;
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+        let listener = bind_tcp_listener_reuseaddr("0.0.0.0:0".parse()?)?;
 
         let external_address = SocketAddr::new(ip, listener.local_addr()?.port());
 

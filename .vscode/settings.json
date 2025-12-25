@@ -49,6 +49,7 @@
         "RECVORIGDSTADDR",
         "rediss",
         "reqwest",
+        "reuseaddr",
         "reuseport",
         "rowid",
         "rusqlite",
