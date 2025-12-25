@@ -6,6 +6,14 @@ use std::{
 
 pub const DATA_DIR_DEFAULT: &str = ".plug2proxy";
 
+pub fn constant_true() -> bool {
+    true
+}
+
+pub fn constant_false() -> bool {
+    false
+}
+
 pub fn dns_server_addresses_default() -> Vec<String> {
     vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]
 }
@@ -42,7 +50,7 @@ pub fn tunneling_http2_connections_default() -> usize {
 }
 
 pub fn tunneling_http2_priority_default() -> i64 {
-    10
+    100
 }
 
 pub fn tunneling_plug_http2_listen_address_default() -> SocketAddr {
@@ -58,7 +66,7 @@ pub fn tunneling_plug_http2_priority_default() -> i64 {
 }
 
 pub fn tunneling_quic_priority_default() -> i64 {
-    10
+    101
 }
 
 pub fn fake_ip_dns_db_path_default(data_dir: Option<&str>) -> PathBuf {

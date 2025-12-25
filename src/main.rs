@@ -132,8 +132,9 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             out::up(out::Options {
                 labels: tunneling.label.map_or_else(Vec::new, OneOrMany::into_vec),
-                tcp_priority: tunneling.http2.priority,
-                udp_priority: tunneling.quic.priority,
+                http2_priority: tunneling.http2.priority,
+                plug_http2_priority: tunneling.plug_http2.priority,
+                quic_priority: tunneling.quic.priority,
                 stun_server_addresses: tunneling
                     .stun_server
                     .map_or_else(stun_server_addresses_default, |address| address.into_vec()),

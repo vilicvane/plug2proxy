@@ -10,9 +10,10 @@ use plug2proxy::{
 };
 
 use crate::constants::{
-    fake_ip_dns_address_default, geolite2_url_default, transparent_proxy_address_default,
-    transparent_proxy_traffic_mark_default, tunneling_http2_connections_default,
-    tunneling_plug_http2_connections_default, tunneling_plug_http2_listen_address_default,
+    constant_false, constant_true, fake_ip_dns_address_default, geolite2_url_default,
+    transparent_proxy_address_default, transparent_proxy_traffic_mark_default,
+    tunneling_http2_connections_default, tunneling_plug_http2_connections_default,
+    tunneling_plug_http2_listen_address_default,
 };
 
 #[derive(serde::Deserialize)]
@@ -126,11 +127,21 @@ impl Default for InTunnelingPlugHttp2Config {
     }
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default)]
 pub struct InTunnelingQuicConfig {
+    #[serde(default = "constant_true")]
     pub enabled: bool,
     pub priority: Option<i64>,
+}
+
+impl Default for InTunnelingQuicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            priority: None,
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -183,11 +194,18 @@ pub struct OutTunnelingConfig {
     #[serde(default)]
     pub http2: OutTunnelingHttp2Config,
     #[serde(default)]
+    pub plug_http2: OutTunnelingPlugHttp2Config,
+    #[serde(default)]
     pub quic: OutTunnelingQuicConfig,
 }
 
 #[derive(Default, serde::Deserialize)]
 pub struct OutTunnelingHttp2Config {
+    pub priority: Option<i64>,
+}
+
+#[derive(Default, serde::Deserialize)]
+pub struct OutTunnelingPlugHttp2Config {
     pub priority: Option<i64>,
 }
 
@@ -209,12 +227,4 @@ fn in_routing_rules_default() -> Vec<InRuleConfig> {
         out: OneOrMany::One(Label::BuiltIn(BuiltInLabel::Direct)),
         tag: None,
     })]
-}
-
-fn constant_true() -> bool {
-    true
-}
-
-fn constant_false() -> bool {
-    false
 }
