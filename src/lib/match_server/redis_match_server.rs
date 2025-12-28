@@ -52,6 +52,7 @@ impl InMatchServer for RedisInMatchServer {
         (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
         let match_name = <(TInData, TOutData)>::get_match_name();
+
         let out_pattern = <(TInData, TOutData)>::get_redis_out_pattern();
 
         log::info!("accepting {match_name} OUT...");
@@ -133,6 +134,9 @@ impl InMatchServer for RedisInMatchServer {
         let out_key = <(TInData, TOutData)>::get_redis_out_key(&out_id);
 
         let match_name = <(TInData, TOutData)>::get_match_name();
+
+        log::info!("matching {match_name} OUT {out_id}...");
+
         let in_announcement_channel_name =
             <(TInData, TOutData)>::get_redis_in_announcement_channel_name(&out_id);
 
@@ -270,6 +274,10 @@ impl OutMatchServerTrait for RedisOutMatchServer {
         TOutData: serde::Serialize + Send,
         (TInData, TOutData): MatchPair<TInData, TOutData>,
     {
+        let match_name = <(TInData, TOutData)>::get_match_name();
+
+        log::info!("matching {match_name} IN...");
+
         let channel_name = <(TInData, TOutData)>::get_redis_in_announcement_channel_name(&self.id);
         let out_key = <(TInData, TOutData)>::get_redis_out_key(&self.id);
 
@@ -383,10 +391,7 @@ impl OutMatchServerTrait for RedisOutMatchServer {
                     )
                     .await?;
 
-                log::info!(
-                    "matched IN {} {id} as tunnel {tunnel_id}.",
-                    <(TInData, TOutData)>::get_match_name(),
-                );
+                log::info!("matched {match_name} IN {id} as tunnel {tunnel_id}.");
 
                 return Ok(MatchIn {
                     id,

@@ -99,7 +99,7 @@ impl PlugHttp2InTunnelProvider {
 
                     stream.set_nodelay(true).unwrap();
 
-                    set_keepalive_options(&stream, 5, 5, 3).unwrap();
+                    set_keepalive_options(&stream, 60, 10, 5).unwrap();
 
                     let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_server_config.clone());
 
@@ -290,7 +290,7 @@ impl OutTunnelProvider for PlugHttp2OutTunnelProvider {
 
         socket.set_nodelay(true)?;
 
-        set_keepalive_options(&socket, 5, 5, 3)?;
+        set_keepalive_options(&socket, 60, 10, 5)?;
 
         let fd = socket.as_fd().as_raw_fd();
 

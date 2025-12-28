@@ -223,6 +223,7 @@ impl TunnelManager {
                 }
                 Ok(None) => {
                     // OUT no longer active.
+                    log::info!("{tunnel_name} OUT {out_id} no longer active.");
                     break;
                 }
                 Err(error) => {

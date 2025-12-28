@@ -97,7 +97,7 @@ impl InTunnelProvider for Http2InTunnelProvider {
 
         socket.set_nodelay(true)?;
 
-        set_keepalive_options(&socket, 5, 5, 3)?;
+        set_keepalive_options(&socket, 60, 10, 5)?;
 
         let fd = socket.as_fd().as_raw_fd();
 
@@ -208,7 +208,7 @@ impl OutTunnelProvider for Http2OutTunnelProvider {
 
         stream.set_nodelay(true)?;
 
-        set_keepalive_options(&stream, 5, 5, 3)?;
+        set_keepalive_options(&stream, 60, 10, 5)?;
 
         let fd = stream.as_fd().as_raw_fd();
 
