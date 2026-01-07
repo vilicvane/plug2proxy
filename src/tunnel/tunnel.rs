@@ -1,0 +1,357 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+
+use super::{FramedConnection, QuicConfig, QuicConnection, QuicError};
+
+/// A QUIC tunnel over multiple TCP connections.
+///
+/// This provides QUIC protocol features (encryption, streams, reliability)
+/// over a TCP transport layer (multiple parallel connections).
+pub struct Tunnel {
+    quic: QuicConnection,
+    /// Handle to the driver task
+    driver_handle: tokio::task::JoinHandle<Result<(), QuicError>>,
+}
+
+impl Tunnel {
+    /// Create a client tunnel connecting to a server.
+    pub async fn connect(
+        addr: SocketAddr,
+        server_name: Option<&str>,
+        connection_count: usize,
+    ) -> Result<Self, TunnelError> {
+        let config = QuicConfig::new_client()?;
+        Self::connect_with_config(addr, server_name, connection_count, config.into_inner()).await
+    }
+
+    /// Create a client tunnel with custom QUIC config.
+    pub async fn connect_with_config(
+        addr: SocketAddr,
+        server_name: Option<&str>,
+        connection_count: usize,
+        mut config: quiche::Config,
+    ) -> Result<Self, TunnelError> {
+        // Establish TCP connections
+        let mut tcp_streams = Vec::with_capacity(connection_count);
+        for _ in 0..connection_count {
+            let stream = TcpStream::connect(addr).await?;
+            stream.set_nodelay(true)?;
+            tcp_streams.push(stream);
+        }
+
+        tracing::info!(
+            "established {} TCP connections to {}",
+            connection_count,
+            addr
+        );
+
+        Self::from_tcp_streams_client(tcp_streams, server_name, &mut config).await
+    }
+
+    /// Create a client tunnel from existing TCP streams.
+    pub async fn from_tcp_streams_client(
+        tcp_streams: Vec<TcpStream>,
+        server_name: Option<&str>,
+        config: &mut quiche::Config,
+    ) -> Result<Self, TunnelError> {
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel(256);
+
+        // Split TCP streams and spawn IO tasks
+        spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
+
+        // Create QUIC connection
+        let quic = QuicConnection::connect(server_name, config, outgoing_tx.clone(), incoming_rx)?;
+
+        // Spawn driver task
+        let quic_clone = quic.inner();
+        let outgoing_tx_clone = outgoing_tx;
+        let incoming_rx_clone = Arc::clone(&quic.incoming_rx);
+        let next_stream_id_clone = Arc::clone(&quic.next_stream_id);
+        let send_notify_clone = quic.send_notify();
+        let driver_handle = tokio::spawn(async move {
+            let quic_ref = QuicConnection {
+                inner: quic_clone,
+                outgoing_tx: outgoing_tx_clone,
+                incoming_rx: incoming_rx_clone,
+                next_stream_id: next_stream_id_clone,
+                send_notify: send_notify_clone,
+            };
+            quic_ref.drive().await
+        });
+
+        // Wait for connection to be established
+        let mut attempts = 0;
+        while !quic.is_established().await {
+            if quic.is_closed().await {
+                return Err(TunnelError::ConnectionFailed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            attempts += 1;
+            if attempts > 500 {
+                return Err(TunnelError::ConnectionTimeout);
+            }
+        }
+
+        tracing::info!("QUIC connection established");
+
+        Ok(Self {
+            quic,
+            driver_handle,
+        })
+    }
+
+    /// Create a server tunnel from existing TCP streams.
+    pub async fn from_tcp_streams_server(
+        tcp_streams: Vec<TcpStream>,
+        config: &mut quiche::Config,
+    ) -> Result<Self, TunnelError> {
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel(256);
+
+        // Split TCP streams and spawn IO tasks
+        spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
+
+        // Wait for the first packet to get the client's connection ID
+        let mut rx = incoming_rx;
+        let first_packet = rx.recv().await.ok_or(TunnelError::ConnectionFailed)?;
+
+        // Parse the header to get connection IDs
+        let mut first_packet_buf = first_packet.to_vec();
+        let hdr = quiche::Header::from_slice(&mut first_packet_buf, quiche::MAX_CONN_ID_LEN)?;
+        let scid = hdr.dcid.clone();
+
+        // Recreate the channel with the first packet
+        let (new_incoming_tx, new_incoming_rx) = mpsc::channel(256);
+        new_incoming_tx
+            .send(Bytes::from(first_packet_buf))
+            .await
+            .map_err(|_| TunnelError::ConnectionFailed)?;
+
+        // Forward remaining packets
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                if new_incoming_tx.send(data).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Accept QUIC connection
+        let quic =
+            QuicConnection::accept(&scid, None, config, outgoing_tx.clone(), new_incoming_rx)?;
+
+        // Spawn driver task
+        let quic_clone = quic.inner();
+        let outgoing_tx_clone = outgoing_tx;
+        let incoming_rx_clone = Arc::clone(&quic.incoming_rx);
+        let next_stream_id_clone = Arc::clone(&quic.next_stream_id);
+        let send_notify_clone = quic.send_notify();
+        let driver_handle = tokio::spawn(async move {
+            let quic_ref = QuicConnection {
+                inner: quic_clone,
+                outgoing_tx: outgoing_tx_clone,
+                incoming_rx: incoming_rx_clone,
+                next_stream_id: next_stream_id_clone,
+                send_notify: send_notify_clone,
+            };
+            quic_ref.drive().await
+        });
+
+        // Wait for connection to be established
+        let mut attempts = 0;
+        while !quic.is_established().await {
+            if quic.is_closed().await {
+                return Err(TunnelError::ConnectionFailed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            attempts += 1;
+            if attempts > 500 {
+                return Err(TunnelError::ConnectionTimeout);
+            }
+        }
+
+        tracing::info!("QUIC server connection established");
+
+        Ok(Self {
+            quic,
+            driver_handle,
+        })
+    }
+
+    /// Open a new bidirectional stream.
+    pub async fn open_bi_stream(&self) -> Result<Stream, TunnelError> {
+        let stream_id = self.quic.open_stream().await?;
+        Ok(Stream {
+            id: stream_id,
+            quic: self.quic.inner(),
+            send_notify: self.quic.send_notify(),
+        })
+    }
+
+    /// Accept an incoming stream.
+    pub async fn accept_bi_stream(&self) -> Result<Option<Stream>, TunnelError> {
+        let streams = self.quic.readable_streams().await;
+        if let Some(&stream_id) = streams.first() {
+            Ok(Some(Stream {
+                id: stream_id,
+                quic: self.quic.inner(),
+                send_notify: self.quic.send_notify(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Check if the tunnel is established.
+    pub async fn is_established(&self) -> bool {
+        self.quic.is_established().await
+    }
+
+    /// Check if the tunnel is closed.
+    pub async fn is_closed(&self) -> bool {
+        self.quic.is_closed().await
+    }
+
+    /// Close the tunnel.
+    pub async fn close(&self) -> Result<(), TunnelError> {
+        self.quic.close(true, 0, b"done").await?;
+        Ok(())
+    }
+
+    /// Get access to the underlying QUIC connection.
+    pub fn quic(&self) -> &QuicConnection {
+        &self.quic
+    }
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        self.driver_handle.abort();
+    }
+}
+
+/// A QUIC stream within the tunnel.
+pub struct Stream {
+    id: u64,
+    quic: Arc<Mutex<quiche::Connection>>,
+    send_notify: Arc<tokio::sync::Notify>,
+}
+
+impl Stream {
+    /// Get the stream ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Send data on this stream.
+    pub async fn send(&self, data: &[u8]) -> Result<usize, TunnelError> {
+        let written = {
+            let mut conn = self.quic.lock().await;
+            conn.stream_send(self.id, data, false)?
+        };
+        self.send_notify.notify_one();
+        Ok(written)
+    }
+
+    /// Send data and close the send side.
+    pub async fn send_fin(&self, data: &[u8]) -> Result<usize, TunnelError> {
+        let written = {
+            let mut conn = self.quic.lock().await;
+            conn.stream_send(self.id, data, true)?
+        };
+        self.send_notify.notify_one();
+        Ok(written)
+    }
+
+    /// Receive data from this stream.
+    pub async fn recv(&self, buf: &mut [u8]) -> Result<(usize, bool), TunnelError> {
+        let mut conn = self.quic.lock().await;
+        match conn.stream_recv(self.id, buf) {
+            Ok((len, fin)) => Ok((len, fin)),
+            Err(quiche::Error::Done) => Ok((0, false)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Close this stream.
+    pub async fn close(&self) -> Result<(), TunnelError> {
+        {
+            let mut conn = self.quic.lock().await;
+            conn.stream_send(self.id, b"", true)?;
+        }
+        self.send_notify.notify_one();
+        Ok(())
+    }
+}
+
+/// Spawn tasks to handle TCP IO for the QUIC connection.
+fn spawn_tcp_io_tasks(
+    tcp_streams: Vec<TcpStream>,
+    mut outgoing_rx: mpsc::Receiver<Bytes>,
+    incoming_tx: mpsc::Sender<Bytes>,
+) {
+    let mut senders = Vec::new();
+    let mut receivers = Vec::new();
+
+    for stream in tcp_streams {
+        let conn = FramedConnection::new(stream);
+        let (sender, receiver) = conn.split();
+        senders.push(sender);
+        receivers.push(receiver);
+    }
+
+    // Spawn task to distribute outgoing datagrams across TCP connections
+    tokio::spawn(async move {
+        let mut index = 0;
+        let count = senders.len();
+        while let Some(data) = outgoing_rx.recv().await {
+            let sender = &mut senders[index];
+            index = (index + 1) % count;
+            if let Err(e) = sender.send(data).await {
+                tracing::warn!("TCP send error: {}", e);
+                break;
+            }
+        }
+    });
+
+    // Spawn tasks to receive from each TCP connection
+    for mut receiver in receivers {
+        let tx = incoming_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(Some(data)) => {
+                        if tx.send(data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("TCP recv error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TunnelError {
+    #[error("QUIC error: {0}")]
+    Quic(#[from] QuicError),
+    #[error("quiche error: {0}")]
+    QuicheError(#[from] quiche::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("connection failed")]
+    ConnectionFailed,
+    #[error("connection timeout")]
+    ConnectionTimeout,
+}

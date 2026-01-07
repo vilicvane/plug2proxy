@@ -1,0 +1,24 @@
+[package]
+name = "plug2proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+futures = "0.3"
+quiche = "0.23"
+ring = "0.17"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[lints.clippy]
+collapsible_else_if = "allow"
+collapsible_if = "allow"
+disallowed_macros = "warn"
+module_inception = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
