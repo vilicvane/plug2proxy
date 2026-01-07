@@ -49,15 +49,11 @@ impl HubConnection {
     async fn recv_exact(&self, buf: &mut [u8]) -> Result<(), ConnectionError> {
         let mut offset = 0;
         while offset < buf.len() {
-            let (n, fin) = self.control_stream.recv(&mut buf[offset..]).await?;
+            let (n, fin) = self.control_stream.recv_wait(&mut buf[offset..]).await?;
             if fin && offset + n < buf.len() {
                 return Err(ConnectionError::UnexpectedEof);
             }
             offset += n;
-            if n == 0 && !fin {
-                // No data available yet, wait a bit
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
         }
         Ok(())
     }
@@ -73,15 +69,11 @@ pub struct NodeConnection {
 impl NodeConnection {
     pub async fn accept(tunnel: Arc<Tunnel>) -> Result<Self, ConnectionError> {
         // Wait for control stream from node
-        loop {
-            if let Some(stream) = tunnel.accept_bi_stream().await? {
-                return Ok(Self {
-                    tunnel,
-                    control_stream: stream,
-                });
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let stream = tunnel.accept_bi_stream_wait().await?;
+        Ok(Self {
+            tunnel,
+            control_stream: stream,
+        })
     }
 
     pub fn tunnel(&self) -> &Arc<Tunnel> {
@@ -113,14 +105,11 @@ impl NodeConnection {
     async fn recv_exact(&self, buf: &mut [u8]) -> Result<(), ConnectionError> {
         let mut offset = 0;
         while offset < buf.len() {
-            let (n, fin) = self.control_stream.recv(&mut buf[offset..]).await?;
+            let (n, fin) = self.control_stream.recv_wait(&mut buf[offset..]).await?;
             if fin && offset + n < buf.len() {
                 return Err(ConnectionError::UnexpectedEof);
             }
             offset += n;
-            if n == 0 && !fin {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
         }
         Ok(())
     }

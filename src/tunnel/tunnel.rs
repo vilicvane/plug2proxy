@@ -74,6 +74,7 @@ impl Tunnel {
         let incoming_rx_clone = Arc::clone(&quic.incoming_rx);
         let next_stream_id_clone = Arc::clone(&quic.next_stream_id);
         let send_notify_clone = quic.send_notify();
+        let recv_notify_clone = quic.recv_notify();
         let driver_handle = tokio::spawn(async move {
             let quic_ref = QuicConnection {
                 inner: quic_clone,
@@ -81,6 +82,7 @@ impl Tunnel {
                 incoming_rx: incoming_rx_clone,
                 next_stream_id: next_stream_id_clone,
                 send_notify: send_notify_clone,
+                recv_notify: recv_notify_clone,
             };
             quic_ref.drive().await
         });
@@ -152,6 +154,7 @@ impl Tunnel {
         let incoming_rx_clone = Arc::clone(&quic.incoming_rx);
         let next_stream_id_clone = Arc::clone(&quic.next_stream_id);
         let send_notify_clone = quic.send_notify();
+        let recv_notify_clone = quic.recv_notify();
         let driver_handle = tokio::spawn(async move {
             let quic_ref = QuicConnection {
                 inner: quic_clone,
@@ -159,6 +162,7 @@ impl Tunnel {
                 incoming_rx: incoming_rx_clone,
                 next_stream_id: next_stream_id_clone,
                 send_notify: send_notify_clone,
+                recv_notify: recv_notify_clone,
             };
             quic_ref.drive().await
         });
@@ -191,6 +195,7 @@ impl Tunnel {
             id: stream_id,
             quic: self.quic.inner(),
             send_notify: self.quic.send_notify(),
+            recv_notify: self.quic.recv_notify(),
         })
     }
 
@@ -202,9 +207,46 @@ impl Tunnel {
                 id: stream_id,
                 quic: self.quic.inner(),
                 send_notify: self.quic.send_notify(),
+                recv_notify: self.quic.recv_notify(),
             }))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Wait for and accept the next incoming bidirectional stream.
+    /// This properly waits instead of busy-polling.
+    pub async fn accept_bi_stream_wait(&self) -> Result<Stream, TunnelError> {
+        self.accept_bi_stream_wait_excluding(&std::collections::HashSet::new())
+            .await
+    }
+
+    /// Wait for and accept the next incoming bidirectional stream, excluding specified stream IDs.
+    /// This properly waits instead of busy-polling.
+    pub async fn accept_bi_stream_wait_excluding(
+        &self,
+        exclude: &std::collections::HashSet<u64>,
+    ) -> Result<Stream, TunnelError> {
+        let recv_notify = self.quic.recv_notify();
+        loop {
+            // Register for notification BEFORE checking for streams
+            let notified = recv_notify.notified();
+
+            // Check for readable streams, excluding already-handled ones
+            let streams = self.quic.readable_streams().await;
+            for &stream_id in &streams {
+                if !exclude.contains(&stream_id) {
+                    return Ok(Stream {
+                        id: stream_id,
+                        quic: self.quic.inner(),
+                        send_notify: self.quic.send_notify(),
+                        recv_notify: self.quic.recv_notify(),
+                    });
+                }
+            }
+
+            // All readable streams are already handled, wait for new activity
+            notified.await;
         }
     }
 
@@ -241,6 +283,7 @@ pub struct Stream {
     id: u64,
     quic: Arc<Mutex<quiche::Connection>>,
     send_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Stream {
@@ -250,26 +293,66 @@ impl Stream {
     }
 
     /// Send data on this stream.
+    /// Waits if the stream is blocked due to flow control.
     pub async fn send(&self, data: &[u8]) -> Result<usize, TunnelError> {
-        let written = {
-            let mut conn = self.quic.lock().await;
-            conn.stream_send(self.id, data, false)?
-        };
-        self.send_notify.notify_one();
-        Ok(written)
+        let mut total_written = 0;
+        while total_written < data.len() {
+            // Register for notification BEFORE trying to send
+            let notified = self.recv_notify.notified();
+
+            let result = {
+                let mut conn = self.quic.lock().await;
+                conn.stream_send(self.id, &data[total_written..], false)
+            };
+
+            match result {
+                Ok(written) => {
+                    total_written += written;
+                    self.send_notify.notify_one();
+                }
+                Err(quiche::Error::Done) => {
+                    // Stream is blocked (flow control), wait for any activity
+                    self.send_notify.notify_one(); // Trigger driver to send
+                    notified.await; // Wait for response that might free up buffer
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(total_written)
     }
 
     /// Send data and close the send side.
     pub async fn send_fin(&self, data: &[u8]) -> Result<usize, TunnelError> {
-        let written = {
-            let mut conn = self.quic.lock().await;
-            conn.stream_send(self.id, data, true)?
-        };
-        self.send_notify.notify_one();
-        Ok(written)
+        // First send all the data
+        if !data.is_empty() {
+            self.send(data).await?;
+        }
+
+        // Then send FIN
+        loop {
+            let notified = self.recv_notify.notified();
+
+            let result = {
+                let mut conn = self.quic.lock().await;
+                conn.stream_send(self.id, b"", true)
+            };
+
+            match result {
+                Ok(_) => {
+                    self.send_notify.notify_one();
+                    return Ok(data.len());
+                }
+                Err(quiche::Error::Done) => {
+                    self.send_notify.notify_one();
+                    notified.await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// Receive data from this stream.
+    /// Returns immediately with (0, false) if no data is available.
     pub async fn recv(&self, buf: &mut [u8]) -> Result<(usize, bool), TunnelError> {
         let mut conn = self.quic.lock().await;
         match conn.stream_recv(self.id, buf) {
@@ -279,14 +362,85 @@ impl Stream {
         }
     }
 
-    /// Close this stream.
-    pub async fn close(&self) -> Result<(), TunnelError> {
-        {
-            let mut conn = self.quic.lock().await;
-            conn.stream_send(self.id, b"", true)?;
+    /// Wait for data to be available, then receive.
+    /// This properly waits for QUIC packets to arrive instead of busy-polling.
+    pub async fn recv_wait(&self, buf: &mut [u8]) -> Result<(usize, bool), TunnelError> {
+        loop {
+            // Register for notification BEFORE checking for data
+            // This prevents race condition where data arrives between check and wait
+            let notified = self.recv_notify.notified();
+
+            // Now try to receive
+            let result = {
+                let mut conn = self.quic.lock().await;
+                conn.stream_recv(self.id, buf)
+            };
+
+            match result {
+                Ok((len, fin)) => return Ok((len, fin)),
+                Err(quiche::Error::Done) => {
+                    // No data available, wait for notification
+                    // If data arrived during our check, this returns immediately
+                    notified.await;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
+    }
+
+    /// Close this stream (send FIN on write side).
+    pub async fn close(&self) -> Result<(), TunnelError> {
+        loop {
+            let notified = self.recv_notify.notified();
+
+            let result = {
+                let mut conn = self.quic.lock().await;
+                conn.stream_send(self.id, b"", true)
+            };
+
+            match result {
+                Ok(_) => {
+                    self.send_notify.notify_one();
+                    return Ok(());
+                }
+                Err(quiche::Error::Done) => {
+                    // Stream blocked, wait for activity
+                    self.send_notify.notify_one();
+                    notified.await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// Fully shutdown this stream (both read and write sides).
+    /// This releases the stream slot immediately without waiting for peer FIN.
+    pub async fn shutdown(&self) -> Result<(), TunnelError> {
+        let mut conn = self.quic.lock().await;
+
+        // Shutdown write side (send RESET_STREAM)
+        let _ = conn.stream_shutdown(self.id, quiche::Shutdown::Write, 0);
+
+        // Shutdown read side (send STOP_SENDING)
+        let _ = conn.stream_shutdown(self.id, quiche::Shutdown::Read, 0);
+
         self.send_notify.notify_one();
         Ok(())
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        // Try to shutdown the stream synchronously when dropped
+        // This ensures stream slots are released even if close() wasn't called
+        if let Ok(mut conn) = self.quic.try_lock() {
+            // Send FIN on write side (graceful close)
+            let _ = conn.stream_send(self.id, b"", true);
+            // Also shutdown read side to fully release the stream
+            let _ = conn.stream_shutdown(self.id, quiche::Shutdown::Read, 0);
+        }
+        // Notify driver to send the frames
+        self.send_notify.notify_one();
     }
 }
 

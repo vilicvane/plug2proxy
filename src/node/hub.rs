@@ -204,16 +204,20 @@ impl Hub {
         handled_streams.insert(0);
 
         loop {
-            // Accept data streams
-            match tunnel.accept_bi_stream().await {
-                Ok(Some(stream)) => {
-                    let stream_id = stream.id();
-                    if handled_streams.contains(&stream_id) {
-                        // Already handling this stream
-                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                        continue;
-                    }
+            // Check if tunnel is closed
+            if tunnel.is_closed().await {
+                tracing::info!("IN {} disconnected", in_id);
+                break;
+            }
 
+            // Wait for and accept data streams, excluding already-handled streams
+            // This prevents busy-looping when existing streams have data
+            match tunnel
+                .accept_bi_stream_wait_excluding(&handled_streams)
+                .await
+            {
+                Ok(stream) => {
+                    let stream_id = stream.id();
                     handled_streams.insert(stream_id);
                     tracing::debug!("accepting new data stream {}", stream_id);
 
@@ -224,18 +228,10 @@ impl Hub {
                         }
                     });
                 }
-                Ok(None) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
                 Err(e) => {
                     tracing::error!("IN {} stream accept error: {}", in_id, e);
                     break;
                 }
-            }
-
-            if tunnel.is_closed().await {
-                tracing::info!("IN {} disconnected", in_id);
-                break;
             }
         }
     }
@@ -348,18 +344,14 @@ impl Hub {
             async move {
                 let mut buf = vec![0u8; 8192];
                 loop {
-                    let (n, fin) = stream1.recv(&mut buf).await?;
+                    let (n, fin) = stream1.recv_wait(&mut buf).await?;
                     if n > 0 {
                         tracing::trace!("relay: stream1->stream2 {} bytes", n);
                         stream2.send(&buf[..n]).await?;
                     }
                     if fin {
                         tracing::debug!("relay: stream1 fin");
-                        stream2.close().await?;
                         break;
-                    }
-                    if n == 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     }
                 }
                 Ok::<_, HubError>(())
@@ -372,28 +364,31 @@ impl Hub {
             async move {
                 let mut buf = vec![0u8; 8192];
                 loop {
-                    let (n, fin) = stream2.recv(&mut buf).await?;
+                    let (n, fin) = stream2.recv_wait(&mut buf).await?;
                     if n > 0 {
                         tracing::trace!("relay: stream2->stream1 {} bytes", n);
                         stream1.send(&buf[..n]).await?;
                     }
                     if fin {
                         tracing::debug!("relay: stream2 fin");
-                        stream1.close().await?;
                         break;
-                    }
-                    if n == 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     }
                 }
                 Ok::<_, HubError>(())
             }
         };
 
+        // Wait for either direction to finish
         tokio::select! {
-            r = s1_to_s2 => r?,
-            r = s2_to_s1 => r?,
+            r = s1_to_s2 => { let _ = r; }
+            r = s2_to_s1 => { let _ = r; }
         }
+
+        // Shutdown BOTH streams to immediately release stream credits
+        // Use shutdown (RESET) instead of close (FIN) since we don't need graceful close
+        let _ = stream1.shutdown().await;
+        let _ = stream2.shutdown().await;
+        tracing::debug!("relay_streams: both streams shutdown");
 
         Ok(())
     }
@@ -403,16 +398,12 @@ impl Hub {
         let mut len_buf = [0u8; 4];
         let mut offset = 0;
         while offset < 4 {
-            let (n, fin) = stream.recv(&mut len_buf[offset..]).await?;
+            let (n, fin) = stream.recv_wait(&mut len_buf[offset..]).await?;
             if fin && offset + n < 4 {
                 return Err(HubError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "unexpected end of stream",
                 )));
-            }
-            if n == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                continue;
             }
             offset += n;
         }
@@ -421,16 +412,12 @@ impl Hub {
         let mut msg_buf = vec![0u8; len];
         offset = 0;
         while offset < len {
-            let (n, fin) = stream.recv(&mut msg_buf[offset..]).await?;
+            let (n, fin) = stream.recv_wait(&mut msg_buf[offset..]).await?;
             if fin && offset + n < len {
                 return Err(HubError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "unexpected end of stream",
                 )));
-            }
-            if n == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                continue;
             }
             offset += n;
         }
@@ -452,7 +439,7 @@ impl Hub {
         let stream_to_target = async move {
             let mut buf = vec![0u8; 8192];
             loop {
-                let (n, fin) = stream_recv.recv(&mut buf).await?;
+                let (n, fin) = stream_recv.recv_wait(&mut buf).await?;
                 if n > 0 {
                     tracing::debug!("relay: stream->target {} bytes", n);
                     target_write.write_all(&buf[..n]).await?;
@@ -461,9 +448,6 @@ impl Hub {
                 if fin {
                     tracing::debug!("relay: stream fin");
                     break;
-                }
-                if n == 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }
             Ok::<_, HubError>(())
@@ -475,7 +459,6 @@ impl Hub {
                 let n = target_read.read(&mut buf).await?;
                 if n == 0 {
                     tracing::debug!("relay: target closed");
-                    stream_send.close().await?;
                     break;
                 }
                 tracing::debug!("relay: target->stream {} bytes", n);
@@ -484,10 +467,15 @@ impl Hub {
             Ok::<_, HubError>(())
         };
 
+        // Wait for either direction to finish
         tokio::select! {
-            r = stream_to_target => r?,
-            r = target_to_stream => r?,
+            r = stream_to_target => { let _ = r; }
+            r = target_to_stream => { let _ = r; }
         }
+
+        // Shutdown stream to immediately release stream credits
+        let _ = stream.shutdown().await;
+        tracing::debug!("relay: stream shutdown");
 
         Ok(())
     }

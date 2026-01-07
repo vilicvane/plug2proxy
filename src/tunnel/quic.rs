@@ -21,7 +21,7 @@ impl QuicConfig {
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
-        config.set_max_idle_timeout(30_000); // 30 seconds
+        config.set_max_idle_timeout(60_000); // 60 seconds
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -48,15 +48,15 @@ impl QuicConfig {
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
-        config.set_max_idle_timeout(30_000);
+        config.set_max_idle_timeout(60_000); // 60 seconds
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
         config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
+        config.set_initial_max_streams_bidi(10000);
+        config.set_initial_max_streams_uni(1000);
         config.set_disable_active_migration(true);
 
         Ok(Self { inner: config })
@@ -79,6 +79,8 @@ pub struct QuicConnection {
     pub(crate) next_stream_id: Arc<Mutex<u64>>,
     /// Notify when there's data to send
     pub(crate) send_notify: Arc<Notify>,
+    /// Notify when there's data to receive on streams
+    pub(crate) recv_notify: Arc<Notify>,
 }
 
 impl QuicConnection {
@@ -102,6 +104,7 @@ impl QuicConnection {
             // Client-initiated bidi streams: 0, 4, 8, ...
             next_stream_id: Arc::new(Mutex::new(0)),
             send_notify: Arc::new(Notify::new()),
+            recv_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -125,6 +128,7 @@ impl QuicConnection {
             // Server-initiated bidi streams: 1, 5, 9, ...
             next_stream_id: Arc::new(Mutex::new(1)),
             send_notify: Arc::new(Notify::new()),
+            recv_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -191,7 +195,10 @@ impl QuicConnection {
 
                     buf[..data.len()].copy_from_slice(&data);
                     match conn.recv(&mut buf[..data.len()], recv_info) {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            // Notify that there might be data to read on streams
+                            self.recv_notify.notify_waiters();
+                        }
                         Err(quiche::Error::Done) => {}
                         Err(e) => {
                             tracing::warn!("QUIC recv error: {}", e);
@@ -282,6 +289,11 @@ impl QuicConnection {
     /// Get a clone of the send notify for advanced usage.
     pub fn send_notify(&self) -> Arc<Notify> {
         Arc::clone(&self.send_notify)
+    }
+
+    /// Get a clone of the recv notify for advanced usage.
+    pub fn recv_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.recv_notify)
     }
 }
 

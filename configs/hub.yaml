@@ -6,6 +6,9 @@ key_path: "certs/key.pem"
 connection_count: 4
 
 routes:
+  # Special route for UDP forwarding tunnel streams
+  - pattern: "udp-forward"
+    tag: "us"
   # Using IP-based routing (fake-ip DNS in your network)
   # These IPs are from your DNS resolver's fake-ip range
   - pattern: "198.18.0.1"     # google.com
@@ -16,3 +19,6 @@ routes:
     tag: "us"
   - pattern: "198.19"         # Another fake-ip range
     tag: "cn"
+  # Default catch-all route - forward everything else to US
+  - pattern: ""
+    tag: "us"

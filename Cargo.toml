@@ -16,7 +16,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-fast-socks5 = "0.9"
+socks5-server = "0.10"
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
 
