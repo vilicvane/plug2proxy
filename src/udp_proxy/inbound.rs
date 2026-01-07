@@ -6,11 +6,11 @@ use tokio::net::UdpSocket;
 
 use super::{ChannelReceiver, ChannelSender, Datagram};
 
-/// The inbound side of the DNS transparent proxy.
+/// The inbound side of the full-cone UDP transparent proxy.
 ///
 /// Responsibilities:
-/// - Receive DNS queries from internal clients via UDP.
-/// - Forward queries through the channel to the outbound side.
+/// - Receive UDP datagrams from internal clients.
+/// - Forward datagrams through the channel to the outbound side.
 /// - Receive responses from the channel and send them back to clients.
 pub struct Inbound {
     /// The UDP socket for receiving client queries.
@@ -25,8 +25,8 @@ impl Inbound {
     /// Create a new inbound handler.
     ///
     /// # Arguments
-    /// - `socket`: The UDP socket to receive client queries on.
-    /// - `channel_tx`: Sender to forward queries to the outbound side.
+    /// - `socket`: The UDP socket to receive client datagrams on.
+    /// - `channel_tx`: Sender to forward datagrams to the outbound side.
     /// - `channel_rx`: Receiver to get responses from the outbound side.
     pub fn new(socket: UdpSocket, channel_tx: ChannelSender, channel_rx: ChannelReceiver) -> Self {
         Self {
@@ -55,7 +55,7 @@ impl Inbound {
     /// Run the inbound handler.
     ///
     /// This spawns two tasks:
-    /// - One for receiving queries from clients and forwarding to the channel.
+    /// - One for receiving datagrams from clients and forwarding to the channel.
     /// - One for receiving responses from the channel and sending to clients.
     pub async fn run(self, default_dest: SocketAddr) -> Result<(), InboundError> {
         let socket = self.socket;
@@ -118,11 +118,11 @@ impl Inbound {
                 src = %src,
                 dest = %default_dest,
                 len,
-                "inbound received query"
+                "inbound received datagram"
             );
 
             if let Err(e) = channel_tx.send(datagram).await {
-                tracing::warn!(error = %e, "failed to forward query to channel");
+                tracing::warn!(error = %e, "failed to forward datagram to channel");
             }
         }
     }
@@ -155,7 +155,7 @@ impl Inbound {
 
 /// The receiving half of an inbound handler.
 ///
-/// Receives queries from clients and forwards them to the channel.
+/// Receives datagrams from clients and forwards them to the channel.
 pub struct InboundReceiver {
     socket: Arc<UdpSocket>,
     channel_tx: ChannelSender,
@@ -167,7 +167,7 @@ impl InboundReceiver {
         Inbound::run_recv_loop(self.socket, self.channel_tx, default_dest).await
     }
 
-    /// Receive a single query from a client.
+    /// Receive a single datagram from a client.
     pub async fn recv(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), InboundError> {
         let (len, src) = self.socket.recv_from(buf).await?;
         Ok((len, src))

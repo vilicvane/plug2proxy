@@ -1,2 +1,2 @@
-pub mod dns_proxy;
+pub mod udp_proxy;
 pub mod tunnel;

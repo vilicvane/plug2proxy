@@ -1,39 +1,44 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::net::UdpSocket;
+use tokio::sync::RwLock;
 
 use super::{ChannelReceiver, ChannelSender, Datagram, NatMappingTable};
 
 /// Default cleanup interval for expired NAT mappings.
 const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// The outbound side of the DNS transparent proxy.
+/// The outbound side of the full-cone UDP transparent proxy.
 ///
 /// Responsibilities:
-/// - Receive queries from the channel (sent by inbound).
+/// - Receive datagrams from the channel (sent by inbound).
 /// - Maintain NAT mappings for full-cone semantics.
-/// - Forward queries to actual DNS servers.
+/// - Forward datagrams to external destinations.
 /// - Receive responses and route them back through the channel.
 pub struct Outbound {
-    /// The UDP socket for sending queries to external servers.
+    /// The UDP socket for sending to external servers.
     socket: Arc<UdpSocket>,
-    /// Channel receiver for getting queries from inbound.
+    /// Channel receiver for getting datagrams from inbound.
     channel_rx: ChannelReceiver,
     /// Channel sender for sending responses back to inbound.
     channel_tx: ChannelSender,
     /// NAT mapping table for tracking client addresses.
     mappings: NatMappingTable,
+    /// Reverse index: remote_addr -> internal_addr for response routing.
+    /// This tracks which internal client is communicating with which remote address.
+    reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>,
 }
 
 impl Outbound {
     /// Create a new outbound handler.
     ///
     /// # Arguments
-    /// - `socket`: The UDP socket to send queries from.
-    /// - `channel_rx`: Receiver to get queries from the inbound side.
+    /// - `socket`: The UDP socket to send datagrams from.
+    /// - `channel_rx`: Receiver to get datagrams from the inbound side.
     /// - `channel_tx`: Sender to return responses to the inbound side.
     /// - `mappings`: NAT mapping table for full-cone semantics.
     pub fn new(
@@ -47,6 +52,7 @@ impl Outbound {
             channel_rx,
             channel_tx,
             mappings,
+            reverse_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -83,29 +89,32 @@ impl Outbound {
     /// Run the outbound handler.
     ///
     /// This spawns tasks for:
-    /// - Receiving queries from the channel and forwarding to DNS servers.
-    /// - Receiving responses from DNS servers and routing back to inbound.
+    /// - Receiving datagrams from the channel and forwarding to destinations.
+    /// - Receiving responses from destinations and routing back to inbound.
     /// - Periodically cleaning up expired NAT mappings.
     pub async fn run(self) -> Result<(), OutboundError> {
         let socket = self.socket;
         let channel_rx = self.channel_rx;
         let channel_tx = self.channel_tx;
         let mappings = self.mappings;
+        let reverse_index = self.reverse_index;
 
         let recv_socket = Arc::clone(&socket);
         let send_socket = socket;
         let recv_mappings = mappings.clone();
-        let send_mappings = mappings.clone();
         let cleanup_mappings = mappings;
+        let forward_reverse_index = Arc::clone(&reverse_index);
+        let response_reverse_index = reverse_index;
 
-        // Task: receive from channel, forward to DNS servers
+        // Task: receive from channel, forward to destinations
         let forward_task = tokio::spawn(async move {
-            Self::run_forward_loop(recv_socket, channel_rx, recv_mappings).await
+            Self::run_forward_loop(recv_socket, channel_rx, recv_mappings, forward_reverse_index)
+                .await
         });
 
-        // Task: receive from DNS servers, send back to channel
+        // Task: receive from destinations, send back to channel
         let response_task = tokio::spawn(async move {
-            Self::run_response_loop(send_socket, channel_tx, send_mappings).await
+            Self::run_response_loop(send_socket, channel_tx, response_reverse_index).await
         });
 
         // Task: periodic cleanup of expired mappings
@@ -130,16 +139,18 @@ impl Outbound {
     pub fn split(self) -> (OutboundForwarder, OutboundResponder) {
         let socket = self.socket;
         let mappings = self.mappings;
+        let reverse_index = self.reverse_index;
         (
             OutboundForwarder {
                 socket: Arc::clone(&socket),
                 channel_rx: self.channel_rx,
-                mappings: mappings.clone(),
+                mappings,
+                reverse_index: Arc::clone(&reverse_index),
             },
             OutboundResponder {
                 socket,
                 channel_tx: self.channel_tx,
-                mappings,
+                reverse_index,
             },
         )
     }
@@ -148,6 +159,7 @@ impl Outbound {
         socket: Arc<UdpSocket>,
         mut channel_rx: ChannelReceiver,
         mappings: NatMappingTable,
+        reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>,
     ) -> Result<(), OutboundError> {
         while let Some(datagram) = channel_rx.recv().await {
             // Create or get NAT mapping for this client
@@ -160,19 +172,25 @@ impl Outbound {
                 continue;
             };
 
+            // Update reverse index for response routing
+            {
+                let mut index = reverse_index.write().await;
+                index.insert(datagram.dest, datagram.source);
+            }
+
             tracing::trace!(
                 src = %datagram.source,
                 dest = %datagram.dest,
                 len = datagram.data.len(),
-                "outbound forwarding query"
+                "outbound forwarding datagram"
             );
 
-            // Forward to the actual DNS server
+            // Forward to the destination
             if let Err(e) = socket.send_to(&datagram.data, datagram.dest).await {
                 tracing::warn!(
                     dest = %datagram.dest,
                     error = %e,
-                    "failed to forward query to DNS server"
+                    "failed to forward datagram"
                 );
             }
         }
@@ -183,44 +201,26 @@ impl Outbound {
     async fn run_response_loop(
         socket: Arc<UdpSocket>,
         channel_tx: ChannelSender,
-        mappings: NatMappingTable,
+        reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>,
     ) -> Result<(), OutboundError> {
         let mut buf = vec![0u8; 65535];
 
         loop {
             let (len, src) = socket.recv_from(&mut buf).await?;
 
-            // In full-cone NAT, we need to determine which client this response is for.
-            // For DNS, we typically use a simpler approach: the DNS transaction ID in
-            // the payload. However, for a generic full-cone implementation, we'd need
-            // to track by (external_port, dest_addr) or just external_port.
-            //
-            // For simplicity here, we assume responses come from the same server we
-            // sent to, so we find the mapping by looking at recent mappings that sent
-            // to this server.
-            //
-            // A more complete implementation would parse the DNS transaction ID.
+            // Look up which internal client this response is for using the reverse index.
+            // In full-cone NAT semantics, we route based on who was communicating with this remote.
+            let internal_addr = {
+                let index = reverse_index.read().await;
+                index.get(&src).copied()
+            };
 
-            // For now, find mappings that have this server as original_dest
-            // This is a simplified approach - a full implementation would need
-            // better correlation (e.g., DNS transaction ID tracking)
-
-            // Since we're doing full-cone, we need to find the client.
-            // Let's iterate through mappings to find one that matches.
-            // This is O(n) but mapping tables are typically small for DNS.
-
-            let mapping = find_mapping_for_response(&mappings, src).await;
-
-            if let Some(mapping) = mapping {
-                let response = Datagram::new(
-                    src,
-                    mapping.internal_addr,
-                    Bytes::copy_from_slice(&buf[..len]),
-                );
+            if let Some(internal_addr) = internal_addr {
+                let response = Datagram::new(src, internal_addr, Bytes::copy_from_slice(&buf[..len]));
 
                 tracing::trace!(
                     src = %src,
-                    client = %mapping.internal_addr,
+                    client = %internal_addr,
                     len,
                     "outbound received response"
                 );
@@ -229,10 +229,12 @@ impl Outbound {
                     tracing::warn!(error = %e, "failed to send response to channel");
                 }
             } else {
+                // In true full-cone NAT, we might still want to accept packets from
+                // unknown sources if we have a mapping. For now, log and drop.
                 tracing::debug!(
                     src = %src,
                     len,
-                    "received response with no matching mapping"
+                    "received datagram from unknown remote (no reverse mapping)"
                 );
             }
         }
@@ -248,66 +250,34 @@ impl Outbound {
     }
 }
 
-/// Find a NAT mapping that corresponds to a response from the given server.
-///
-/// This is a simplified implementation. For better accuracy, you would:
-/// - Parse the DNS transaction ID and maintain a mapping by transaction ID.
-/// - Or track by (local_port, remote_addr) tuple.
-async fn find_mapping_for_response(
-    mappings: &NatMappingTable,
-    server_addr: SocketAddr,
-) -> Option<super::NatMapping> {
-    // This is a limitation of the current simple design.
-    // We iterate through port mappings to find one that matches.
-    // A production implementation would have a reverse index.
-
-    // For DNS proxy specifically, we often have one client sending to one server,
-    // or we'd track by transaction ID. Here we do a simple match by original_dest.
-
-    // Note: This works correctly when there's one active query per client,
-    // which is common for DNS.
-
-    let port_range = (49152u16, 65535u16);
-    for port in port_range.0..=port_range.1 {
-        if let Some(mapping) = mappings.lookup_by_port(port).await {
-            // Check if this mapping was for querying this server
-            // In full-cone NAT, any server can respond, but for DNS we typically
-            // expect responses from the same server we queried
-            if mapping.original_dest == server_addr
-                || mapping.original_dest.ip() == server_addr.ip()
-            {
-                mappings.touch(port).await;
-                return Some(mapping);
-            }
-        }
-    }
-
-    None
-}
-
 /// The forwarding half of an outbound handler.
 ///
-/// Receives queries from the channel and forwards them to DNS servers.
+/// Receives datagrams from the channel and forwards them to destinations.
 pub struct OutboundForwarder {
     socket: Arc<UdpSocket>,
     channel_rx: ChannelReceiver,
     mappings: NatMappingTable,
+    reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>,
 }
 
 impl OutboundForwarder {
     /// Run the forward loop.
     pub async fn run(self) -> Result<(), OutboundError> {
-        Outbound::run_forward_loop(self.socket, self.channel_rx, self.mappings).await
+        Outbound::run_forward_loop(self.socket, self.channel_rx, self.mappings, self.reverse_index)
+            .await
     }
 
-    /// Receive the next query from the channel.
+    /// Receive the next datagram from the channel.
     pub async fn recv(&mut self) -> Option<Datagram> {
         self.channel_rx.recv().await
     }
 
     /// Forward a datagram to an external server.
     pub async fn send_to(&self, data: &[u8], addr: SocketAddr) -> Result<usize, OutboundError> {
-        self.socket.send_to(data, addr).await.map_err(OutboundError::from)
+        self.socket
+            .send_to(data, addr)
+            .await
+            .map_err(OutboundError::from)
     }
 
     /// Get or create a NAT mapping.
@@ -318,21 +288,27 @@ impl OutboundForwarder {
     ) -> Option<u16> {
         self.mappings.get_or_create(internal_addr, dest).await
     }
+
+    /// Update the reverse index for response routing.
+    pub async fn update_reverse_index(&self, remote_addr: SocketAddr, internal_addr: SocketAddr) {
+        let mut index = self.reverse_index.write().await;
+        index.insert(remote_addr, internal_addr);
+    }
 }
 
 /// The responding half of an outbound handler.
 ///
-/// Receives responses from DNS servers and sends them back through the channel.
+/// Receives responses from destinations and sends them back through the channel.
 pub struct OutboundResponder {
     socket: Arc<UdpSocket>,
     channel_tx: ChannelSender,
-    mappings: NatMappingTable,
+    reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>,
 }
 
 impl OutboundResponder {
     /// Run the response loop.
     pub async fn run(self) -> Result<(), OutboundError> {
-        Outbound::run_response_loop(self.socket, self.channel_tx, self.mappings).await
+        Outbound::run_response_loop(self.socket, self.channel_tx, self.reverse_index).await
     }
 
     /// Receive from the external socket.
@@ -349,9 +325,16 @@ impl OutboundResponder {
             .map_err(|e| OutboundError::Channel(e.to_string()))
     }
 
-    /// Look up a NAT mapping by port.
-    pub async fn lookup_mapping(&self, port: u16) -> Option<super::NatMapping> {
-        self.mappings.lookup_by_port(port).await
+    /// Look up the internal address for a remote address.
+    pub async fn lookup_internal(&self, remote_addr: &SocketAddr) -> Option<SocketAddr> {
+        let index = self.reverse_index.read().await;
+        index.get(remote_addr).copied()
+    }
+
+    /// Update the reverse index for response routing.
+    pub async fn update_reverse_index(&self, remote_addr: SocketAddr, internal_addr: SocketAddr) {
+        let mut index = self.reverse_index.write().await;
+        index.insert(remote_addr, internal_addr);
     }
 }
 

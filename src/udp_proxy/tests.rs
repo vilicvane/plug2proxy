@@ -232,7 +232,7 @@ async fn test_channel_try_send_full() {
 #[tokio::test]
 async fn test_inbound_outbound_direct_integration() {
     // This test simulates a full direct flow:
-    // client -> inbound -> channel -> outbound -> (mock dns) -> outbound -> channel -> inbound -> client
+    // client -> inbound -> channel -> outbound -> (mock server) -> outbound -> channel -> inbound -> client
 
     // Create channel pair
     let (inbound_channel, outbound_channel) = channel_pair(16);
@@ -250,9 +250,9 @@ async fn test_inbound_outbound_direct_integration() {
     let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let client_addr = client_socket.local_addr().unwrap();
 
-    // Create mock DNS server
-    let dns_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let dns_addr = dns_socket.local_addr().unwrap();
+    // Create mock UDP server (destination)
+    let server_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = server_socket.local_addr().unwrap();
 
     // Split channels
     let (inbound_tx, inbound_rx) = inbound_channel.split();
@@ -265,20 +265,20 @@ async fn test_inbound_outbound_direct_integration() {
     let (inbound_receiver, mut inbound_sender) = inbound.split();
     let (mut outbound_forwarder, outbound_responder) = outbound.split();
 
-    // Spawn mock DNS server
-    let dns_handle = tokio::spawn(async move {
+    // Spawn mock UDP server
+    let server_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 1024];
-        let (len, src) = dns_socket.recv_from(&mut buf).await.unwrap();
+        let (len, src) = server_socket.recv_from(&mut buf).await.unwrap();
         // Echo back with "response:" prefix
         let response = format!("response:{}", std::str::from_utf8(&buf[..len]).unwrap());
-        dns_socket.send_to(response.as_bytes(), src).await.unwrap();
+        server_socket.send_to(response.as_bytes(), src).await.unwrap();
     });
 
     // Spawn inbound receiver
     let inbound_recv_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 1024];
         let (len, src) = inbound_receiver.recv(&mut buf).await.unwrap();
-        let datagram = Datagram::new(src, dns_addr, Bytes::copy_from_slice(&buf[..len]));
+        let datagram = Datagram::new(src, server_addr, Bytes::copy_from_slice(&buf[..len]));
         inbound_receiver.forward(datagram).await.unwrap();
     });
 
@@ -326,7 +326,7 @@ async fn test_inbound_outbound_direct_integration() {
 
     // Wait for all components
     tokio::time::timeout(Duration::from_secs(5), async {
-        dns_handle.await.unwrap();
+        server_handle.await.unwrap();
         inbound_recv_handle.await.unwrap();
         let _ = outbound_fwd_handle.await.unwrap();
         outbound_resp_handle.await.unwrap();
@@ -417,10 +417,10 @@ fn deserialize_datagram(mut data: Bytes) -> Datagram {
 /// - They communicate via a simulated tunnel (TCP stream in this test)
 ///
 /// The flow is:
-/// 1. Client sends query to inbound (Machine A)
+/// 1. Client sends datagram to inbound (Machine A)
 /// 2. Inbound serializes Datagram and sends over "tunnel" to Machine B
-/// 3. Outbound (Machine B) deserializes, creates NAT mapping, forwards to DNS
-/// 4. DNS response comes back, outbound serializes and sends over tunnel
+/// 3. Outbound (Machine B) deserializes, creates NAT mapping, forwards to destination
+/// 4. Response comes back, outbound serializes and sends over tunnel
 /// 5. Inbound deserializes and sends response to client
 #[tokio::test]
 async fn test_remote_inbound_outbound_via_simulated_tunnel() {
@@ -431,20 +431,20 @@ async fn test_remote_inbound_outbound_via_simulated_tunnel() {
     // Create NAT mapping table (lives on outbound/Machine B)
     let mappings = NatMappingTable::new((50000, 50100));
 
-    // Create inbound socket (Machine A - receives client queries)
+    // Create inbound socket (Machine A - receives client datagrams)
     let inbound_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let inbound_addr = inbound_socket.local_addr().unwrap();
 
-    // Create outbound socket (Machine B - sends to DNS servers)
+    // Create outbound socket (Machine B - sends to destinations)
     let outbound_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
     // Create client socket
     let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let client_addr = client_socket.local_addr().unwrap();
 
-    // Create mock DNS server
-    let dns_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let dns_addr = dns_socket.local_addr().unwrap();
+    // Create mock UDP server (destination)
+    let server_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = server_socket.local_addr().unwrap();
 
     // === MACHINE B (Outbound side) ===
     // Accept tunnel connection and handle forwarding
@@ -479,21 +479,21 @@ async fn test_remote_inbound_outbound_via_simulated_tunnel() {
             "Machine B: created NAT mapping"
         );
 
-        // Step 3: Forward to actual DNS server
+        // Step 3: Forward to actual destination
         outbound_socket
             .send_to(&datagram.data, datagram.dest)
             .await
             .unwrap();
-        tracing::info!(dest = %datagram.dest, "Machine B: forwarded to DNS");
+        tracing::info!(dest = %datagram.dest, "Machine B: forwarded to destination");
 
-        // Receive DNS response
+        // Receive response from destination
         let mut resp_buf = vec![0u8; 1024];
-        let (resp_len, dns_src) = outbound_socket.recv_from(&mut resp_buf).await.unwrap();
-        tracing::info!(src = %dns_src, len = resp_len, "Machine B: received DNS response");
+        let (resp_len, server_src) = outbound_socket.recv_from(&mut resp_buf).await.unwrap();
+        tracing::info!(src = %server_src, len = resp_len, "Machine B: received response");
 
         // Create response datagram (dest is the original client)
         let response = Datagram::new(
-            dns_src,
+            server_src,
             datagram.source, // Route back to original client
             Bytes::copy_from_slice(&resp_buf[..resp_len]),
         );
@@ -508,12 +508,12 @@ async fn test_remote_inbound_outbound_via_simulated_tunnel() {
         tracing::info!("Machine B: sent response back through tunnel");
     });
 
-    // === Mock DNS Server ===
-    let dns_handle = tokio::spawn(async move {
+    // === Mock UDP Server (destination) ===
+    let server_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 1024];
-        let (len, src) = dns_socket.recv_from(&mut buf).await.unwrap();
+        let (len, src) = server_socket.recv_from(&mut buf).await.unwrap();
         let response = format!("response:{}", std::str::from_utf8(&buf[..len]).unwrap());
-        dns_socket.send_to(response.as_bytes(), src).await.unwrap();
+        server_socket.send_to(response.as_bytes(), src).await.unwrap();
     });
 
     // === MACHINE A (Inbound side) ===
@@ -526,10 +526,10 @@ async fn test_remote_inbound_outbound_via_simulated_tunnel() {
         // Step 1: Receive datagram from client
         let mut buf = vec![0u8; 1024];
         let (len, src) = inbound_socket.recv_from(&mut buf).await.unwrap();
-        tracing::info!(src = %src, len, "Machine A: received query from client");
+        tracing::info!(src = %src, len, "Machine A: received datagram from client");
 
         // Create datagram with routing info
-        let datagram = Datagram::new(src, dns_addr, Bytes::copy_from_slice(&buf[..len]));
+        let datagram = Datagram::new(src, server_addr, Bytes::copy_from_slice(&buf[..len]));
 
         // Step 2: Serialize and send to forwarder (Machine B) via tunnel
         let serialized = serialize_datagram(&datagram);
@@ -573,7 +573,7 @@ async fn test_remote_inbound_outbound_via_simulated_tunnel() {
 
     let mut response_buf = vec![0u8; 1024];
     let result = tokio::time::timeout(Duration::from_secs(5), async {
-        dns_handle.await.unwrap();
+        server_handle.await.unwrap();
         machine_b_handle.await.unwrap();
         let response = machine_a_handle.await.unwrap();
 
