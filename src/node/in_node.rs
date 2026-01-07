@@ -47,13 +47,12 @@ impl InNode {
         connection_count: usize,
     ) -> Result<(), InNodeError> {
         let tunnel = Arc::new(
-            Tunnel::connect_with_client_cert(
+            Tunnel::connect_with_cert(
                 addr,
                 None,
                 connection_count,
-                self.client_config.cert_path.as_deref(),
-                self.client_config.key_path.as_deref(),
-                self.client_config.ca_cert_path.as_deref(),
+                self.client_config.pem_path.as_deref(),
+                self.client_config.ca_pem_path.as_deref(),
             )
             .await?,
         );

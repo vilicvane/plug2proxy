@@ -40,7 +40,34 @@ pub struct GeneratedCert {
 }
 
 impl GeneratedCert {
-    /// Write the certificate and key to files.
+    /// Get combined PEM (certificate + private key in one string).
+    pub fn combined_pem(&self) -> String {
+        format!("{}{}", self.cert_pem, self.key_pem)
+    }
+
+    /// Get combined PEM with CA certificate appended (for node certs).
+    /// Result: node cert + node key + CA cert
+    pub fn combined_pem_with_ca(&self, ca_cert_pem: &str) -> String {
+        format!("{}{}{}", self.cert_pem, self.key_pem, ca_cert_pem)
+    }
+
+    /// Write combined certificate and key to a single PEM file.
+    pub fn write_to_file(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.combined_pem())?;
+        Ok(())
+    }
+
+    /// Write combined certificate, key, and CA certificate to a single PEM file.
+    pub fn write_to_file_with_ca(
+        &self,
+        path: impl AsRef<Path>,
+        ca_cert_pem: &str,
+    ) -> std::io::Result<()> {
+        std::fs::write(path, self.combined_pem_with_ca(ca_cert_pem))?;
+        Ok(())
+    }
+
+    /// Write the certificate and key to separate files.
     pub fn write_to_files(
         &self,
         cert_path: impl AsRef<Path>,
@@ -142,9 +169,11 @@ pub fn generate_node_cert(
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         // Add localhost and common name as subject alternative names for server cert
         params.subject_alt_names = vec![
-            rcgen::SanType::DnsName(common_name.try_into().unwrap_or_else(|_| {
-                "localhost".try_into().unwrap()
-            })),
+            rcgen::SanType::DnsName(
+                common_name
+                    .try_into()
+                    .unwrap_or_else(|_| "localhost".try_into().unwrap()),
+            ),
             rcgen::SanType::DnsName("localhost".try_into().unwrap()),
         ];
     } else {
@@ -163,13 +192,45 @@ pub fn generate_node_cert(
     })
 }
 
-/// Load CA certificate and key from files.
+/// Load CA certificate and key from a combined PEM file.
+///
+/// The PEM file should contain both the certificate and private key.
+pub fn load_ca_from_pem(path: impl AsRef<Path>) -> Result<(String, String), CertError> {
+    let content = std::fs::read_to_string(path)?;
+    split_pem(&content)
+}
+
+/// Load CA certificate and key from separate files.
 pub fn load_ca_from_files(
     cert_path: impl AsRef<Path>,
     key_path: impl AsRef<Path>,
 ) -> Result<(String, String), CertError> {
     let cert_pem = std::fs::read_to_string(cert_path)?;
     let key_pem = std::fs::read_to_string(key_path)?;
+    Ok((cert_pem, key_pem))
+}
+
+/// Split a combined PEM into certificate and key parts.
+fn split_pem(content: &str) -> Result<(String, String), CertError> {
+    let cert_start = content
+        .find("-----BEGIN CERTIFICATE-----")
+        .ok_or_else(|| CertError::CertParse("No certificate found in PEM".to_string()))?;
+    let cert_end = content
+        .find("-----END CERTIFICATE-----")
+        .ok_or_else(|| CertError::CertParse("No certificate end found in PEM".to_string()))?
+        + "-----END CERTIFICATE-----".len();
+
+    let key_start = content
+        .find("-----BEGIN PRIVATE KEY-----")
+        .ok_or_else(|| CertError::CertParse("No private key found in PEM".to_string()))?;
+    let key_end = content
+        .find("-----END PRIVATE KEY-----")
+        .ok_or_else(|| CertError::CertParse("No private key end found in PEM".to_string()))?
+        + "-----END PRIVATE KEY-----".len();
+
+    let cert_pem = content[cert_start..cert_end].to_string() + "\n";
+    let key_pem = content[key_start..key_end].to_string() + "\n";
+
     Ok((cert_pem, key_pem))
 }
 

@@ -1,164 +1,116 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
-use plug2proxy::cert::{generate_ca, generate_node_cert, load_ca_from_files};
+use plug2proxy::cert::{generate_ca, generate_node_cert, load_ca_from_pem};
 use plug2proxy::config::{Config, HubConfig, InConfig, OutConfig};
 use plug2proxy::node::{Hub, InNode, OutNode, RouteRule};
 use plug2proxy::socks5::Socks5Server;
+
+/// Conventional paths for certificates
+const CA_PEM_PATH: &str = "ca.pem";
+const HUB_PEM_PATH: &str = "hub.pem";
+const NODE_PEM_PATH: &str = "node.pem";
 
 #[derive(Parser, Debug)]
 #[command(name = "plug2proxy")]
 #[command(about = "QUIC-over-TCP proxy with SOCKS5 support", long_about = None)]
 struct Args {
-    #[command(subcommand)]
-    command: Command,
-}
+    /// Path to configuration file (default: config.yaml)
+    #[arg(short, long, default_value = "config.yaml")]
+    config: PathBuf,
 
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Run a node (HUB, IN, or OUT) based on config file
-    Run {
-        /// Path to configuration file
-        #[arg(short, long)]
-        config: PathBuf,
-    },
-
-    /// Certificate management commands
-    #[command(subcommand)]
-    Cert(CertCommand),
-}
-
-#[derive(Subcommand, Debug)]
-enum CertCommand {
-    /// Generate a new CA certificate
-    Ca {
-        /// Common name for the CA certificate
-        #[arg(short, long, default_value = "plug2proxy-ca")]
-        name: String,
-
-        /// Output directory for certificate files
-        #[arg(short, long, default_value = "certs")]
-        out: PathBuf,
-    },
-
-    /// Generate a node certificate (server or client)
-    Node {
-        /// Node name (used as common name in certificate)
-        #[arg(short, long)]
-        name: String,
-
-        /// Path to CA certificate file
-        #[arg(long, default_value = "certs/ca.crt")]
-        ca_cert: PathBuf,
-
-        /// Path to CA private key file
-        #[arg(long, default_value = "certs/ca.key")]
-        ca_key: PathBuf,
-
-        /// Generate a server certificate (for HUB) instead of client certificate
-        #[arg(long)]
-        server: bool,
-
-        /// Output directory for certificate files
-        #[arg(short, long, default_value = "certs")]
-        out: PathBuf,
-    },
+    /// Generate node certificate under <name>/ directory (for IN/OUT nodes)
+    /// The node will use <name>/node.pem for authentication
+    #[arg(long)]
+    node_cert: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
     let args = Args::parse();
+    let config = Config::from_file(&args.config)?;
 
-    match args.command {
-        Command::Run { config } => {
-            tracing_subscriber::fmt::init();
-            let config = Config::from_file(&config)?;
-
-            match config {
-                Config::Hub(hub_config) => run_hub(hub_config).await,
-                Config::Out(out_config) => run_out(out_config).await,
-                Config::In(in_config) => run_in(in_config).await,
-            }
-        }
-        Command::Cert(cert_cmd) => run_cert_command(cert_cmd),
+    match config {
+        Config::Hub(hub_config) => run_hub(hub_config).await,
+        Config::Out(out_config) => run_out(out_config, args.node_cert).await,
+        Config::In(in_config) => run_in(in_config, args.node_cert).await,
     }
 }
 
-fn run_cert_command(cmd: CertCommand) -> anyhow::Result<()> {
-    match cmd {
-        CertCommand::Ca { name, out } => {
-            // Create output directory if it doesn't exist
-            std::fs::create_dir_all(&out)?;
+/// Ensure CA and Hub certificates exist, generating if needed.
+fn ensure_hub_certs() -> anyhow::Result<()> {
+    let ca_path = Path::new(CA_PEM_PATH);
+    let hub_path = Path::new(HUB_PEM_PATH);
 
-            let cert = generate_ca(&name)?;
-
-            let cert_path = out.join("ca.crt");
-            let key_path = out.join("ca.key");
-
-            cert.write_to_files(&cert_path, &key_path)?;
-
-            println!("✅ CA certificate generated:");
-            println!("   Certificate: {}", cert_path.display());
-            println!("   Private key: {}", key_path.display());
-            println!();
-            println!("⚠️  Keep the CA private key secure! It's used to sign node certificates.");
-
-            Ok(())
-        }
-        CertCommand::Node {
-            name,
-            ca_cert,
-            ca_key,
-            server,
-            out,
-        } => {
-            // Load CA certificate and key
-            let (ca_cert_pem, ca_key_pem) = load_ca_from_files(&ca_cert, &ca_key)?;
-
-            // Create output directory if it doesn't exist
-            std::fs::create_dir_all(&out)?;
-
-            let cert = generate_node_cert(&name, &ca_cert_pem, &ca_key_pem, server)?;
-
-            let cert_path = out.join(format!("{}.crt", name));
-            let key_path = out.join(format!("{}.key", name));
-
-            cert.write_to_files(&cert_path, &key_path)?;
-
-            let cert_type = if server { "Server" } else { "Client" };
-            println!("✅ {} certificate generated for '{}':", cert_type, name);
-            println!("   Certificate: {}", cert_path.display());
-            println!("   Private key: {}", key_path.display());
-
-            if server {
-                println!();
-                println!("📝 Add to HUB config:");
-                println!("   cert_path: \"{}\"", cert_path.display());
-                println!("   key_path: \"{}\"", key_path.display());
-                println!("   ca_cert_path: \"{}\"", ca_cert.display());
-            } else {
-                println!();
-                println!("📝 Add to IN/OUT config:");
-                println!("   cert_path: \"{}\"", cert_path.display());
-                println!("   key_path: \"{}\"", key_path.display());
-                println!("   ca_cert_path: \"{}\"", ca_cert.display());
-            }
-
-            Ok(())
-        }
+    // Generate CA if it doesn't exist
+    if !ca_path.exists() {
+        tracing::info!("Generating CA certificate: {}", CA_PEM_PATH);
+        let ca = generate_ca("plug2proxy-ca")?;
+        ca.write_to_file(ca_path)?;
+        tracing::info!("✅ CA certificate generated: {}", CA_PEM_PATH);
     }
+
+    // Generate Hub cert if it doesn't exist
+    if !hub_path.exists() {
+        tracing::info!("Generating Hub certificate: {}", HUB_PEM_PATH);
+        let (ca_cert_pem, ca_key_pem) = load_ca_from_pem(ca_path)?;
+        let hub_cert = generate_node_cert("hub", &ca_cert_pem, &ca_key_pem, true)?;
+        hub_cert.write_to_file(hub_path)?;
+        tracing::info!("✅ Hub certificate generated: {}", HUB_PEM_PATH);
+    }
+
+    Ok(())
+}
+
+/// Generate node certificate and save to <name>/node.pem for distribution.
+/// The generated file includes: node cert + node key + CA cert (for server verification).
+fn generate_node_cert_for_distribution(node_name: &str) -> anyhow::Result<()> {
+    let node_dir = PathBuf::from(node_name);
+    let node_pem_path = node_dir.join("node.pem");
+    let ca_path = Path::new(CA_PEM_PATH);
+
+    // Check if CA exists (required for generating node cert)
+    if !ca_path.exists() {
+        anyhow::bail!(
+            "CA certificate not found: {}\n\
+            Run Hub first to generate CA, or copy ca.pem from Hub.",
+            CA_PEM_PATH
+        );
+    }
+
+    // Generate node cert if it doesn't exist
+    if !node_pem_path.exists() {
+        tracing::info!("Generating node certificate: {}", node_pem_path.display());
+
+        // Create directory
+        std::fs::create_dir_all(&node_dir)?;
+
+        let (ca_cert_pem, ca_key_pem) = load_ca_from_pem(ca_path)?;
+        let node_cert = generate_node_cert(node_name, &ca_cert_pem, &ca_key_pem, false)?;
+        // Include CA cert in node.pem for server verification
+        node_cert.write_to_file_with_ca(&node_pem_path, &ca_cert_pem)?;
+
+        tracing::info!("✅ Node certificate generated: {}", node_pem_path.display());
+        tracing::info!("   Copy this file to the node as 'node.pem'");
+    }
+
+    Ok(())
 }
 
 async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
     tracing::info!("Starting HUB node: {}", config.id);
     tracing::info!("Listening on: {}", config.listen);
 
+    // Ensure certs exist (generate if needed)
+    ensure_hub_certs()?;
+
     let hub_quic_config = plug2proxy::node::HubConfig {
-        cert_path: config.cert_path.clone(),
-        key_path: config.key_path.clone(),
-        ca_cert_path: config.ca_cert_path.clone(),
+        pem_path: HUB_PEM_PATH.to_string(),
+        ca_pem_path: Some(CA_PEM_PATH.to_string()),
     };
 
     let hub = Arc::new(Hub::new(hub_quic_config));
@@ -183,22 +135,41 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_out(config: OutConfig) -> anyhow::Result<()> {
+async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result<()> {
     tracing::info!("Starting OUT node: {}", config.id);
     tracing::info!("Tags: {:?}", config.tags);
     tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
     let connection_count = config.connection_count.unwrap_or(1);
 
-    let client_config = plug2proxy::node::ClientConfig {
-        cert_path: config.cert_path.clone(),
-        key_path: config.key_path.clone(),
-        ca_cert_path: config.ca_cert_path.clone(),
+    // If --node-cert is provided, generate cert for distribution
+    if let Some(ref name) = node_cert {
+        generate_node_cert_for_distribution(name)?;
+    }
+
+    // Use node.pem from cwd for connection (contains cert + key + CA cert)
+    let node_pem_path = Path::new(NODE_PEM_PATH);
+    let client_config = if node_pem_path.exists() {
+        plug2proxy::node::ClientConfig {
+            pem_path: Some(NODE_PEM_PATH.to_string()),
+            // CA cert is included in node.pem, use same file for verification
+            ca_pem_path: Some(NODE_PEM_PATH.to_string()),
+        }
+    } else {
+        // No cert auth
+        plug2proxy::node::ClientConfig {
+            pem_path: None,
+            ca_pem_path: None,
+        }
     };
 
     // Auto-reconnect loop
     loop {
-        let mut out = OutNode::new(config.id.clone(), config.tags.clone(), client_config.clone());
+        let mut out = OutNode::new(
+            config.id.clone(),
+            config.tags.clone(),
+            client_config.clone(),
+        );
 
         match out.connect_hub(config.hub_addr, connection_count).await {
             Ok(()) => {
@@ -221,16 +192,31 @@ async fn run_out(config: OutConfig) -> anyhow::Result<()> {
     }
 }
 
-async fn run_in(config: InConfig) -> anyhow::Result<()> {
+async fn run_in(config: InConfig, node_cert: Option<String>) -> anyhow::Result<()> {
     tracing::info!("Starting IN node: {}", config.id);
     tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
     let connection_count = config.connection_count.unwrap_or(1);
 
-    let client_config = plug2proxy::node::ClientConfig {
-        cert_path: config.cert_path.clone(),
-        key_path: config.key_path.clone(),
-        ca_cert_path: config.ca_cert_path.clone(),
+    // If --node-cert is provided, generate cert for distribution
+    if let Some(ref name) = node_cert {
+        generate_node_cert_for_distribution(name)?;
+    }
+
+    // Use node.pem from cwd for connection (contains cert + key + CA cert)
+    let node_pem_path = Path::new(NODE_PEM_PATH);
+    let client_config = if node_pem_path.exists() {
+        plug2proxy::node::ClientConfig {
+            pem_path: Some(NODE_PEM_PATH.to_string()),
+            // CA cert is included in node.pem, use same file for verification
+            ca_pem_path: Some(NODE_PEM_PATH.to_string()),
+        }
+    } else {
+        // No cert auth
+        plug2proxy::node::ClientConfig {
+            pem_path: None,
+            ca_pem_path: None,
+        }
     };
 
     // Auto-reconnect loop

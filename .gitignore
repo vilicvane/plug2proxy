@@ -5,4 +5,7 @@
 /target/
 
 /configs/
-/certs/
+
+# Generated certificates
+/*.pem
+/*/node.pem

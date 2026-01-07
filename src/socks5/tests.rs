@@ -4,14 +4,31 @@ mod socks5_integration_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode};
     use crate::socks5::Socks5Server;
 
+    const TEST_CERT_PATH: &str = "test.pem";
+
+    /// Ensure test certificate exists in cwd.
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
+
     fn test_client_config() -> ClientConfig {
         ClientConfig {
-            cert_path: None,
-            key_path: None,
-            ca_cert_path: None,
+            pem_path: None,
+            ca_pem_path: None,
         }
     }
 
@@ -27,6 +44,7 @@ mod socks5_integration_tests {
 
     #[tokio::test]
     async fn test_hub_and_in_connection() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_cert();
         // Start a HUB
         let hub_addr: SocketAddr = "127.0.0.1:0".parse()?;
         let listener = tokio::net::TcpListener::bind(hub_addr).await?;
@@ -34,9 +52,8 @@ mod socks5_integration_tests {
         drop(listener);
 
         let hub: Arc<Hub> = Arc::new(Hub::new(HubConfig {
-            cert_path: "certs/cert.pem".to_string(),
-            key_path: "certs/key.pem".to_string(),
-            ca_cert_path: None,
+            pem_path: TEST_CERT_PATH.to_string(),
+            ca_pem_path: None,
         }));
 
         let hub_clone: Arc<Hub> = Arc::clone(&hub);
@@ -67,27 +84,43 @@ mod relay_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const TEST_CERT_PATH: &str = "certs/cert.pem";
+
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            std::fs::create_dir_all("certs").unwrap();
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
 
     fn test_client_config() -> ClientConfig {
         ClientConfig {
-            cert_path: None,
-            key_path: None,
-            ca_cert_path: None,
+            pem_path: None,
+            ca_pem_path: None,
         }
     }
 
     /// Setup test infrastructure and return (hub_addr, in_node)
     async fn setup_test_env() -> (SocketAddr, Arc<InNode>) {
         let _ = tracing_subscriber::fmt::try_init();
+        ensure_test_cert();
 
         // Start HUB
         let hub = Arc::new(Hub::new(HubConfig {
-            cert_path: "certs/cert.pem".to_string(),
-            key_path: "certs/key.pem".to_string(),
-            ca_cert_path: None,
+            pem_path: TEST_CERT_PATH.to_string(),
+            ca_pem_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -115,12 +148,12 @@ mod relay_tests {
         use crate::node::RouteRule;
 
         let _ = tracing_subscriber::fmt::try_init();
+        ensure_test_cert();
 
         // Start HUB
         let hub = Arc::new(Hub::new(HubConfig {
-            cert_path: "certs/cert.pem".to_string(),
-            key_path: "certs/key.pem".to_string(),
-            ca_cert_path: None,
+            pem_path: TEST_CERT_PATH.to_string(),
+            ca_pem_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -675,28 +708,44 @@ mod socks5_server_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode};
     use crate::socks5::Socks5Server;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+    const TEST_CERT_PATH: &str = "certs/cert.pem";
+
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            std::fs::create_dir_all("certs").unwrap();
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
 
     fn test_client_config() -> ClientConfig {
         ClientConfig {
-            cert_path: None,
-            key_path: None,
-            ca_cert_path: None,
+            pem_path: None,
+            ca_pem_path: None,
         }
     }
 
     /// Setup test infrastructure with SOCKS5 server
     async fn setup_socks5_env() -> (SocketAddr, SocketAddr) {
         let _ = tracing_subscriber::fmt::try_init();
+        ensure_test_cert();
 
         // Start HUB
         let hub = Arc::new(Hub::new(HubConfig {
-            cert_path: "certs/cert.pem".to_string(),
-            key_path: "certs/key.pem".to_string(),
-            ca_cert_path: None,
+            pem_path: TEST_CERT_PATH.to_string(),
+            ca_pem_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1173,20 +1222,38 @@ mod udp_integration_tests {
 
     use tokio::net::UdpSocket;
 
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
 
+    const TEST_CERT_PATH: &str = "certs/cert.pem";
+
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            std::fs::create_dir_all("certs").unwrap();
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
+
     fn test_client_config() -> ClientConfig {
         ClientConfig {
-            cert_path: None,
-            key_path: None,
-            ca_cert_path: None,
+            pem_path: None,
+            ca_pem_path: None,
         }
     }
 
     /// Integration test: Simulate UDP echo through SOCKS5 -> IN -> HUB -> OUT
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_udp_echo_through_tunnel() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_cert();
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
@@ -1226,9 +1293,8 @@ mod udp_integration_tests {
         drop(listener);
 
         let hub = Arc::new(Hub::new(HubConfig {
-            cert_path: "certs/cert.pem".to_string(),
-            key_path: "certs/key.pem".to_string(),
-            ca_cert_path: None,
+            pem_path: TEST_CERT_PATH.to_string(),
+            ca_pem_path: None,
         }));
 
         let hub_clone = Arc::clone(&hub);
@@ -1308,6 +1374,7 @@ mod udp_integration_tests {
     /// Test SOCKS5 UDP packet handling with actual UDP sockets
     #[tokio::test]
     async fn test_socks5_udp_packet_over_socket() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_cert();
         // Create two UDP sockets
         let sender = UdpSocket::bind("127.0.0.1:0").await?;
         let receiver = UdpSocket::bind("127.0.0.1:0").await?;
@@ -1343,28 +1410,44 @@ mod udp_e2e_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_CERT_PATH: &str = "certs/cert.pem";
+
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            std::fs::create_dir_all("certs").unwrap();
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
 
     fn test_client_config() -> ClientConfig {
         ClientConfig {
-            cert_path: None,
-            key_path: None,
-            ca_cert_path: None,
+            pem_path: None,
+            ca_pem_path: None,
         }
     }
 
     /// Setup test infrastructure with SOCKS5, HUB, and OUT nodes
     async fn setup_udp_test_env() -> (SocketAddr, SocketAddr) {
         let _ = tracing_subscriber::fmt::try_init();
+        ensure_test_cert();
 
         // Start HUB
         let hub = Arc::new(Hub::new(HubConfig {
-            cert_path: "certs/cert.pem".to_string(),
-            key_path: "certs/key.pem".to_string(),
-            ca_cert_path: None,
+            pem_path: TEST_CERT_PATH.to_string(),
+            ca_pem_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1515,12 +1598,12 @@ mod udp_e2e_tests {
         tokio::time::timeout(TEST_TIMEOUT, async {
             // Setup without OUT node (HUB will handle directly)
             let _ = tracing_subscriber::fmt::try_init();
+            ensure_test_cert();
 
             // Start HUB
             let hub = Arc::new(Hub::new(HubConfig {
-                cert_path: "certs/cert.pem".to_string(),
-                key_path: "certs/key.pem".to_string(),
-                ca_cert_path: None,
+                pem_path: TEST_CERT_PATH.to_string(),
+                ca_pem_path: None,
             }));
 
             let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

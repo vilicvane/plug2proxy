@@ -35,12 +35,7 @@ impl FramedConnection {
     }
 
     /// Split this connection into separate send and receive halves.
-    pub fn split(
-        self,
-    ) -> (
-        ConnectionSender,
-        ConnectionReceiver,
-    ) {
+    pub fn split(self) -> (ConnectionSender, ConnectionReceiver) {
         let (sink, stream) = self.framed.split();
         (ConnectionSender { sink }, ConnectionReceiver { stream })
     }
@@ -48,6 +43,11 @@ impl FramedConnection {
     /// Get a reference to the underlying TCP stream.
     pub fn get_ref(&self) -> &TcpStream {
         self.framed.get_ref()
+    }
+
+    /// Consume and return the underlying TCP stream.
+    pub fn into_inner(self) -> TcpStream {
+        self.framed.into_inner()
     }
 }
 

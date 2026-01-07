@@ -8,17 +8,79 @@ use tokio::sync::mpsc;
 
 use super::{FramedConnection, QuicConfig, QuicConnection, QuicError};
 
+/// Magic byte for routing header (distinguishes from QUIC packets which start with 0x80-0xFF or 0x00-0x3F).
+/// We use 0x50 ('P' for plug2proxy) which is in the reserved range.
+pub const ROUTING_MAGIC: u8 = 0x50;
+
+/// A TCP connection with optional initial data already read.
+pub struct TcpConnectionWithData {
+    pub stream: TcpStream,
+    pub initial_data: Option<Bytes>,
+}
+
 /// Handle for adding new TCP connections to an existing tunnel.
 #[derive(Clone)]
 pub struct TcpConnectionHandle {
-    add_connection_tx: mpsc::Sender<TcpStream>,
+    add_connection_tx: mpsc::Sender<TcpConnectionWithData>,
+    /// QUIC connection ID (for routing additional connections)
+    connection_id: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl TcpConnectionHandle {
+    /// Set the connection ID (called after QUIC handshake succeeds).
+    pub async fn set_connection_id(&self, id: Vec<u8>) {
+        let mut conn_id = self.connection_id.lock().await;
+        *conn_id = Some(id);
+    }
+
     /// Add a new TCP connection to the tunnel.
+    /// For additional connections, sends a routing header first (as a framed message).
     pub async fn add_connection(&self, stream: TcpStream) -> Result<(), TunnelError> {
+        // If we have a connection ID, send routing header first as a framed message
+        if let Some(ref conn_id) = *self.connection_id.lock().await {
+            // Create routing header: MAGIC + length (1 byte) + connection ID
+            let mut header = vec![ROUTING_MAGIC, conn_id.len() as u8];
+            header.extend_from_slice(conn_id);
+
+            // Send as a framed message (length-prefixed)
+            let mut conn = super::FramedConnection::new(stream);
+            conn.send(Bytes::from(header))
+                .await
+                .map_err(|e| TunnelError::Io(std::io::Error::other(e.to_string())))?;
+
+            // Get the stream back and add to the pool
+            let stream = conn.into_inner();
+            self.add_connection_tx
+                .send(TcpConnectionWithData {
+                    stream,
+                    initial_data: None,
+                })
+                .await
+                .map_err(|_| TunnelError::ConnectionFailed)?;
+        } else {
+            // No connection ID (shouldn't happen for additional connections)
+            self.add_connection_tx
+                .send(TcpConnectionWithData {
+                    stream,
+                    initial_data: None,
+                })
+                .await
+                .map_err(|_| TunnelError::ConnectionFailed)?;
+        }
+        Ok(())
+    }
+
+    /// Add a new TCP connection with initial data already read.
+    pub async fn add_connection_with_initial_data(
+        &self,
+        stream: TcpStream,
+        initial_data: Bytes,
+    ) -> Result<(), TunnelError> {
         self.add_connection_tx
-            .send(stream)
+            .send(TcpConnectionWithData {
+                stream,
+                initial_data: Some(initial_data),
+            })
             .await
             .map_err(|_| TunnelError::ConnectionFailed)?;
         Ok(())
@@ -44,7 +106,7 @@ impl Tunnel {
         server_name: Option<&str>,
         connection_count: usize,
     ) -> Result<Self, TunnelError> {
-        Self::connect_with_client_cert(addr, server_name, connection_count, None, None, None).await
+        Self::connect_with_cert(addr, server_name, connection_count, None, None).await
     }
 
     /// Create a client tunnel with optional client certificate authentication.
@@ -53,18 +115,16 @@ impl Tunnel {
     /// * `addr` - Server address to connect to
     /// * `server_name` - Optional server name for SNI
     /// * `connection_count` - Number of TCP connections to use
-    /// * `cert_path` - Optional path to client certificate (for mTLS)
-    /// * `key_path` - Optional path to client private key (for mTLS)
-    /// * `ca_cert_path` - Optional path to CA certificate (for server verification)
-    pub async fn connect_with_client_cert(
+    /// * `pem_path` - Optional path to client PEM file (cert + key)
+    /// * `ca_pem_path` - Optional path to CA PEM file (for server verification)
+    pub async fn connect_with_cert(
         addr: SocketAddr,
         server_name: Option<&str>,
         connection_count: usize,
-        cert_path: Option<&str>,
-        key_path: Option<&str>,
-        ca_cert_path: Option<&str>,
+        pem_path: Option<&str>,
+        ca_pem_path: Option<&str>,
     ) -> Result<Self, TunnelError> {
-        let config = QuicConfig::new_client(cert_path, key_path, ca_cert_path)?;
+        let config = QuicConfig::new_client(pem_path, ca_pem_path)?;
         Self::connect_with_config(addr, server_name, connection_count, config.into_inner()).await
     }
 
@@ -178,6 +238,10 @@ impl Tunnel {
 
         tracing::info!("QUIC connection established");
 
+        // Set connection ID for routing additional connections
+        let conn_id = quic.source_id().await;
+        tcp_handle.set_connection_id(conn_id).await;
+
         Ok(Self {
             quic,
             driver_handle,
@@ -264,6 +328,150 @@ impl Tunnel {
             driver_handle,
             tcp_handle,
         })
+    }
+
+    /// Create a server tunnel from a TCP stream with initial data already read.
+    ///
+    /// This is used when the first frame has already been read to determine
+    /// connection routing.
+    pub async fn from_tcp_stream_server_with_initial_data(
+        tcp_stream: TcpStream,
+        initial_data: Bytes,
+        config: &mut quiche::Config,
+    ) -> Result<Self, TunnelError> {
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel(256);
+
+        // Split TCP stream and spawn IO tasks
+        let tcp_handle = spawn_tcp_io_tasks(vec![tcp_stream], outgoing_rx, incoming_tx.clone());
+
+        // The first packet was already read, parse it for connection ID
+        let mut first_packet_buf = initial_data.to_vec();
+        let hdr = quiche::Header::from_slice(&mut first_packet_buf, quiche::MAX_CONN_ID_LEN)?;
+        let scid = hdr.dcid.clone();
+
+        // Send the first packet to the incoming channel
+        incoming_tx
+            .send(Bytes::from(first_packet_buf))
+            .await
+            .map_err(|_| TunnelError::ConnectionFailed)?;
+
+        // Accept QUIC connection
+        let quic = QuicConnection::accept(&scid, None, config, outgoing_tx.clone(), incoming_rx)?;
+
+        // Spawn driver task
+        let quic_clone = quic.inner();
+        let outgoing_tx_clone = outgoing_tx;
+        let incoming_rx_clone = Arc::clone(&quic.incoming_rx);
+        let next_stream_id_clone = Arc::clone(&quic.next_stream_id);
+        let send_notify_clone = quic.send_notify();
+        let recv_notify_clone = quic.recv_notify();
+        let driver_handle = tokio::spawn(async move {
+            let quic_ref = QuicConnection {
+                inner: quic_clone,
+                outgoing_tx: outgoing_tx_clone,
+                incoming_rx: incoming_rx_clone,
+                next_stream_id: next_stream_id_clone,
+                send_notify: send_notify_clone,
+                recv_notify: recv_notify_clone,
+            };
+            quic_ref.drive().await
+        });
+
+        // Wait for connection to be established
+        let mut attempts = 0;
+        while !quic.is_established().await {
+            if quic.is_closed().await {
+                return Err(TunnelError::ConnectionFailed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            attempts += 1;
+            if attempts > 500 {
+                return Err(TunnelError::ConnectionTimeout);
+            }
+        }
+
+        tracing::info!("QUIC server connection established");
+
+        Ok(Self {
+            quic,
+            driver_handle,
+            tcp_handle,
+        })
+    }
+
+    /// Create a server tunnel from a TCP stream with initial data already read.
+    /// Does NOT wait for QUIC handshake - call `wait_established()` separately.
+    ///
+    /// This is useful when you need to register the tunnel before the handshake
+    /// completes, to handle additional TCP connections that arrive early.
+    pub async fn from_tcp_stream_server_with_initial_data_no_wait(
+        tcp_stream: TcpStream,
+        initial_data: Bytes,
+        config: &mut quiche::Config,
+    ) -> Result<Self, TunnelError> {
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel(256);
+
+        // Split TCP stream and spawn IO tasks
+        let tcp_handle = spawn_tcp_io_tasks(vec![tcp_stream], outgoing_rx, incoming_tx.clone());
+
+        // The first packet was already read, parse it for connection ID
+        let mut first_packet_buf = initial_data.to_vec();
+        let hdr = quiche::Header::from_slice(&mut first_packet_buf, quiche::MAX_CONN_ID_LEN)?;
+        let scid = hdr.dcid.clone();
+
+        // Send the first packet to the incoming channel
+        incoming_tx
+            .send(Bytes::from(first_packet_buf))
+            .await
+            .map_err(|_| TunnelError::ConnectionFailed)?;
+
+        // Accept QUIC connection
+        let quic = QuicConnection::accept(&scid, None, config, outgoing_tx.clone(), incoming_rx)?;
+
+        // Spawn driver task
+        let quic_clone = quic.inner();
+        let outgoing_tx_clone = outgoing_tx;
+        let incoming_rx_clone = Arc::clone(&quic.incoming_rx);
+        let next_stream_id_clone = Arc::clone(&quic.next_stream_id);
+        let send_notify_clone = quic.send_notify();
+        let recv_notify_clone = quic.recv_notify();
+        let driver_handle = tokio::spawn(async move {
+            let quic_ref = QuicConnection {
+                inner: quic_clone,
+                outgoing_tx: outgoing_tx_clone,
+                incoming_rx: incoming_rx_clone,
+                next_stream_id: next_stream_id_clone,
+                send_notify: send_notify_clone,
+                recv_notify: recv_notify_clone,
+            };
+            quic_ref.drive().await
+        });
+
+        // Return immediately without waiting for handshake
+        Ok(Self {
+            quic,
+            driver_handle,
+            tcp_handle,
+        })
+    }
+
+    /// Wait for the QUIC connection to be established.
+    pub async fn wait_established(&self) -> Result<(), TunnelError> {
+        let mut attempts = 0;
+        while !self.quic.is_established().await {
+            if self.quic.is_closed().await {
+                return Err(TunnelError::ConnectionFailed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            attempts += 1;
+            if attempts > 500 {
+                return Err(TunnelError::ConnectionTimeout);
+            }
+        }
+        tracing::info!("QUIC server connection established");
+        Ok(())
     }
 
     /// Open a new bidirectional stream.
@@ -357,6 +565,22 @@ impl Tunnel {
     /// Add a new TCP connection to the tunnel.
     pub async fn add_tcp_connection(&self, stream: TcpStream) -> Result<(), TunnelError> {
         self.tcp_handle.add_connection(stream).await
+    }
+
+    /// Add a new TCP connection with initial data already read.
+    pub async fn add_tcp_connection_with_initial_data(
+        &self,
+        stream: TcpStream,
+        initial_data: Bytes,
+    ) -> Result<(), TunnelError> {
+        self.tcp_handle
+            .add_connection_with_initial_data(stream, initial_data)
+            .await
+    }
+
+    /// Get the QUIC source connection ID (what clients use as dcid to reach this tunnel).
+    pub async fn connection_id(&self) -> Vec<u8> {
+        self.quic.source_id().await
     }
 }
 
@@ -549,9 +773,10 @@ fn spawn_tcp_io_tasks(
         receivers.push(receiver);
     }
 
-    // Channel for adding new TCP connections
-    let (add_connection_tx, mut add_connection_rx) = mpsc::channel::<TcpStream>(16);
+    // Channel for adding new TCP connections (with optional initial data)
+    let (add_connection_tx, mut add_connection_rx) = mpsc::channel::<TcpConnectionWithData>(16);
     let incoming_tx_clone = incoming_tx.clone();
+    let connection_id = Arc::new(Mutex::new(None));
 
     // Spawn task to distribute outgoing datagrams across TCP connections
     // This task also handles adding new connections dynamically
@@ -562,13 +787,21 @@ fn spawn_tcp_io_tasks(
                 biased;
 
                 // Handle new connection additions
-                new_stream = add_connection_rx.recv() => {
-                    let Some(stream) = new_stream else {
+                new_conn = add_connection_rx.recv() => {
+                    let Some(TcpConnectionWithData { stream, initial_data }) = new_conn else {
                         break;
                     };
                     let conn = FramedConnection::new(stream);
                     let (sender, receiver) = conn.split();
                     senders.push(sender);
+
+                    // If there's initial data, inject it into the incoming channel first
+                    if let Some(data) = initial_data {
+                        let tx = incoming_tx_clone.clone();
+                        if tx.send(data).await.is_err() {
+                            tracing::warn!("failed to inject initial data for new connection");
+                        }
+                    }
 
                     // Spawn a receive task for the new connection
                     let tx = incoming_tx_clone.clone();
@@ -615,7 +848,10 @@ fn spawn_tcp_io_tasks(
         tokio::spawn(spawn_recv_task(receiver, tx));
     }
 
-    TcpConnectionHandle { add_connection_tx }
+    TcpConnectionHandle {
+        add_connection_tx,
+        connection_id,
+    }
 }
 
 /// Spawn a receive task for a single TCP connection.

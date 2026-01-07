@@ -6,25 +6,42 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::*;
+use crate::cert::{generate_ca, generate_node_cert};
+
+const TEST_CERT_PATH: &str = "test.pem";
+
+/// Ensure test certificate exists in cwd.
+fn ensure_test_cert() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        if !std::path::Path::new(TEST_CERT_PATH).exists() {
+            let ca = generate_ca("test-ca").unwrap();
+            let server_cert =
+                generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+            server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+        }
+    });
+}
 
 /// Test helper: create a ClientConfig with no certificates (disabled mTLS for tests).
 fn test_client_config() -> ClientConfig {
     ClientConfig {
-        cert_path: None,
-        key_path: None,
-        ca_cert_path: None,
+        pem_path: None,
+        ca_pem_path: None,
     }
 }
 
 #[tokio::test]
 async fn test_in_out_connect_to_hub() {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_test_cert();
 
     // Start HUB
     let hub = Arc::new(Hub::new(HubConfig {
-        cert_path: "certs/cert.pem".to_string(),
-        key_path: "certs/key.pem".to_string(),
-        ca_cert_path: None,
+        pem_path: TEST_CERT_PATH.to_string(),
+        ca_pem_path: None,
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -69,6 +86,7 @@ async fn test_in_out_connect_to_hub() {
 #[tokio::test]
 async fn test_full_proxy_flow() {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_test_cert();
 
     // Start a simple echo server as the target
     let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -92,9 +110,8 @@ async fn test_full_proxy_flow() {
 
     // Start HUB
     let hub = Arc::new(Hub::new(HubConfig {
-        cert_path: "certs/cert.pem".to_string(),
-        key_path: "certs/key.pem".to_string(),
-        ca_cert_path: None,
+        pem_path: TEST_CERT_PATH.to_string(),
+        ca_pem_path: None,
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -149,6 +166,7 @@ async fn test_full_proxy_flow() {
 #[tokio::test]
 async fn test_multi_out_with_routing() {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_test_cert();
 
     // Start three echo servers to represent different targets
     let echo1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -186,9 +204,8 @@ async fn test_multi_out_with_routing() {
 
     // Start HUB
     let hub = Arc::new(Hub::new(HubConfig {
-        cert_path: "certs/cert.pem".to_string(),
-        key_path: "certs/key.pem".to_string(),
-        ca_cert_path: None,
+        pem_path: TEST_CERT_PATH.to_string(),
+        ca_pem_path: None,
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

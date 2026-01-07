@@ -193,10 +193,28 @@ mod tunnel_tests {
 
     use tokio::net::TcpListener;
 
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::tunnel::{QuicConfig, Tunnel};
 
     // Use 1 for initial connection since client now extends connections after handshake
     const INITIAL_CONNECTION_COUNT: usize = 1;
+
+    const TEST_CERT_PATH: &str = "test.pem";
+
+    /// Ensure test certificate exists in cwd.
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
 
     async fn setup_client(addr: SocketAddr) -> Tunnel {
         // Request 2 connections - client will establish 1 first, then extend after handshake
@@ -205,6 +223,7 @@ mod tunnel_tests {
 
     #[tokio::test]
     async fn test_tunnel_establish() {
+        ensure_test_cert();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -218,7 +237,7 @@ mod tunnel_tests {
                 tcp_streams.push(stream);
             }
 
-            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None)
+            let mut config = QuicConfig::new_server(TEST_CERT_PATH, None)
                 .unwrap()
                 .into_inner();
 
@@ -242,6 +261,7 @@ mod tunnel_tests {
 
     #[tokio::test]
     async fn test_tunnel_stream_send_recv() {
+        ensure_test_cert();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -254,7 +274,7 @@ mod tunnel_tests {
                 tcp_streams.push(stream);
             }
 
-            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None)
+            let mut config = QuicConfig::new_server(TEST_CERT_PATH, None)
                 .unwrap()
                 .into_inner();
 
@@ -316,6 +336,7 @@ mod tunnel_tests {
 
     #[tokio::test]
     async fn test_tunnel_multiple_streams() {
+        ensure_test_cert();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -328,7 +349,7 @@ mod tunnel_tests {
                 tcp_streams.push(stream);
             }
 
-            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None)
+            let mut config = QuicConfig::new_server(TEST_CERT_PATH, None)
                 .unwrap()
                 .into_inner();
 
@@ -387,23 +408,42 @@ mod tunnel_tests {
 
 #[cfg(test)]
 mod quic_config_tests {
+    use crate::cert::{generate_ca, generate_node_cert};
     use crate::tunnel::QuicConfig;
+
+    const TEST_CERT_PATH: &str = "test.pem";
+
+    /// Ensure test certificate exists in cwd.
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
 
     #[test]
     fn test_client_config() {
-        let config = QuicConfig::new_client(None, None, None);
+        let config = QuicConfig::new_client(None, None);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_server_config() {
-        let config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None);
+        ensure_test_cert();
+        let config = QuicConfig::new_server(TEST_CERT_PATH, None);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_server_config_invalid_cert() {
-        let config = QuicConfig::new_server("nonexistent.pem", "nonexistent.pem", None);
+        let config = QuicConfig::new_server("nonexistent.pem", None);
         assert!(config.is_err());
     }
 }

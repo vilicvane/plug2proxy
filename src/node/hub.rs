@@ -7,31 +7,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, mpsc};
 
-use crate::tunnel::{QuicConfig, QuicError, Stream, Tunnel, TunnelError};
+use crate::tunnel::{FrameCodec, QuicConfig, QuicError, Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, NodeConnection};
 use super::message::{ConnectRequest, HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
 
 /// Configuration for HUB.
 pub struct HubConfig {
-    /// Path to server certificate (signed by CA).
-    pub cert_path: String,
-    /// Path to server private key.
-    pub key_path: String,
-    /// Path to CA certificate (for verifying client certs).
+    /// Path to server PEM file (cert + key).
+    pub pem_path: String,
+    /// Path to CA PEM file (for verifying client certs).
     /// If None, client certificate verification is disabled.
-    pub ca_cert_path: Option<String>,
+    pub ca_pem_path: Option<String>,
 }
 
 /// Configuration for client nodes (IN/OUT).
 #[derive(Clone)]
 pub struct ClientConfig {
-    /// Path to client certificate (signed by CA).
-    pub cert_path: Option<String>,
-    /// Path to client private key.
-    pub key_path: Option<String>,
-    /// Path to CA certificate (for verifying server cert).
-    pub ca_cert_path: Option<String>,
+    /// Path to client PEM file (cert + key).
+    pub pem_path: Option<String>,
+    /// Path to CA PEM file (for verifying server cert).
+    pub ca_pem_path: Option<String>,
 }
 
 /// Central HUB node.
@@ -43,6 +39,8 @@ pub struct Hub {
     outs: Arc<RwLock<HashMap<String, OutConnection>>>,
     /// Routing rules.
     route_rules: Arc<RwLock<Vec<RouteRule>>>,
+    /// Registry of active tunnels by QUIC connection ID (for routing additional TCP connections).
+    tunnel_registry: Arc<RwLock<HashMap<Vec<u8>, Arc<Tunnel>>>>,
 }
 
 struct InConnection {
@@ -67,6 +65,7 @@ impl Hub {
             ins: Arc::new(RwLock::new(HashMap::new())),
             outs: Arc::new(RwLock::new(HashMap::new())),
             route_rules: Arc::new(RwLock::new(Vec::new())),
+            tunnel_registry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -82,22 +81,148 @@ impl Hub {
 
             let hub = Arc::clone(&self);
             tokio::spawn(async move {
-                if let Err(e) = hub.handle_connection(stream).await {
+                if let Err(e) = hub.route_connection(stream, client_addr).await {
                     tracing::error!("connection error from {}: {}", client_addr, e);
                 }
             });
         }
     }
 
-    async fn handle_connection(self: &Arc<Self>, stream: TcpStream) -> Result<(), HubError> {
-        // Create tunnel from single TCP stream (for now)
-        let mut config = QuicConfig::new_server(
-            &self.config.cert_path,
-            &self.config.key_path,
-            self.config.ca_cert_path.as_deref(),
-        )?
-        .into_inner();
-        let tunnel = Arc::new(Tunnel::from_tcp_streams_server(vec![stream], &mut config).await?);
+    /// Route a TCP connection to an existing tunnel or create a new one.
+    async fn route_connection(
+        self: &Arc<Self>,
+        stream: TcpStream,
+        client_addr: SocketAddr,
+    ) -> Result<(), HubError> {
+        use futures::StreamExt;
+        use tokio_util::codec::Decoder;
+
+        // Read the first frame
+        let mut framed = FrameCodec::new().framed(stream);
+        let first_frame = framed.next().await;
+
+        let first_frame = match first_frame {
+            Some(Ok(data)) => data,
+            Some(Err(e)) => {
+                return Err(HubError::Tunnel(TunnelError::Io(std::io::Error::other(
+                    e.to_string(),
+                ))));
+            }
+            None => return Err(HubError::Tunnel(TunnelError::ConnectionFailed)),
+        };
+
+        // Check if this is a routing header (additional connection)
+        // Routing header format: ROUTING_MAGIC (1 byte) + length (1 byte) + connection_id
+        if !first_frame.is_empty() && first_frame[0] == crate::tunnel::ROUTING_MAGIC {
+            if first_frame.len() < 2 {
+                return Err(HubError::Tunnel(TunnelError::ConnectionFailed));
+            }
+            let conn_id_len = first_frame[1] as usize;
+            if first_frame.len() < 2 + conn_id_len {
+                return Err(HubError::Tunnel(TunnelError::ConnectionFailed));
+            }
+            let conn_id = first_frame[2..2 + conn_id_len].to_vec();
+
+            // Look up existing tunnel
+            let existing_tunnel = {
+                let registry = self.tunnel_registry.read().await;
+                registry.get(&conn_id).cloned()
+            };
+
+            if let Some(tunnel) = existing_tunnel {
+                tracing::debug!(
+                    "routing additional TCP connection from {} to existing tunnel",
+                    client_addr
+                );
+                let tcp_stream = framed.into_inner();
+                tunnel.add_tcp_connection(tcp_stream).await?;
+                return Ok(());
+            } else {
+                tracing::warn!(
+                    "received routing header for unknown connection ID from {}",
+                    client_addr
+                );
+                return Err(HubError::Tunnel(TunnelError::ConnectionFailed));
+            }
+        }
+
+        // Not a routing header, this is a new QUIC connection
+        // Parse the first frame to get the client's source connection ID for routing
+        let mut header_buf = first_frame.to_vec();
+        let client_scid = match quiche::Header::from_slice(&mut header_buf, quiche::MAX_CONN_ID_LEN)
+        {
+            Ok(hdr) => hdr.scid.to_vec(),
+            Err(_) => Vec::new(),
+        };
+
+        let tcp_stream = framed.into_inner();
+        self.handle_new_connection(tcp_stream, first_frame, client_scid)
+            .await
+    }
+
+    /// Handle a new connection (no existing tunnel).
+    async fn handle_new_connection(
+        self: &Arc<Self>,
+        stream: TcpStream,
+        first_frame: Bytes,
+        client_scid: Vec<u8>,
+    ) -> Result<(), HubError> {
+        // Create tunnel from single TCP stream with the first frame already read
+        // Note: This does NOT wait for handshake - we register immediately so
+        // additional TCP connections can be routed while handshake is in progress
+        let mut config =
+            QuicConfig::new_server(&self.config.pem_path, self.config.ca_pem_path.as_deref())?
+                .into_inner();
+
+        let tunnel = Arc::new(
+            Tunnel::from_tcp_stream_server_with_initial_data_no_wait(
+                stream,
+                first_frame,
+                &mut config,
+            )
+            .await?,
+        );
+
+        // Register this tunnel IMMEDIATELY using client's source ID
+        // (before handshake completes, so additional connections can be routed)
+        let conn_id = client_scid;
+        {
+            let mut registry = self.tunnel_registry.write().await;
+            registry.insert(conn_id.clone(), Arc::clone(&tunnel));
+        }
+
+        // Clone for cleanup task
+        let registry = Arc::clone(&self.tunnel_registry);
+        let conn_id_for_cleanup = conn_id;
+        let tunnel_for_cleanup = Arc::clone(&tunnel);
+
+        // Spawn cleanup task that removes the tunnel when it closes
+        tokio::spawn(async move {
+            // Wait for tunnel to close
+            loop {
+                if tunnel_for_cleanup.is_closed().await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+
+            // Cleanup: remove from registry
+            {
+                let mut registry = registry.write().await;
+                registry.remove(&conn_id_for_cleanup);
+            }
+        });
+
+        // Run the connection handler
+        self.handle_connection_inner(Arc::clone(&tunnel)).await
+    }
+
+    async fn handle_connection_inner(
+        self: &Arc<Self>,
+        tunnel: Arc<Tunnel>,
+    ) -> Result<(), HubError> {
+        // Wait for QUIC handshake to complete
+        tunnel.wait_established().await?;
 
         // Accept control connection
         let conn = NodeConnection::accept(Arc::clone(&tunnel)).await?;

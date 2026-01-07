@@ -17,19 +17,20 @@ pub struct QuicConfig {
 impl QuicConfig {
     /// Create a new QUIC configuration for client connections.
     ///
-    /// If `ca_cert_path` is provided, server certificate verification is enabled.
-    /// If `cert_path` and `key_path` are provided, client certificate authentication is enabled.
+    /// # Arguments
+    /// * `pem_path` - Path to combined PEM file (cert + key) for client auth
+    /// * `ca_pem_path` - Path to CA PEM file for server verification
     pub fn new_client(
-        cert_path: Option<&str>,
-        key_path: Option<&str>,
-        ca_cert_path: Option<&str>,
+        pem_path: Option<&str>,
+        ca_pem_path: Option<&str>,
     ) -> Result<Self, QuicError> {
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
         // Load client certificate if provided (for mTLS)
-        if let (Some(cert), Some(key)) = (cert_path, key_path) {
-            config.load_cert_chain_from_pem_file(cert)?;
-            config.load_priv_key_from_pem_file(key)?;
+        // Combined PEM file contains both cert and key
+        if let Some(pem) = pem_path {
+            config.load_cert_chain_from_pem_file(pem)?;
+            config.load_priv_key_from_pem_file(pem)?;
         }
 
         // Enable all QUIC features
@@ -46,7 +47,7 @@ impl QuicConfig {
         config.set_disable_active_migration(true);
 
         // Configure server certificate verification
-        if let Some(ca_path) = ca_cert_path {
+        if let Some(ca_path) = ca_pem_path {
             config.load_verify_locations_from_file(ca_path)?;
             config.verify_peer(true);
         } else {
@@ -56,19 +57,17 @@ impl QuicConfig {
         Ok(Self { inner: config })
     }
 
-    /// Create a new QUIC configuration for server connections from files.
+    /// Create a new QUIC configuration for server connections.
     ///
-    /// If `ca_cert_path` is provided, client certificate verification is enabled (mTLS).
-    pub fn new_server(
-        cert_path: &str,
-        key_path: &str,
-        ca_cert_path: Option<&str>,
-    ) -> Result<Self, QuicError> {
+    /// # Arguments
+    /// * `pem_path` - Path to combined PEM file (cert + key) for server
+    /// * `ca_pem_path` - Path to CA PEM file for client verification (enables mTLS)
+    pub fn new_server(pem_path: &str, ca_pem_path: Option<&str>) -> Result<Self, QuicError> {
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
-        // Load server certificate and private key
-        config.load_cert_chain_from_pem_file(cert_path)?;
-        config.load_priv_key_from_pem_file(key_path)?;
+        // Load server certificate and private key from combined PEM
+        config.load_cert_chain_from_pem_file(pem_path)?;
+        config.load_priv_key_from_pem_file(pem_path)?;
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
@@ -84,7 +83,7 @@ impl QuicConfig {
         config.set_disable_active_migration(true);
 
         // Configure client certificate verification (mTLS)
-        if let Some(ca_path) = ca_cert_path {
+        if let Some(ca_path) = ca_pem_path {
             config.load_verify_locations_from_file(ca_path)?;
             config.verify_peer(true);
         }
@@ -256,6 +255,11 @@ impl QuicConnection {
     /// Check if the connection is closed.
     pub async fn is_closed(&self) -> bool {
         self.inner.lock().await.is_closed()
+    }
+
+    /// Get the source connection ID (what clients use as dcid to reach us).
+    pub async fn source_id(&self) -> Vec<u8> {
+        self.inner.lock().await.source_id().to_vec()
     }
 
     /// Open a new bidirectional stream.
