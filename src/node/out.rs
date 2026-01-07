@@ -34,7 +34,7 @@ impl OutNode {
     }
 
     /// Connect to HUB.
-    pub async fn connect(&mut self, addr: SocketAddr) -> Result<(), OutNodeError> {
+    pub async fn connect_hub(&mut self, addr: SocketAddr) -> Result<(), OutNodeError> {
         // Establish tunnel (single TCP for now)
         let tunnel = Arc::new(Tunnel::connect(addr, None, 1).await?);
 

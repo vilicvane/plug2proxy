@@ -8,6 +8,15 @@ pub enum NodeRole {
     Out,
 }
 
+/// Connect request sent on a data stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectRequest {
+    /// Target address (e.g., "example.com:443").
+    pub target: String,
+    /// Routing tag (determined by IN).
+    pub tag: Option<String>,
+}
+
 /// Messages from node to HUB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

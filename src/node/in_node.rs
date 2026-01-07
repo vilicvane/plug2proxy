@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::tunnel::{Tunnel, TunnelError};
+use crate::tunnel::{Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
+use super::connector::HubConnector;
+use super::in_like::{InLike, InLikeError};
 use super::message::{HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
 
 /// IN node - entry point for proxied traffic.
@@ -35,7 +37,7 @@ impl InNode {
     }
 
     /// Connect to HUB.
-    pub async fn connect(&mut self, addr: SocketAddr) -> Result<(), InNodeError> {
+    pub async fn connect_hub(&mut self, addr: SocketAddr) -> Result<(), InNodeError> {
         // Establish tunnel (single TCP for now)
         let tunnel = Arc::new(Tunnel::connect(addr, None, 1).await?);
 
@@ -141,6 +143,31 @@ impl InNode {
     pub async fn get_outs(&self) -> Vec<OutInfo> {
         self.outs.read().await.values().cloned().collect()
     }
+
+    /// Get HubConnector for creating proxied connections through HUB.
+    pub fn hub_connector(&self) -> Option<HubConnector> {
+        self.hub_conn
+            .as_ref()
+            .map(|conn| HubConnector::new(Arc::clone(conn.tunnel())))
+    }
+
+    /// Create a proxied connection to target.
+    ///
+    /// Resolves routing and delegates to the appropriate connector.
+    pub async fn connect(&self, target: &str) -> Result<Stream, InNodeError> {
+        let _tag = self.resolve_tag(target).await;
+
+        // TODO: Based on tag, pick the right connector:
+        // - HubConnector for HUB-routed traffic
+        // - DirectOutConnector for direct OUT connections
+        // - LocalConnector for local exit
+        //
+        // For now, always use HubConnector.
+        let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
+        let stream = connector.connect(target).await?;
+
+        Ok(stream)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,6 +176,8 @@ pub enum InNodeError {
     Tunnel(#[from] TunnelError),
     #[error("connection error: {0}")]
     Connection(#[from] ConnectionError),
+    #[error("connect error: {0}")]
+    Connect(#[from] InLikeError),
     #[error("not connected to HUB")]
     NotConnected,
     #[error("unexpected message from HUB")]
