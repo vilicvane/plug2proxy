@@ -70,7 +70,7 @@ async fn run_out(config: OutConfig) -> anyhow::Result<()> {
 
         match out.connect_hub(config.hub_addr).await {
             Ok(()) => {
-                tracing::info!("Registered with HUB, running OUT node");
+                tracing::info!("✅ OUT node connected and registered with HUB");
 
                 // Run until disconnection
                 if let Err(e) = out.run().await {
@@ -100,7 +100,7 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
         match in_node.connect_hub(config.hub_addr).await {
             Ok(()) => {
                 let in_node = Arc::new(in_node);
-                tracing::info!("Registered with HUB");
+                tracing::info!("✅ IN node connected and registered with HUB");
 
                 // Start SOCKS5 server if configured
                 if let Some(ref socks5_config) = config.socks5 {
