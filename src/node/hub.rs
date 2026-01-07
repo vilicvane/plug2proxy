@@ -210,12 +210,66 @@ impl Hub {
 
         // Read connect request
         let request = Self::read_connect_request(&stream).await?;
-        tracing::info!("connect request: {} (tag: {:?})", request.target, request.tag);
 
-        // For now, HUB exits directly (acts as OUT)
-        // TODO: Forward to appropriate OUT based on tag
-        let _ = outs;
+        // Determine if we should forward to an OUT or exit directly from HUB
+        if let Some(tag) = &request.tag {
+            // Try to find an OUT with matching tag
+            let out_tunnel = {
+                let outs_read = outs.read().await;
+                outs_read
+                    .values()
+                    .find(|out| out.tags.contains(tag))
+                    .map(|out| (out.id.clone(), out.tunnel.clone()))
+            };
 
+            if let Some((out_id, out_tunnel)) = out_tunnel {
+                tracing::info!(
+                    "🔀 ROUTING: {} → OUT [{}] (tag: '{}')",
+                    request.target,
+                    out_id,
+                    tag
+                );
+                return Self::forward_to_out(stream, out_tunnel, request).await;
+            } else {
+                tracing::warn!(
+                    "⚠️  ROUTING: {} → HUB DIRECT (no OUT found for tag '{}')",
+                    request.target,
+                    tag
+                );
+            }
+        } else {
+            tracing::info!("🔀 ROUTING: {} → HUB DIRECT (no tag)", request.target);
+        }
+
+        // No tag or no matching OUT - HUB exits directly
+        Self::exit_from_hub(stream, request).await
+    }
+
+    /// Forward request to an OUT node.
+    async fn forward_to_out(
+        in_stream: Stream,
+        out_tunnel: Arc<Tunnel>,
+        request: ConnectRequest,
+    ) -> Result<(), HubError> {
+        // Open a new stream to the OUT node
+        let out_stream = out_tunnel.open_bi_stream().await?;
+        tracing::debug!("opened stream {} to OUT", out_stream.id());
+
+        // Forward the connect request to the OUT
+        let json = serde_json::to_vec(&request)
+            .map_err(|e| HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let len = (json.len() as u32).to_be_bytes();
+        out_stream.send(&len).await?;
+        out_stream.send(&json).await?;
+
+        // Relay data bidirectionally between IN stream and OUT stream
+        Self::relay_streams(in_stream, out_stream).await?;
+
+        Ok(())
+    }
+
+    /// HUB exits traffic directly to the target.
+    async fn exit_from_hub(stream: Stream, request: ConnectRequest) -> Result<(), HubError> {
         // Parse target address
         let target_addr: SocketAddr = request
             .target
@@ -233,10 +287,74 @@ impl Hub {
 
         // Connect to target
         let mut target_stream = TcpStream::connect(target_addr).await?;
-        tracing::info!("connected to target {}", target_addr);
+        tracing::info!(
+            "✅ HUB EXIT: Connected to {} directly from HUB",
+            target_addr
+        );
 
         // Relay data between tunnel stream and target
         Self::relay(stream, &mut target_stream).await?;
+
+        Ok(())
+    }
+
+    /// Relay data bidirectionally between two tunnel streams.
+    async fn relay_streams(stream1: Stream, stream2: Stream) -> Result<(), HubError> {
+        let stream1 = Arc::new(stream1);
+        let stream2 = Arc::new(stream2);
+
+        let s1_to_s2 = {
+            let stream1 = Arc::clone(&stream1);
+            let stream2 = Arc::clone(&stream2);
+            async move {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let (n, fin) = stream1.recv(&mut buf).await?;
+                    if n > 0 {
+                        tracing::trace!("relay: stream1->stream2 {} bytes", n);
+                        stream2.send(&buf[..n]).await?;
+                    }
+                    if fin {
+                        tracing::debug!("relay: stream1 fin");
+                        stream2.close().await?;
+                        break;
+                    }
+                    if n == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+                Ok::<_, HubError>(())
+            }
+        };
+
+        let s2_to_s1 = {
+            let stream1 = Arc::clone(&stream1);
+            let stream2 = Arc::clone(&stream2);
+            async move {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let (n, fin) = stream2.recv(&mut buf).await?;
+                    if n > 0 {
+                        tracing::trace!("relay: stream2->stream1 {} bytes", n);
+                        stream1.send(&buf[..n]).await?;
+                    }
+                    if fin {
+                        tracing::debug!("relay: stream2 fin");
+                        stream1.close().await?;
+                        break;
+                    }
+                    if n == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+                Ok::<_, HubError>(())
+            }
+        };
+
+        tokio::select! {
+            r = s1_to_s2 => r?,
+            r = s2_to_s1 => r?,
+        }
 
         Ok(())
     }
@@ -278,9 +396,8 @@ impl Hub {
             offset += n;
         }
 
-        let request: ConnectRequest = serde_json::from_slice(&msg_buf).map_err(|e| {
-            HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })?;
+        let request: ConnectRequest = serde_json::from_slice(&msg_buf)
+            .map_err(|e| HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
         Ok(request)
     }

@@ -1,0 +1,8 @@
+type: out
+id: out-us
+tags:
+  - us
+  - default
+hub_addr: "127.0.0.1:8765"
+hub_host: "localhost"
+connection_count: 4

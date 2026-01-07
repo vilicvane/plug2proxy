@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use fast_socks5::Socks5Command;
 use fast_socks5::server::{Config, Socks5Socket};
+use fast_socks5::util::target_addr::TargetAddr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -54,11 +55,27 @@ impl Socks5Server {
         // Perform SOCKS5 handshake and get the request
         socket = socket.upgrade_to_socks5().await?;
 
-        // Get the target address
+        // Get the target address (preserves domain name before DNS resolution)
         let target_addr = socket.target_addr().ok_or_else(|| Socks5Error::NoTarget)?;
 
-        let target = format!("{}", target_addr);
-        tracing::info!("SOCKS5 request: {:?} to {}", socket.cmd(), target);
+        // Extract target as string, preserving domain name if available
+        let target = match &target_addr {
+            TargetAddr::Domain(domain, port) => {
+                tracing::info!(
+                    "🔵 SOCKS5: New connection request to {}:{} (domain) from client",
+                    domain,
+                    port
+                );
+                format!("{}:{}", domain, port)
+            }
+            TargetAddr::Ip(addr) => {
+                tracing::info!(
+                    "🔵 SOCKS5: New connection request to {} (IP) from client",
+                    addr
+                );
+                format!("{}", addr)
+            }
+        };
 
         // Only handle CONNECT command
         match socket.cmd() {

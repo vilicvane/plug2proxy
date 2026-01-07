@@ -14,18 +14,21 @@ impl HubConnector {
     pub fn new(tunnel: Arc<Tunnel>) -> Self {
         Self { tunnel }
     }
-}
 
-impl InLike for HubConnector {
-    async fn connect(&self, target: &str) -> Result<Stream, InLikeError> {
+    /// Connect with an optional tag for routing.
+    pub async fn connect_with_tag(
+        &self,
+        target: &str,
+        tag: Option<&str>,
+    ) -> Result<Stream, InLikeError> {
         // Open a new data stream to HUB
         let stream = self.tunnel.open_bi_stream().await?;
         tracing::debug!("opened data stream {}", stream.id());
 
-        // Send connect request
+        // Send connect request with tag
         let request = ConnectRequest {
             target: target.to_string(),
-            tag: None, // Tag can be added by caller if needed
+            tag: tag.map(|t| t.to_string()),
         };
         let json = serde_json::to_vec(&request).map_err(|e| {
             InLikeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -35,9 +38,15 @@ impl InLike for HubConnector {
         let len = (json.len() as u32).to_be_bytes();
         stream.send(&len).await?;
         stream.send(&json).await?;
-        tracing::debug!("sent connect request for {}", target);
+        tracing::debug!("sent connect request for {} (tag: {:?})", target, tag);
 
         Ok(stream)
+    }
+}
+
+impl InLike for HubConnector {
+    async fn connect(&self, target: &str) -> Result<Stream, InLikeError> {
+        self.connect_with_tag(target, None).await
     }
 }
 

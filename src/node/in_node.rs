@@ -155,7 +155,7 @@ impl InNode {
     ///
     /// Resolves routing and delegates to the appropriate connector.
     pub async fn connect(&self, target: &str) -> Result<Stream, InNodeError> {
-        let _tag = self.resolve_tag(target).await;
+        let tag = self.resolve_tag(target).await;
 
         // TODO: Based on tag, pick the right connector:
         // - HubConnector for HUB-routed traffic
@@ -164,7 +164,7 @@ impl InNode {
         //
         // For now, always use HubConnector.
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
-        let stream = connector.connect(target).await?;
+        let stream = connector.connect_with_tag(target, tag.as_deref()).await?;
 
         Ok(stream)
     }

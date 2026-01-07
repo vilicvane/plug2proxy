@@ -1,147 +1,144 @@
-use std::net::SocketAddr;
+use clap::Parser;
+use plug2proxy::config::{Config, HubConfig, InConfig, OutConfig};
+use plug2proxy::node::{Hub, InNode, OutNode, RouteRule};
+use plug2proxy::socks5::Socks5Server;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use plug2proxy::tunnel::{QuicConfig, Tunnel};
-use tokio::net::TcpListener;
-use tokio::sync::Notify;
-
-const CONNECTION_COUNT: usize = 4;
+#[derive(Parser, Debug)]
+#[command(name = "plug2proxy")]
+#[command(about = "QUIC-over-TCP proxy with SOCKS5 support", long_about = None)]
+struct Args {
+    /// Path to configuration file
+    #[arg(short, long)]
+    config: PathBuf,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let addr: SocketAddr = "127.0.0.1:8765".parse()?;
-    let client_done = Arc::new(Notify::new());
-    let client_done_clone = Arc::clone(&client_done);
+    let args = Args::parse();
+    let config = Config::from_file(&args.config)?;
 
-    // Spawn server
-    let server_handle = tokio::spawn(async move {
-        if let Err(e) = run_server(addr, client_done_clone).await {
-            eprintln!("Server error: {}", e);
-        }
-    });
+    match config {
+        Config::Hub(hub_config) => run_hub(hub_config).await,
+        Config::Out(out_config) => run_out(out_config).await,
+        Config::In(in_config) => run_in(in_config).await,
+    }
+}
 
-    // Give server time to start
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
+    tracing::info!("Starting HUB node: {}", config.id);
+    tracing::info!("Listening on: {}", config.listen);
 
-    // Run client
-    run_client(addr).await?;
+    let hub_quic_config = plug2proxy::node::HubConfig {
+        cert_path: config.cert_path.clone(),
+        key_path: config.key_path.clone(),
+    };
 
-    // Signal server we're done
-    client_done.notify_one();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let hub = Arc::new(Hub::new(hub_quic_config));
 
-    server_handle.abort();
+    // Set routing rules
+    if !config.routes.is_empty() {
+        tracing::info!("Loading {} routing rules", config.routes.len());
+        let rules: Vec<RouteRule> = config
+            .routes
+            .iter()
+            .map(|r| RouteRule {
+                pattern: r.pattern.clone(),
+                tag: r.tag.clone(),
+            })
+            .collect();
+        hub.set_route_rules(rules).await;
+    }
 
-    println!("\n✅ QUIC-over-TCP tunnel test completed successfully!");
+    hub.serve(config.listen).await?;
+
+    tracing::info!("HUB node stopped");
     Ok(())
 }
 
-async fn run_server(addr: SocketAddr, done: Arc<Notify>) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    println!("Server: listening on {}", addr);
+async fn run_out(config: OutConfig) -> anyhow::Result<()> {
+    tracing::info!("Starting OUT node: {}", config.id);
+    tracing::info!("Tags: {:?}", config.tags);
+    tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
-    // Accept TCP connections
-    let mut tcp_streams = Vec::with_capacity(CONNECTION_COUNT);
-    for _ in 0..CONNECTION_COUNT {
-        let (stream, peer) = listener.accept().await?;
-        stream.set_nodelay(true)?;
-        println!("Server: accepted TCP connection from {}", peer);
-        tcp_streams.push(stream);
-    }
-
-    // Create server QUIC config
-    let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem")?.into_inner();
-
-    // Create tunnel from TCP streams
-    let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config).await?;
-    println!("Server: QUIC tunnel established!");
-
-    // Wait for incoming streams and echo data back
-    let mut stream_count = 0;
+    // Auto-reconnect loop
     loop {
-        tokio::select! {
-            _ = done.notified() => {
-                println!("Server: shutting down (processed {} streams)", stream_count);
-                break;
+        let mut out = OutNode::new(config.id.clone(), config.tags.clone());
+
+        match out.connect_hub(config.hub_addr).await {
+            Ok(()) => {
+                tracing::info!("Registered with HUB, running OUT node");
+
+                // Run until disconnection
+                if let Err(e) = out.run().await {
+                    tracing::error!("OUT node error: {}", e);
+                }
+
+                tracing::warn!("OUT node disconnected, reconnecting in 5 seconds...");
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                // Check for readable streams
-                let quic = tunnel.quic();
-                let readable = quic.readable_streams().await;
-
-                for stream_id in readable {
-                    stream_count += 1;
-
-                    // Read data from stream
-                    let mut buf = vec![0u8; 1024];
-                    match quic.stream_recv(stream_id, &mut buf).await {
-                        Ok((len, _fin)) => {
-                            if len > 0 {
-                                let msg = String::from_utf8_lossy(&buf[..len]);
-                                println!("Server: received on stream {}: \"{}\"", stream_id, msg);
-
-                                // Echo back with prefix
-                                let response = format!("Echo: {}", msg);
-                                if let Err(e) = quic.stream_send(stream_id, response.as_bytes(), false).await {
-                                    println!("Server: failed to send response: {}", e);
-                                } else {
-                                    println!("Server: sent response on stream {}", stream_id);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("Server: error reading stream {}: {}", stream_id, e);
-                        }
-                    }
-                }
-
-                if tunnel.is_closed().await {
-                    break;
-                }
+            Err(e) => {
+                tracing::error!("Failed to connect to HUB: {}", e);
+                tracing::info!("Retrying in 5 seconds...");
             }
         }
-    }
 
-    Ok(())
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
-async fn run_client(addr: SocketAddr) -> anyhow::Result<()> {
-    println!("Client: connecting to {}", addr);
+async fn run_in(config: InConfig) -> anyhow::Result<()> {
+    tracing::info!("Starting IN node: {}", config.id);
+    tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
-    // Create client tunnel
-    let tunnel = Tunnel::connect(addr, Some("localhost"), CONNECTION_COUNT).await?;
-    println!("Client: QUIC tunnel established!");
+    // Auto-reconnect loop
+    loop {
+        let mut in_node = InNode::new(config.id.clone());
 
-    // Open streams and send data
-    for i in 0..3 {
-        // Open a new bidirectional stream
-        let stream = tunnel.open_bi_stream().await?;
-        println!("Client: opened stream {}", stream.id());
+        match in_node.connect_hub(config.hub_addr).await {
+            Ok(()) => {
+                let in_node = Arc::new(in_node);
+                tracing::info!("Registered with HUB");
 
-        // Send a message
-        let msg = format!("Hello from stream {}!", i);
-        stream.send(msg.as_bytes()).await?;
-        println!("Client: sent on stream {}: \"{}\"", stream.id(), msg);
+                // Start SOCKS5 server if configured
+                if let Some(ref socks5_config) = config.socks5 {
+                    tracing::info!("Starting SOCKS5 server on: {}", socks5_config.listen);
 
-        // Give server time to process and respond
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    let socks5 = Socks5Server::new(Arc::clone(&in_node), socks5_config.listen);
 
-        // Try to receive response
-        let mut buf = vec![0u8; 1024];
-        let (len, _fin) = stream.recv(&mut buf).await?;
-        if len > 0 {
-            let response = String::from_utf8_lossy(&buf[..len]);
-            println!("Client: received on stream {}: \"{}\"", stream.id(), response);
-        } else {
-            println!("Client: no response yet on stream {}", stream.id());
+                    // Spawn message loop to receive updates from HUB
+                    let in_node_clone = Arc::clone(&in_node);
+                    tokio::spawn(async move {
+                        if let Err(e) = in_node_clone.run().await {
+                            tracing::error!("IN node message loop error: {}", e);
+                        }
+                    });
+
+                    // Run SOCKS5 server (blocks until HUB disconnects)
+                    if let Err(e) = socks5.run().await {
+                        tracing::error!("SOCKS5 server error: {}", e);
+                    }
+
+                    tracing::warn!("IN node disconnected, reconnecting in 5 seconds...");
+                } else {
+                    tracing::warn!(
+                        "No SOCKS5 config provided, IN node will only handle tunnel connections"
+                    );
+                    if let Err(e) = in_node.run().await {
+                        tracing::error!("IN node error: {}", e);
+                    }
+
+                    tracing::warn!("IN node disconnected, reconnecting in 5 seconds...");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to connect to HUB: {}", e);
+                tracing::info!("Retrying in 5 seconds...");
+            }
         }
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-
-    // Close the tunnel
-    tunnel.close().await?;
-    println!("Client: tunnel closed");
-
-    Ok(())
 }
