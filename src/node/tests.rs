@@ -32,7 +32,7 @@ async fn test_in_out_connect_to_hub() {
 
     // Connect OUT first (so IN receives it in the initial update)
     let mut out = OutNode::new("out-1".to_string(), vec!["direct".to_string()]);
-    out.connect_hub(hub_addr).await.unwrap();
+    out.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT connected");
 
     // Give HUB time to process OUT registration
@@ -40,7 +40,7 @@ async fn test_in_out_connect_to_hub() {
 
     // Connect IN
     let mut in_node = InNode::new("in-1".to_string());
-    in_node.connect_hub(hub_addr).await.unwrap();
+    in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected");
 
     // Verify IN received OUT info
@@ -96,7 +96,7 @@ async fn test_full_proxy_flow() {
 
     // Connect IN
     let mut in_node = InNode::new("in-1".to_string());
-    in_node.connect_hub(hub_addr).await.unwrap();
+    in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected to HUB");
 
     // Create proxied connection to echo server through HUB
@@ -205,11 +205,11 @@ async fn test_multi_out_with_routing() {
 
     // Connect OUT nodes with different tags
     let mut out1 = OutNode::new("out-1".to_string(), vec!["out1".to_string()]);
-    out1.connect_hub(hub_addr).await.unwrap();
+    out1.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT1 connected with tag 'out1'");
 
     let mut out2 = OutNode::new("out-2".to_string(), vec!["out2".to_string()]);
-    out2.connect_hub(hub_addr).await.unwrap();
+    out2.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT2 connected with tag 'out2'");
 
     // Spawn OUT run loops (though they won't actually handle traffic in this test
@@ -225,7 +225,7 @@ async fn test_multi_out_with_routing() {
 
     // Connect IN
     let mut in_node = InNode::new("in-1".to_string());
-    in_node.connect_hub(hub_addr).await.unwrap();
+    in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected to HUB");
 
     // Verify IN received both OUTs

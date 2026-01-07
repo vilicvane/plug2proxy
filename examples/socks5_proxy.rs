@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start OUT node
     let mut out_node = OutNode::new("out1".to_string(), vec!["default".to_string()]);
-    out_node.connect_hub(hub_addr).await?;
+    out_node.connect_hub(hub_addr, 1).await?;
     println!("✓ OUT node connected");
 
     tokio::spawn(async move {
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start IN node
     let mut in_node = InNode::new("in1".to_string());
-    in_node.connect_hub(hub_addr).await?;
+    in_node.connect_hub(hub_addr, 1).await?;
     println!("✓ IN node connected");
 
     // Spawn IN message loop

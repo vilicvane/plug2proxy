@@ -8,6 +8,23 @@ use tokio::sync::mpsc;
 
 use super::{FramedConnection, QuicConfig, QuicConnection, QuicError};
 
+/// Handle for adding new TCP connections to an existing tunnel.
+#[derive(Clone)]
+pub struct TcpConnectionHandle {
+    add_connection_tx: mpsc::Sender<TcpStream>,
+}
+
+impl TcpConnectionHandle {
+    /// Add a new TCP connection to the tunnel.
+    pub async fn add_connection(&self, stream: TcpStream) -> Result<(), TunnelError> {
+        self.add_connection_tx
+            .send(stream)
+            .await
+            .map_err(|_| TunnelError::ConnectionFailed)?;
+        Ok(())
+    }
+}
+
 /// A QUIC tunnel over multiple TCP connections.
 ///
 /// This provides QUIC protocol features (encryption, streams, reliability)
@@ -16,6 +33,8 @@ pub struct Tunnel {
     quic: QuicConnection,
     /// Handle to the driver task
     driver_handle: tokio::task::JoinHandle<Result<(), QuicError>>,
+    /// Handle for adding new TCP connections
+    tcp_handle: TcpConnectionHandle,
 }
 
 impl Tunnel {
@@ -30,27 +49,64 @@ impl Tunnel {
     }
 
     /// Create a client tunnel with custom QUIC config.
+    ///
+    /// Establishes a single TCP connection first, waits for QUIC handshake to succeed,
+    /// then adds additional TCP connections in the background if `connection_count > 1`.
     pub async fn connect_with_config(
         addr: SocketAddr,
         server_name: Option<&str>,
         connection_count: usize,
         mut config: quiche::Config,
     ) -> Result<Self, TunnelError> {
-        // Establish TCP connections
-        let mut tcp_streams = Vec::with_capacity(connection_count);
-        for _ in 0..connection_count {
-            let stream = TcpStream::connect(addr).await?;
-            stream.set_nodelay(true)?;
-            tcp_streams.push(stream);
+        // Establish the first TCP connection
+        let first_stream = TcpStream::connect(addr).await?;
+        first_stream.set_nodelay(true)?;
+
+        tracing::info!("established initial TCP connection to {}", addr);
+
+        // Create tunnel with single connection first
+        let tunnel =
+            Self::from_tcp_streams_client(vec![first_stream], server_name, &mut config).await?;
+
+        // If more connections are requested, add them in the background after handshake succeeds
+        if connection_count > 1 {
+            let tcp_handle = tunnel.tcp_handle.clone();
+            let additional_count = connection_count - 1;
+
+            tokio::spawn(async move {
+                for i in 0..additional_count {
+                    match TcpStream::connect(addr).await {
+                        Ok(stream) => {
+                            if let Err(e) = stream.set_nodelay(true) {
+                                tracing::warn!(
+                                    "failed to set nodelay on connection {}: {}",
+                                    i + 2,
+                                    e
+                                );
+                                continue;
+                            }
+                            if tcp_handle.add_connection(stream).await.is_err() {
+                                tracing::warn!(
+                                    "failed to add connection {}: channel closed",
+                                    i + 2
+                                );
+                                break;
+                            }
+                            tracing::debug!("added TCP connection {} to tunnel", i + 2);
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to establish TCP connection {}: {}", i + 2, e);
+                        }
+                    }
+                }
+                tracing::info!(
+                    "finished extending tunnel with {} additional TCP connections",
+                    additional_count
+                );
+            });
         }
 
-        tracing::info!(
-            "established {} TCP connections to {}",
-            connection_count,
-            addr
-        );
-
-        Self::from_tcp_streams_client(tcp_streams, server_name, &mut config).await
+        Ok(tunnel)
     }
 
     /// Create a client tunnel from existing TCP streams.
@@ -63,7 +119,7 @@ impl Tunnel {
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
 
         // Split TCP streams and spawn IO tasks
-        spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
+        let tcp_handle = spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
 
         // Create QUIC connection
         let quic = QuicConnection::connect(server_name, config, outgoing_tx.clone(), incoming_rx)?;
@@ -105,6 +161,7 @@ impl Tunnel {
         Ok(Self {
             quic,
             driver_handle,
+            tcp_handle,
         })
     }
 
@@ -117,7 +174,7 @@ impl Tunnel {
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
 
         // Split TCP streams and spawn IO tasks
-        spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
+        let tcp_handle = spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
 
         // Wait for the first packet to get the client's connection ID
         let mut rx = incoming_rx;
@@ -185,6 +242,7 @@ impl Tunnel {
         Ok(Self {
             quic,
             driver_handle,
+            tcp_handle,
         })
     }
 
@@ -269,6 +327,16 @@ impl Tunnel {
     /// Get access to the underlying QUIC connection.
     pub fn quic(&self) -> &QuicConnection {
         &self.quic
+    }
+
+    /// Get the TCP connection handle for adding more connections.
+    pub fn tcp_handle(&self) -> &TcpConnectionHandle {
+        &self.tcp_handle
+    }
+
+    /// Add a new TCP connection to the tunnel.
+    pub async fn add_tcp_connection(&self, stream: TcpStream) -> Result<(), TunnelError> {
+        self.tcp_handle.add_connection(stream).await
     }
 }
 
@@ -445,11 +513,12 @@ impl Drop for Stream {
 }
 
 /// Spawn tasks to handle TCP IO for the QUIC connection.
+/// Returns a handle that can be used to add more TCP connections dynamically.
 fn spawn_tcp_io_tasks(
     tcp_streams: Vec<TcpStream>,
     mut outgoing_rx: mpsc::Receiver<Bytes>,
     incoming_tx: mpsc::Sender<Bytes>,
-) {
+) -> TcpConnectionHandle {
     let mut senders = Vec::new();
     let mut receivers = Vec::new();
 
@@ -460,39 +529,90 @@ fn spawn_tcp_io_tasks(
         receivers.push(receiver);
     }
 
+    // Channel for adding new TCP connections
+    let (add_connection_tx, mut add_connection_rx) = mpsc::channel::<TcpStream>(16);
+    let incoming_tx_clone = incoming_tx.clone();
+
     // Spawn task to distribute outgoing datagrams across TCP connections
+    // This task also handles adding new connections dynamically
     tokio::spawn(async move {
         let mut index = 0;
-        let count = senders.len();
-        while let Some(data) = outgoing_rx.recv().await {
-            let sender = &mut senders[index];
-            index = (index + 1) % count;
-            if let Err(e) = sender.send(data).await {
-                tracing::warn!("TCP send error: {}", e);
-                break;
+        loop {
+            tokio::select! {
+                biased;
+
+                // Handle new connection additions
+                new_stream = add_connection_rx.recv() => {
+                    let Some(stream) = new_stream else {
+                        break;
+                    };
+                    let conn = FramedConnection::new(stream);
+                    let (sender, receiver) = conn.split();
+                    senders.push(sender);
+
+                    // Spawn a receive task for the new connection
+                    let tx = incoming_tx_clone.clone();
+                    tokio::spawn(spawn_recv_task(receiver, tx));
+
+                    tracing::debug!("added new TCP connection, total: {}", senders.len());
+                }
+
+                // Handle outgoing data
+                data = outgoing_rx.recv() => {
+                    let Some(data) = data else {
+                        break;
+                    };
+
+                    if senders.is_empty() {
+                        tracing::warn!("no TCP connections available for sending");
+                        break;
+                    }
+
+                    let send_index = index;
+                    index = (index + 1) % senders.len();
+
+                    if let Err(e) = senders[send_index].send(data).await {
+                        tracing::warn!("TCP send error: {}", e);
+                        // Remove failed sender and continue with others
+                        senders.remove(send_index);
+                        if senders.is_empty() {
+                            tracing::warn!("all TCP connections failed");
+                            break;
+                        }
+                        // Adjust index if needed
+                        if index >= senders.len() {
+                            index = 0;
+                        }
+                    }
+                }
             }
         }
     });
 
-    // Spawn tasks to receive from each TCP connection
-    for mut receiver in receivers {
+    // Spawn tasks to receive from each initial TCP connection
+    for receiver in receivers {
         let tx = incoming_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(Some(data)) => {
-                        if tx.send(data).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::warn!("TCP recv error: {}", e);
-                        break;
-                    }
+        tokio::spawn(spawn_recv_task(receiver, tx));
+    }
+
+    TcpConnectionHandle { add_connection_tx }
+}
+
+/// Spawn a receive task for a single TCP connection.
+async fn spawn_recv_task(mut receiver: super::ConnectionReceiver, tx: mpsc::Sender<Bytes>) {
+    loop {
+        match receiver.recv().await {
+            Ok(Some(data)) => {
+                if tx.send(data).await.is_err() {
+                    break;
                 }
             }
-        });
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!("TCP recv error: {}", e);
+                break;
+            }
+        }
     }
 }
 

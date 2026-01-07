@@ -195,12 +195,12 @@ mod tunnel_tests {
 
     use crate::tunnel::{QuicConfig, Tunnel};
 
-    const CONNECTION_COUNT: usize = 2;
+    // Use 1 for initial connection since client now extends connections after handshake
+    const INITIAL_CONNECTION_COUNT: usize = 1;
 
     async fn setup_client(addr: SocketAddr) -> Tunnel {
-        Tunnel::connect(addr, Some("localhost"), CONNECTION_COUNT)
-            .await
-            .unwrap()
+        // Request 2 connections - client will establish 1 first, then extend after handshake
+        Tunnel::connect(addr, Some("localhost"), 2).await.unwrap()
     }
 
     #[tokio::test]
@@ -210,8 +210,9 @@ mod tunnel_tests {
         let addr = listener.local_addr().unwrap();
 
         let server_task = tokio::spawn(async move {
-            let mut tcp_streams = Vec::with_capacity(CONNECTION_COUNT);
-            for _ in 0..CONNECTION_COUNT {
+            // Accept only the initial connection(s)
+            let mut tcp_streams = Vec::with_capacity(INITIAL_CONNECTION_COUNT);
+            for _ in 0..INITIAL_CONNECTION_COUNT {
                 let (stream, _) = listener.accept().await.unwrap();
                 stream.set_nodelay(true).unwrap();
                 tcp_streams.push(stream);
@@ -246,8 +247,8 @@ mod tunnel_tests {
         let addr = listener.local_addr().unwrap();
 
         let server_task = tokio::spawn(async move {
-            let mut tcp_streams = Vec::with_capacity(CONNECTION_COUNT);
-            for _ in 0..CONNECTION_COUNT {
+            let mut tcp_streams = Vec::with_capacity(INITIAL_CONNECTION_COUNT);
+            for _ in 0..INITIAL_CONNECTION_COUNT {
                 let (stream, _) = listener.accept().await.unwrap();
                 stream.set_nodelay(true).unwrap();
                 tcp_streams.push(stream);
@@ -320,8 +321,8 @@ mod tunnel_tests {
         let addr = listener.local_addr().unwrap();
 
         let server_task = tokio::spawn(async move {
-            let mut tcp_streams = Vec::with_capacity(CONNECTION_COUNT);
-            for _ in 0..CONNECTION_COUNT {
+            let mut tcp_streams = Vec::with_capacity(INITIAL_CONNECTION_COUNT);
+            for _ in 0..INITIAL_CONNECTION_COUNT {
                 let (stream, _) = listener.accept().await.unwrap();
                 stream.set_nodelay(true).unwrap();
                 tcp_streams.push(stream);

@@ -37,9 +37,12 @@ impl OutNode {
     }
 
     /// Connect to HUB.
-    pub async fn connect_hub(&mut self, addr: SocketAddr) -> Result<(), OutNodeError> {
-        // Establish tunnel (single TCP for now)
-        let tunnel = Arc::new(Tunnel::connect(addr, None, 1).await?);
+    pub async fn connect_hub(
+        &mut self,
+        addr: SocketAddr,
+        connection_count: usize,
+    ) -> Result<(), OutNodeError> {
+        let tunnel = Arc::new(Tunnel::connect(addr, None, connection_count).await?);
 
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;

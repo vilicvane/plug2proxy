@@ -64,11 +64,13 @@ async fn run_out(config: OutConfig) -> anyhow::Result<()> {
     tracing::info!("Tags: {:?}", config.tags);
     tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
+    let connection_count = config.connection_count.unwrap_or(1);
+
     // Auto-reconnect loop
     loop {
         let mut out = OutNode::new(config.id.clone(), config.tags.clone());
 
-        match out.connect_hub(config.hub_addr).await {
+        match out.connect_hub(config.hub_addr, connection_count).await {
             Ok(()) => {
                 tracing::info!("✅ OUT node connected and registered with HUB");
 
@@ -93,11 +95,13 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
     tracing::info!("Starting IN node: {}", config.id);
     tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
+    let connection_count = config.connection_count.unwrap_or(1);
+
     // Auto-reconnect loop
     loop {
         let mut in_node = InNode::new(config.id.clone());
 
-        match in_node.connect_hub(config.hub_addr).await {
+        match in_node.connect_hub(config.hub_addr, connection_count).await {
             Ok(()) => {
                 let in_node = Arc::new(in_node);
                 tracing::info!("✅ IN node connected and registered with HUB");

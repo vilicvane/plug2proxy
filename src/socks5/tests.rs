@@ -39,7 +39,7 @@ mod socks5_integration_tests {
 
         // Connect IN node
         let mut in_node = InNode::new("test_in".to_string());
-        let result: Result<(), _> = in_node.connect_hub(hub_addr).await;
+        let result: Result<(), _> = in_node.connect_hub(hub_addr, 1).await;
 
         // We expect this to succeed
         assert!(result.is_ok(), "IN node should connect to HUB");
@@ -86,7 +86,7 @@ mod relay_tests {
 
         // Connect IN
         let mut in_node = InNode::new("test_in".to_string());
-        in_node.connect_hub(hub_addr).await.unwrap();
+        in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         (hub_addr, Arc::new(in_node))
     }
@@ -118,7 +118,7 @@ mod relay_tests {
 
         // Connect OUT node first (it needs to register before IN sees it)
         let mut out_node = OutNode::new("test_out".to_string(), vec!["test".to_string()]);
-        out_node.connect_hub(hub_addr).await.unwrap();
+        out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Run OUT node in background
         tokio::spawn(async move {
@@ -129,7 +129,7 @@ mod relay_tests {
 
         // Connect IN
         let mut in_node = InNode::new("test_in".to_string());
-        in_node.connect_hub(hub_addr).await.unwrap();
+        in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Add a catch-all route rule to route through OUT
         // Pattern "." matches any target since all targets contain "."
@@ -681,7 +681,7 @@ mod socks5_server_tests {
 
         // Connect IN
         let mut in_node = InNode::new("test_in".to_string());
-        in_node.connect_hub(hub_addr).await.unwrap();
+        in_node.connect_hub(hub_addr, 1).await.unwrap();
         let in_node = Arc::new(in_node);
 
         // Start SOCKS5 server
@@ -1201,7 +1201,7 @@ mod udp_integration_tests {
 
         // 3. Start OUT node
         let mut out_node = OutNode::new("test_out".to_string(), vec!["default".to_string()]);
-        out_node.connect_hub(hub_addr).await?;
+        out_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("OUT node connected");
 
         tokio::spawn(async move {
@@ -1214,7 +1214,7 @@ mod udp_integration_tests {
 
         // 4. Start IN node
         let mut in_node = InNode::new("test_in".to_string());
-        in_node.connect_hub(hub_addr).await?;
+        in_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("IN node connected");
 
         let in_node = Arc::new(in_node);
@@ -1327,7 +1327,7 @@ mod udp_e2e_tests {
 
         // Connect OUT node (for UDP forwarding)
         let mut out_node = OutNode::new("test_out".to_string(), vec!["test".to_string()]);
-        out_node.connect_hub(hub_addr).await.unwrap();
+        out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         tokio::spawn(async move {
             let _ = out_node.run().await;
@@ -1337,7 +1337,7 @@ mod udp_e2e_tests {
 
         // Connect IN node
         let mut in_node = InNode::new("test_in".to_string());
-        in_node.connect_hub(hub_addr).await.unwrap();
+        in_node.connect_hub(hub_addr, 1).await.unwrap();
         let in_node = Arc::new(in_node);
 
         // Start SOCKS5 server
@@ -1478,7 +1478,7 @@ mod udp_e2e_tests {
 
             // Connect IN node
             let mut in_node = InNode::new("test_in".to_string());
-            in_node.connect_hub(hub_addr).await.unwrap();
+            in_node.connect_hub(hub_addr, 1).await.unwrap();
             let in_node = Arc::new(in_node);
 
             // Start SOCKS5 server

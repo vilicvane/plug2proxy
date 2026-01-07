@@ -37,9 +37,12 @@ impl InNode {
     }
 
     /// Connect to HUB.
-    pub async fn connect_hub(&mut self, addr: SocketAddr) -> Result<(), InNodeError> {
-        // Establish tunnel (single TCP for now)
-        let tunnel = Arc::new(Tunnel::connect(addr, None, 1).await?);
+    pub async fn connect_hub(
+        &mut self,
+        addr: SocketAddr,
+        connection_count: usize,
+    ) -> Result<(), InNodeError> {
+        let tunnel = Arc::new(Tunnel::connect(addr, None, connection_count).await?);
 
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;
