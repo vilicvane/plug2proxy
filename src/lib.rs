@@ -1,3 +1,4 @@
+pub mod cert;
 pub mod config;
 pub mod node;
 pub mod socks5;

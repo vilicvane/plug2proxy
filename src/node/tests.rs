@@ -7,6 +7,15 @@ use tokio::net::TcpListener;
 
 use super::*;
 
+/// Test helper: create a ClientConfig with no certificates (disabled mTLS for tests).
+fn test_client_config() -> ClientConfig {
+    ClientConfig {
+        cert_path: None,
+        key_path: None,
+        ca_cert_path: None,
+    }
+}
+
 #[tokio::test]
 async fn test_in_out_connect_to_hub() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -15,6 +24,7 @@ async fn test_in_out_connect_to_hub() {
     let hub = Arc::new(Hub::new(HubConfig {
         cert_path: "certs/cert.pem".to_string(),
         key_path: "certs/key.pem".to_string(),
+        ca_cert_path: None,
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -31,7 +41,11 @@ async fn test_in_out_connect_to_hub() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect OUT first (so IN receives it in the initial update)
-    let mut out = OutNode::new("out-1".to_string(), vec!["direct".to_string()]);
+    let mut out = OutNode::new(
+        "out-1".to_string(),
+        vec!["direct".to_string()],
+        test_client_config(),
+    );
     out.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT connected");
 
@@ -39,7 +53,7 @@ async fn test_in_out_connect_to_hub() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect IN
-    let mut in_node = InNode::new("in-1".to_string());
+    let mut in_node = InNode::new("in-1".to_string(), test_client_config());
     in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected");
 
@@ -80,6 +94,7 @@ async fn test_full_proxy_flow() {
     let hub = Arc::new(Hub::new(HubConfig {
         cert_path: "certs/cert.pem".to_string(),
         key_path: "certs/key.pem".to_string(),
+        ca_cert_path: None,
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -95,7 +110,7 @@ async fn test_full_proxy_flow() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect IN
-    let mut in_node = InNode::new("in-1".to_string());
+    let mut in_node = InNode::new("in-1".to_string(), test_client_config());
     in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected to HUB");
 
@@ -173,6 +188,7 @@ async fn test_multi_out_with_routing() {
     let hub = Arc::new(Hub::new(HubConfig {
         cert_path: "certs/cert.pem".to_string(),
         key_path: "certs/key.pem".to_string(),
+        ca_cert_path: None,
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -204,11 +220,19 @@ async fn test_multi_out_with_routing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect OUT nodes with different tags
-    let mut out1 = OutNode::new("out-1".to_string(), vec!["out1".to_string()]);
+    let mut out1 = OutNode::new(
+        "out-1".to_string(),
+        vec!["out1".to_string()],
+        test_client_config(),
+    );
     out1.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT1 connected with tag 'out1'");
 
-    let mut out2 = OutNode::new("out-2".to_string(), vec!["out2".to_string()]);
+    let mut out2 = OutNode::new(
+        "out-2".to_string(),
+        vec!["out2".to_string()],
+        test_client_config(),
+    );
     out2.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT2 connected with tag 'out2'");
 
@@ -224,7 +248,7 @@ async fn test_multi_out_with_routing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect IN
-    let mut in_node = InNode::new("in-1".to_string());
+    let mut in_node = InNode::new("in-1".to_string(), test_client_config());
     in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected to HUB");
 

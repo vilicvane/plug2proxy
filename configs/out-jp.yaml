@@ -1,7 +1,0 @@
-type: out
-id: out-jp
-tags:
-  - jp
-hub_addr: "127.0.0.1:8765"
-hub_host: "localhost"
-connection_count: 4

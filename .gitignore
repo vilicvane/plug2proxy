@@ -1,3 +1,8 @@
 /plug2proxy_old_for_reference
 
-/target
+/tmp/
+
+/target/
+
+/configs/
+/certs/

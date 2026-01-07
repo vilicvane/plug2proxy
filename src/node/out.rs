@@ -8,6 +8,7 @@ use crate::tunnel::{Stream, Tunnel, TunnelError};
 use crate::udp_proxy::Datagram;
 
 use super::connection::{ConnectionError, HubConnection};
+use super::hub::ClientConfig;
 use super::message::{HubMessage, NodeMessage, NodeRole};
 use super::out_like::{OutLike, OutLikeError};
 
@@ -15,15 +16,18 @@ use super::out_like::{OutLike, OutLikeError};
 pub struct OutNode {
     id: String,
     tags: Vec<String>,
+    /// Client TLS configuration.
+    client_config: ClientConfig,
     /// Connection to HUB.
     hub_conn: Option<HubConnection>,
 }
 
 impl OutNode {
-    pub fn new(id: String, tags: Vec<String>) -> Self {
+    pub fn new(id: String, tags: Vec<String>, client_config: ClientConfig) -> Self {
         Self {
             id,
             tags,
+            client_config,
             hub_conn: None,
         }
     }
@@ -42,7 +46,17 @@ impl OutNode {
         addr: SocketAddr,
         connection_count: usize,
     ) -> Result<(), OutNodeError> {
-        let tunnel = Arc::new(Tunnel::connect(addr, None, connection_count).await?);
+        let tunnel = Arc::new(
+            Tunnel::connect_with_client_cert(
+                addr,
+                None,
+                connection_count,
+                self.client_config.cert_path.as_deref(),
+                self.client_config.key_path.as_deref(),
+                self.client_config.ca_cert_path.as_deref(),
+            )
+            .await?,
+        );
 
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;

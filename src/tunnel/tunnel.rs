@@ -38,13 +38,33 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// Create a client tunnel connecting to a server.
+    /// Create a client tunnel connecting to a server (no certificate verification).
     pub async fn connect(
         addr: SocketAddr,
         server_name: Option<&str>,
         connection_count: usize,
     ) -> Result<Self, TunnelError> {
-        let config = QuicConfig::new_client()?;
+        Self::connect_with_client_cert(addr, server_name, connection_count, None, None, None).await
+    }
+
+    /// Create a client tunnel with optional client certificate authentication.
+    ///
+    /// # Arguments
+    /// * `addr` - Server address to connect to
+    /// * `server_name` - Optional server name for SNI
+    /// * `connection_count` - Number of TCP connections to use
+    /// * `cert_path` - Optional path to client certificate (for mTLS)
+    /// * `key_path` - Optional path to client private key (for mTLS)
+    /// * `ca_cert_path` - Optional path to CA certificate (for server verification)
+    pub async fn connect_with_client_cert(
+        addr: SocketAddr,
+        server_name: Option<&str>,
+        connection_count: usize,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        ca_cert_path: Option<&str>,
+    ) -> Result<Self, TunnelError> {
+        let config = QuicConfig::new_client(cert_path, key_path, ca_cert_path)?;
         Self::connect_with_config(addr, server_name, connection_count, config.into_inner()).await
     }
 

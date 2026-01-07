@@ -4,13 +4,21 @@ mod socks5_integration_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::node::{Hub, HubConfig, InNode};
+    use crate::node::{ClientConfig, Hub, HubConfig, InNode};
     use crate::socks5::Socks5Server;
+
+    fn test_client_config() -> ClientConfig {
+        ClientConfig {
+            cert_path: None,
+            key_path: None,
+            ca_cert_path: None,
+        }
+    }
 
     #[tokio::test]
     async fn test_socks5_server_creation() {
         // This test just verifies that we can create all the components
-        let in_node = Arc::new(InNode::new("test_in".to_string()));
+        let in_node = Arc::new(InNode::new("test_in".to_string(), test_client_config()));
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let _socks5_server = Socks5Server::new(in_node, bind_addr);
@@ -28,6 +36,7 @@ mod socks5_integration_tests {
         let hub: Arc<Hub> = Arc::new(Hub::new(HubConfig {
             cert_path: "certs/cert.pem".to_string(),
             key_path: "certs/key.pem".to_string(),
+            ca_cert_path: None,
         }));
 
         let hub_clone: Arc<Hub> = Arc::clone(&hub);
@@ -38,7 +47,7 @@ mod socks5_integration_tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Connect IN node
-        let mut in_node = InNode::new("test_in".to_string());
+        let mut in_node = InNode::new("test_in".to_string(), test_client_config());
         let result: Result<(), _> = in_node.connect_hub(hub_addr, 1).await;
 
         // We expect this to succeed
@@ -58,9 +67,17 @@ mod relay_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use crate::node::{Hub, HubConfig, InNode, OutNode};
+    use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn test_client_config() -> ClientConfig {
+        ClientConfig {
+            cert_path: None,
+            key_path: None,
+            ca_cert_path: None,
+        }
+    }
 
     /// Setup test infrastructure and return (hub_addr, in_node)
     async fn setup_test_env() -> (SocketAddr, Arc<InNode>) {
@@ -70,6 +87,7 @@ mod relay_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             cert_path: "certs/cert.pem".to_string(),
             key_path: "certs/key.pem".to_string(),
+            ca_cert_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -85,7 +103,7 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN
-        let mut in_node = InNode::new("test_in".to_string());
+        let mut in_node = InNode::new("test_in".to_string(), test_client_config());
         in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         (hub_addr, Arc::new(in_node))
@@ -102,6 +120,7 @@ mod relay_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             cert_path: "certs/cert.pem".to_string(),
             key_path: "certs/key.pem".to_string(),
+            ca_cert_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -117,7 +136,11 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect OUT node first (it needs to register before IN sees it)
-        let mut out_node = OutNode::new("test_out".to_string(), vec!["test".to_string()]);
+        let mut out_node = OutNode::new(
+            "test_out".to_string(),
+            vec!["test".to_string()],
+            test_client_config(),
+        );
         out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Run OUT node in background
@@ -128,7 +151,7 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN
-        let mut in_node = InNode::new("test_in".to_string());
+        let mut in_node = InNode::new("test_in".to_string(), test_client_config());
         in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Add a catch-all route rule to route through OUT
@@ -652,10 +675,18 @@ mod socks5_server_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    use crate::node::{Hub, HubConfig, InNode};
+    use crate::node::{ClientConfig, Hub, HubConfig, InNode};
     use crate::socks5::Socks5Server;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+    fn test_client_config() -> ClientConfig {
+        ClientConfig {
+            cert_path: None,
+            key_path: None,
+            ca_cert_path: None,
+        }
+    }
 
     /// Setup test infrastructure with SOCKS5 server
     async fn setup_socks5_env() -> (SocketAddr, SocketAddr) {
@@ -665,6 +696,7 @@ mod socks5_server_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             cert_path: "certs/cert.pem".to_string(),
             key_path: "certs/key.pem".to_string(),
+            ca_cert_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -680,7 +712,7 @@ mod socks5_server_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN
-        let mut in_node = InNode::new("test_in".to_string());
+        let mut in_node = InNode::new("test_in".to_string(), test_client_config());
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         let in_node = Arc::new(in_node);
 
@@ -1141,8 +1173,16 @@ mod udp_integration_tests {
 
     use tokio::net::UdpSocket;
 
-    use crate::node::{Hub, HubConfig, InNode, OutNode};
+    use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
+
+    fn test_client_config() -> ClientConfig {
+        ClientConfig {
+            cert_path: None,
+            key_path: None,
+            ca_cert_path: None,
+        }
+    }
 
     /// Integration test: Simulate UDP echo through SOCKS5 -> IN -> HUB -> OUT
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1188,6 +1228,7 @@ mod udp_integration_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             cert_path: "certs/cert.pem".to_string(),
             key_path: "certs/key.pem".to_string(),
+            ca_cert_path: None,
         }));
 
         let hub_clone = Arc::clone(&hub);
@@ -1200,7 +1241,11 @@ mod udp_integration_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 3. Start OUT node
-        let mut out_node = OutNode::new("test_out".to_string(), vec!["default".to_string()]);
+        let mut out_node = OutNode::new(
+            "test_out".to_string(),
+            vec!["default".to_string()],
+            test_client_config(),
+        );
         out_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("OUT node connected");
 
@@ -1213,7 +1258,7 @@ mod udp_integration_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 4. Start IN node
-        let mut in_node = InNode::new("test_in".to_string());
+        let mut in_node = InNode::new("test_in".to_string(), test_client_config());
         in_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("IN node connected");
 
@@ -1298,10 +1343,18 @@ mod udp_e2e_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-    use crate::node::{Hub, HubConfig, InNode, OutNode};
+    use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn test_client_config() -> ClientConfig {
+        ClientConfig {
+            cert_path: None,
+            key_path: None,
+            ca_cert_path: None,
+        }
+    }
 
     /// Setup test infrastructure with SOCKS5, HUB, and OUT nodes
     async fn setup_udp_test_env() -> (SocketAddr, SocketAddr) {
@@ -1311,6 +1364,7 @@ mod udp_e2e_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             cert_path: "certs/cert.pem".to_string(),
             key_path: "certs/key.pem".to_string(),
+            ca_cert_path: None,
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1326,7 +1380,11 @@ mod udp_e2e_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect OUT node (for UDP forwarding)
-        let mut out_node = OutNode::new("test_out".to_string(), vec!["test".to_string()]);
+        let mut out_node = OutNode::new(
+            "test_out".to_string(),
+            vec!["test".to_string()],
+            test_client_config(),
+        );
         out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         tokio::spawn(async move {
@@ -1336,7 +1394,7 @@ mod udp_e2e_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN node
-        let mut in_node = InNode::new("test_in".to_string());
+        let mut in_node = InNode::new("test_in".to_string(), test_client_config());
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         let in_node = Arc::new(in_node);
 
@@ -1462,6 +1520,7 @@ mod udp_e2e_tests {
             let hub = Arc::new(Hub::new(HubConfig {
                 cert_path: "certs/cert.pem".to_string(),
                 key_path: "certs/key.pem".to_string(),
+                ca_cert_path: None,
             }));
 
             let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1477,7 +1536,7 @@ mod udp_e2e_tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Connect IN node
-            let mut in_node = InNode::new("test_in".to_string());
+            let mut in_node = InNode::new("test_in".to_string(), test_client_config());
             in_node.connect_hub(hub_addr, 1).await.unwrap();
             let in_node = Arc::new(in_node);
 

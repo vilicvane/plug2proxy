@@ -14,8 +14,24 @@ use super::message::{ConnectRequest, HubMessage, NodeMessage, NodeRole, OutInfo,
 
 /// Configuration for HUB.
 pub struct HubConfig {
+    /// Path to server certificate (signed by CA).
     pub cert_path: String,
+    /// Path to server private key.
     pub key_path: String,
+    /// Path to CA certificate (for verifying client certs).
+    /// If None, client certificate verification is disabled.
+    pub ca_cert_path: Option<String>,
+}
+
+/// Configuration for client nodes (IN/OUT).
+#[derive(Clone)]
+pub struct ClientConfig {
+    /// Path to client certificate (signed by CA).
+    pub cert_path: Option<String>,
+    /// Path to client private key.
+    pub key_path: Option<String>,
+    /// Path to CA certificate (for verifying server cert).
+    pub ca_cert_path: Option<String>,
 }
 
 /// Central HUB node.
@@ -75,8 +91,12 @@ impl Hub {
 
     async fn handle_connection(self: &Arc<Self>, stream: TcpStream) -> Result<(), HubError> {
         // Create tunnel from single TCP stream (for now)
-        let mut config =
-            QuicConfig::new_server(&self.config.cert_path, &self.config.key_path)?.into_inner();
+        let mut config = QuicConfig::new_server(
+            &self.config.cert_path,
+            &self.config.key_path,
+            self.config.ca_cert_path.as_deref(),
+        )?
+        .into_inner();
         let tunnel = Arc::new(Tunnel::from_tcp_streams_server(vec![stream], &mut config).await?);
 
         // Accept control connection

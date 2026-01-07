@@ -21,6 +21,6 @@ pub use in_like::*;
 pub use out_like::*;
 pub use router::*;
 
-pub use hub::*;
+pub use hub::{ClientConfig, Hub, HubConfig, HubError};
 pub use in_node::*;
 pub use out::*;

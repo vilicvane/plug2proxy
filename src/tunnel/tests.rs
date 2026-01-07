@@ -218,7 +218,7 @@ mod tunnel_tests {
                 tcp_streams.push(stream);
             }
 
-            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem")
+            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None)
                 .unwrap()
                 .into_inner();
 
@@ -254,7 +254,7 @@ mod tunnel_tests {
                 tcp_streams.push(stream);
             }
 
-            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem")
+            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None)
                 .unwrap()
                 .into_inner();
 
@@ -328,7 +328,7 @@ mod tunnel_tests {
                 tcp_streams.push(stream);
             }
 
-            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem")
+            let mut config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None)
                 .unwrap()
                 .into_inner();
 
@@ -391,19 +391,19 @@ mod quic_config_tests {
 
     #[test]
     fn test_client_config() {
-        let config = QuicConfig::new_client();
+        let config = QuicConfig::new_client(None, None, None);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_server_config() {
-        let config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem");
+        let config = QuicConfig::new_server("certs/cert.pem", "certs/key.pem", None);
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_server_config_invalid_cert() {
-        let config = QuicConfig::new_server("nonexistent.pem", "nonexistent.pem");
+        let config = QuicConfig::new_server("nonexistent.pem", "nonexistent.pem", None);
         assert!(config.is_err());
     }
 }

@@ -8,12 +8,15 @@ use crate::tunnel::{Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
+use super::hub::ClientConfig;
 use super::in_like::InLikeError;
 use super::message::{HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
 
 /// IN node - entry point for proxied traffic.
 pub struct InNode {
     id: String,
+    /// Client TLS configuration.
+    client_config: ClientConfig,
     /// Routing rules (received from HUB).
     route_rules: Arc<RwLock<Vec<RouteRule>>>,
     /// Available OUTs (received from HUB).
@@ -23,9 +26,10 @@ pub struct InNode {
 }
 
 impl InNode {
-    pub fn new(id: String) -> Self {
+    pub fn new(id: String, client_config: ClientConfig) -> Self {
         Self {
             id,
+            client_config,
             route_rules: Arc::new(RwLock::new(Vec::new())),
             outs: Arc::new(RwLock::new(HashMap::new())),
             hub_conn: None,
@@ -42,7 +46,17 @@ impl InNode {
         addr: SocketAddr,
         connection_count: usize,
     ) -> Result<(), InNodeError> {
-        let tunnel = Arc::new(Tunnel::connect(addr, None, connection_count).await?);
+        let tunnel = Arc::new(
+            Tunnel::connect_with_client_cert(
+                addr,
+                None,
+                connection_count,
+                self.client_config.cert_path.as_deref(),
+                self.client_config.key_path.as_deref(),
+                self.client_config.ca_cert_path.as_deref(),
+            )
+            .await?,
+        );
 
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;
