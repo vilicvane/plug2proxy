@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::tunnel::{QuicConfig, QuicError, Stream, Tunnel, TunnelError};
 
@@ -31,6 +32,7 @@ pub struct Hub {
 struct InConnection {
     #[allow(dead_code)]
     conn: NodeConnection,
+    #[allow(dead_code)]
     tunnel: Arc<Tunnel>,
 }
 
@@ -305,6 +307,15 @@ impl Hub {
 
     /// HUB exits traffic directly to the target.
     async fn exit_from_hub(stream: Stream, request: ConnectRequest) -> Result<(), HubError> {
+        // Check for UDP forwarding request
+        if request.target == "udp-forward" {
+            tracing::info!(
+                "✅ HUB EXIT: UDP forwarding stream {} activated",
+                stream.id()
+            );
+            return Self::handle_udp_forward(stream).await;
+        }
+
         // Parse target address
         let target_addr: SocketAddr = request
             .target
@@ -330,6 +341,218 @@ impl Hub {
         // Relay data between tunnel stream and target
         Self::relay(stream, &mut target_stream).await?;
 
+        Ok(())
+    }
+
+    /// Handle UDP forwarding through the tunnel (HUB direct exit).
+    async fn handle_udp_forward(stream: Stream) -> Result<(), HubError> {
+        use crate::udp_proxy::{Datagram, NatMappingTable};
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
+
+        let stream = Arc::new(stream);
+        let stream_recv = Arc::clone(&stream);
+        let stream_send = Arc::clone(&stream);
+
+        // Create channels for UDP proxy
+        let (inbound_tx, inbound_rx) = mpsc::channel::<Datagram>(1024);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Datagram>(1024);
+
+        // Spawn UDP outbound handler with full-cone NAT
+        tokio::spawn(async move {
+            // Bind a UDP socket for forwarding
+            let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+                Ok(s) => {
+                    tracing::info!("HUB UDP socket bound to {}", s.local_addr().unwrap());
+                    Arc::new(s)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to bind UDP socket: {}", e);
+                    return;
+                }
+            };
+
+            let mappings = NatMappingTable::default();
+            let reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> =
+                Arc::new(RwLock::new(HashMap::new()));
+
+            let forward_socket = Arc::clone(&socket);
+            let response_socket = socket;
+            let forward_mappings = mappings.clone();
+            let forward_index = Arc::clone(&reverse_index);
+            let response_index = reverse_index;
+
+            // Forward task: receive from inbound channel, send to destinations
+            let forward_task = tokio::spawn(async move {
+                let mut inbound_rx = inbound_rx;
+                while let Some(datagram) = inbound_rx.recv().await {
+                    let _port = forward_mappings
+                        .get_or_create(datagram.source, datagram.dest)
+                        .await;
+
+                    {
+                        let mut index = forward_index.write().await;
+                        index.insert(datagram.dest, datagram.source);
+                    }
+
+                    tracing::trace!(
+                        "HUB UDP forward: {} -> {} ({} bytes)",
+                        datagram.source,
+                        datagram.dest,
+                        datagram.data.len()
+                    );
+
+                    if let Err(e) = forward_socket.send_to(&datagram.data, datagram.dest).await {
+                        tracing::warn!("Failed to forward UDP to {}: {}", datagram.dest, e);
+                    }
+                }
+            });
+
+            // Response task: receive from destinations, send to outbound channel
+            let response_task = tokio::spawn(async move {
+                let mut buf = vec![0u8; 65535];
+                loop {
+                    match response_socket.recv_from(&mut buf).await {
+                        Ok((len, src)) => {
+                            let internal_addr = {
+                                let index = response_index.read().await;
+                                index.get(&src).copied()
+                            };
+
+                            if let Some(internal_addr) = internal_addr {
+                                let response = Datagram::new(
+                                    src,
+                                    internal_addr,
+                                    Bytes::copy_from_slice(&buf[..len]),
+                                );
+
+                                tracing::trace!(
+                                    "HUB UDP response: {} -> {} ({} bytes)",
+                                    src,
+                                    internal_addr,
+                                    len
+                                );
+
+                                if let Err(e) = outbound_tx.send(response).await {
+                                    tracing::error!("Failed to send UDP response: {}", e);
+                                    break;
+                                }
+                            } else {
+                                tracing::debug!("HUB UDP from unknown source {} (no mapping)", src);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("HUB UDP recv error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+
+            tokio::select! {
+                _ = forward_task => {},
+                _ = response_task => {},
+            }
+        });
+
+        // Task 1: Read datagrams from tunnel and forward to UDP proxy
+        let recv_task = tokio::spawn(async move {
+            loop {
+                // Read length prefix (4 bytes)
+                let mut len_buf = [0u8; 4];
+                let mut offset = 0;
+                while offset < 4 {
+                    match stream_recv.recv_wait(&mut len_buf[offset..]).await {
+                        Ok((0, true)) => {
+                            tracing::info!("HUB UDP tunnel stream closed");
+                            return;
+                        }
+                        Ok((n, _)) => {
+                            offset += n;
+                        }
+                        Err(e) => {
+                            tracing::debug!("HUB UDP recv error: {}", e);
+                            return;
+                        }
+                    }
+                }
+
+                let datagram_len = u32::from_be_bytes(len_buf) as usize;
+                if datagram_len == 0 || datagram_len > 65535 {
+                    tracing::error!("HUB UDP invalid datagram length: {}", datagram_len);
+                    break;
+                }
+
+                // Read datagram data
+                let mut datagram_buf = vec![0u8; datagram_len];
+                let mut offset = 0;
+                while offset < datagram_len {
+                    match stream_recv.recv_wait(&mut datagram_buf[offset..]).await {
+                        Ok((0, true)) => {
+                            tracing::warn!("HUB UDP tunnel closed while reading datagram");
+                            return;
+                        }
+                        Ok((n, _)) => {
+                            offset += n;
+                        }
+                        Err(e) => {
+                            tracing::debug!("HUB UDP read error: {}", e);
+                            return;
+                        }
+                    }
+                }
+
+                match Datagram::deserialize(Bytes::from(datagram_buf)) {
+                    Ok(datagram) => {
+                        tracing::debug!(
+                            "HUB UDP: {} -> {} ({} bytes)",
+                            datagram.source,
+                            datagram.dest,
+                            datagram.data.len()
+                        );
+
+                        if let Err(e) = inbound_tx.send(datagram).await {
+                            tracing::error!("HUB UDP channel send error: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("HUB UDP deserialize error: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Task 2: Read responses from UDP proxy and send back through tunnel
+        let send_task = tokio::spawn(async move {
+            while let Some(response) = outbound_rx.recv().await {
+                tracing::debug!(
+                    "HUB UDP response: {} <- {} ({} bytes)",
+                    response.dest,
+                    response.source,
+                    response.data.len()
+                );
+
+                let serialized = response.serialize();
+                let len_bytes = (serialized.len() as u32).to_be_bytes();
+
+                if let Err(e) = stream_send.send(&len_bytes).await {
+                    tracing::error!("HUB UDP send length error: {}", e);
+                    break;
+                }
+                if let Err(e) = stream_send.send(&serialized).await {
+                    tracing::error!("HUB UDP send data error: {}", e);
+                    break;
+                }
+            }
+        });
+
+        tokio::select! {
+            _ = recv_task => {},
+            _ = send_task => {},
+        }
+
+        let _ = stream.shutdown().await;
         Ok(())
     }
 

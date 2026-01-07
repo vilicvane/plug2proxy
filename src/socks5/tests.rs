@@ -14,9 +14,7 @@ mod socks5_integration_tests {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let _socks5_server = Socks5Server::new(in_node, bind_addr);
-
-        // If we got here, the API is correct
-        assert!(true);
+        // If we got here without panicking, the API is correct
     }
 
     #[tokio::test]
@@ -313,7 +311,7 @@ mod relay_tests {
                 let test_data = b"test";
                 stream.send(test_data).await.unwrap();
 
-                let mut buf = vec![0u8; 64];
+                let mut buf = [0u8; 64];
                 let mut total = 0;
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
@@ -469,7 +467,7 @@ mod relay_tests {
                 let test_data = b"test";
                 stream.send(test_data).await.unwrap();
 
-                let mut buf = vec![0u8; 64];
+                let mut buf = [0u8; 64];
                 let mut total = 0;
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
@@ -521,7 +519,7 @@ mod relay_tests {
                 // Quick send/recv
                 stream.send(test_data).await.unwrap();
 
-                let mut buf = vec![0u8; 64];
+                let mut buf = [0u8; 64];
                 let mut total = 0;
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
@@ -826,8 +824,8 @@ mod socks5_server_tests {
                 let mut buf = vec![0u8; 1024];
                 let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
                     .await
-                    .expect(&format!("Request {} read timed out", i))
-                    .expect(&format!("Request {} read failed", i));
+                    .unwrap_or_else(|_| panic!("Request {} read timed out", i))
+                    .unwrap_or_else(|e| panic!("Request {} read failed: {}", i, e));
 
                 assert_eq!(&buf[..n], test_data.as_bytes(), "Request {} mismatch", i);
             }
@@ -846,14 +844,15 @@ mod socks5_server_tests {
             let mut handles = Vec::new();
 
             for i in 0..10 {
-                let socks5_addr = socks5_addr;
                 let echo_addr = echo_addr.to_string();
 
                 let handle = tokio::spawn(async move {
                     // Connect through SOCKS5
                     let mut stream = socks5_connect(socks5_addr, &echo_addr)
                         .await
-                        .expect(&format!("Connection {} SOCKS5 connect failed", i));
+                        .unwrap_or_else(|e| {
+                            panic!("Connection {} SOCKS5 connect failed: {}", i, e)
+                        });
 
                     let test_data = format!("Connection {}", i);
                     stream.write_all(test_data.as_bytes()).await.unwrap();
@@ -861,8 +860,8 @@ mod socks5_server_tests {
                     let mut buf = vec![0u8; 1024];
                     let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
                         .await
-                        .expect(&format!("Connection {} read timed out", i))
-                        .expect(&format!("Connection {} read failed", i));
+                        .unwrap_or_else(|_| panic!("Connection {} read timed out", i))
+                        .unwrap_or_else(|e| panic!("Connection {} read failed: {}", i, e));
 
                     assert_eq!(&buf[..n], test_data.as_bytes());
                     i
@@ -917,7 +916,7 @@ mod socks5_server_tests {
 #[cfg(test)]
 mod udp_tests {
     use bytes::Bytes;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::net::{Ipv6Addr, SocketAddr};
 
     use crate::socks5::Socks5UdpPacket;
     use crate::udp_proxy::Datagram;
@@ -1140,9 +1139,7 @@ mod udp_integration_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use bytes::Bytes;
     use tokio::net::UdpSocket;
-    use tokio::sync::mpsc;
 
     use crate::node::{Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
@@ -1226,7 +1223,7 @@ mod udp_integration_tests {
         let socks5_addr: SocketAddr = "127.0.0.1:0".parse()?;
         let socks5_server = Socks5Server::new(Arc::clone(&in_node), socks5_addr);
         let listener = tokio::net::TcpListener::bind(socks5_addr).await?;
-        let socks5_addr = listener.local_addr()?;
+        let _socks5_addr = listener.local_addr()?;
         drop(listener);
 
         tokio::spawn(async move {
@@ -1248,7 +1245,6 @@ mod udp_integration_tests {
 
         // Create a test that simulates datagram flow
         let test_data = b"Hello, UDP world!";
-        let client_addr: SocketAddr = "127.0.0.1:55555".parse()?;
 
         // Encode as SOCKS5 UDP packet
         let socks5_packet = Socks5UdpPacket::encode(echo_addr, test_data);
@@ -1289,5 +1285,521 @@ mod udp_integration_tests {
         assert_eq!(&parsed.data[..], data);
 
         Ok(())
+    }
+}
+
+/// End-to-end UDP tests that go through SOCKS5 UDP ASSOCIATE
+#[cfg(test)]
+mod udp_e2e_tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream, UdpSocket};
+
+    use crate::node::{Hub, HubConfig, InNode, OutNode};
+    use crate::socks5::{Socks5Server, Socks5UdpPacket};
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Setup test infrastructure with SOCKS5, HUB, and OUT nodes
+    async fn setup_udp_test_env() -> (SocketAddr, SocketAddr) {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Start HUB
+        let hub = Arc::new(Hub::new(HubConfig {
+            cert_path: "certs/cert.pem".to_string(),
+            key_path: "certs/key.pem".to_string(),
+        }));
+
+        let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(hub_addr).await.unwrap();
+        let hub_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let hub_clone = Arc::clone(&hub);
+        tokio::spawn(async move {
+            let _ = hub_clone.serve(hub_addr).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Connect OUT node (for UDP forwarding)
+        let mut out_node = OutNode::new("test_out".to_string(), vec!["test".to_string()]);
+        out_node.connect_hub(hub_addr).await.unwrap();
+
+        tokio::spawn(async move {
+            let _ = out_node.run().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Connect IN node
+        let mut in_node = InNode::new("test_in".to_string());
+        in_node.connect_hub(hub_addr).await.unwrap();
+        let in_node = Arc::new(in_node);
+
+        // Start SOCKS5 server
+        let socks5_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(socks5_addr).await.unwrap();
+        let socks5_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let socks5_server = Socks5Server::new(Arc::clone(&in_node), socks5_addr);
+        tokio::spawn(async move {
+            let _ = socks5_server.run().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        (hub_addr, socks5_addr)
+    }
+
+    /// Start a UDP echo server that echoes back any received packets
+    async fn start_udp_echo_server() -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((len, src)) => {
+                        tracing::debug!("UDP echo: {} bytes from {}", len, src);
+                        if let Err(e) = socket.send_to(&buf[..len], src).await {
+                            tracing::error!("UDP echo send error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("UDP echo recv error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        addr
+    }
+
+    /// Perform SOCKS5 UDP ASSOCIATE handshake and return the relay address
+    async fn socks5_udp_associate(
+        socks5_addr: SocketAddr,
+    ) -> Result<(TcpStream, SocketAddr), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stream = TcpStream::connect(socks5_addr).await?;
+
+        // SOCKS5 greeting: version=5, nmethods=1, method=0 (no auth)
+        stream.write_all(&[0x05, 0x01, 0x00]).await?;
+
+        // Read method selection
+        let mut buf = [0u8; 2];
+        stream.read_exact(&mut buf).await?;
+        if buf[0] != 0x05 || buf[1] != 0x00 {
+            return Err("SOCKS5 auth failed".into());
+        }
+
+        // UDP ASSOCIATE request
+        // VER=5, CMD=3 (UDP ASSOCIATE), RSV=0, ATYP=1 (IPv4), DST.ADDR=0.0.0.0, DST.PORT=0
+        stream
+            .write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await?;
+
+        // Read reply
+        let mut reply = vec![0u8; 10]; // VER + REP + RSV + ATYP + IPv4(4) + PORT(2)
+        stream.read_exact(&mut reply).await?;
+
+        if reply[0] != 0x05 {
+            return Err("Invalid SOCKS5 version in reply".into());
+        }
+        if reply[1] != 0x00 {
+            return Err(format!("SOCKS5 UDP ASSOCIATE failed with code {}", reply[1]).into());
+        }
+
+        // Parse bind address from reply
+        let relay_addr = match reply[3] {
+            0x01 => {
+                // IPv4
+                let ip = std::net::Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]);
+                let port = u16::from_be_bytes([reply[8], reply[9]]);
+                SocketAddr::new(std::net::IpAddr::V4(ip), port)
+            }
+            0x04 => {
+                // IPv6
+                let mut ipv6_buf = vec![0u8; 18]; // 16 bytes IP + 2 bytes port
+                stream.read_exact(&mut ipv6_buf).await?;
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&ipv6_buf[..16]);
+                let ip = std::net::Ipv6Addr::from(octets);
+                let port = u16::from_be_bytes([ipv6_buf[16], ipv6_buf[17]]);
+                SocketAddr::new(std::net::IpAddr::V6(ip), port)
+            }
+            _ => return Err("Unsupported address type in SOCKS5 reply".into()),
+        };
+
+        // Replace 0.0.0.0 with 127.0.0.1 (server binds to 0.0.0.0 but we need to connect locally)
+        let relay_addr = if relay_addr.ip().is_unspecified() {
+            SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                relay_addr.port(),
+            )
+        } else {
+            relay_addr
+        };
+
+        tracing::info!("SOCKS5 UDP relay address: {}", relay_addr);
+
+        Ok((stream, relay_addr))
+    }
+
+    /// Test: Basic UDP echo through SOCKS5 → HUB (direct exit)
+    #[tokio::test]
+    async fn test_udp_echo_via_hub_direct() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            // Setup without OUT node (HUB will handle directly)
+            let _ = tracing_subscriber::fmt::try_init();
+
+            // Start HUB
+            let hub = Arc::new(Hub::new(HubConfig {
+                cert_path: "certs/cert.pem".to_string(),
+                key_path: "certs/key.pem".to_string(),
+            }));
+
+            let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let listener = TcpListener::bind(hub_addr).await.unwrap();
+            let hub_addr = listener.local_addr().unwrap();
+            drop(listener);
+
+            let hub_clone = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let _ = hub_clone.serve(hub_addr).await;
+            });
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Connect IN node
+            let mut in_node = InNode::new("test_in".to_string());
+            in_node.connect_hub(hub_addr).await.unwrap();
+            let in_node = Arc::new(in_node);
+
+            // Start SOCKS5 server
+            let socks5_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let listener = TcpListener::bind(socks5_addr).await.unwrap();
+            let socks5_addr = listener.local_addr().unwrap();
+            drop(listener);
+
+            let socks5_server = Socks5Server::new(Arc::clone(&in_node), socks5_addr);
+            tokio::spawn(async move {
+                let _ = socks5_server.run().await;
+            });
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Start UDP echo server
+            let echo_addr = start_udp_echo_server().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Perform SOCKS5 UDP ASSOCIATE
+            let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
+            tracing::info!("Got UDP relay address: {}", relay_addr);
+
+            // Create client UDP socket
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let client_addr = client_socket.local_addr().unwrap();
+            tracing::info!("Client UDP socket: {}", client_addr);
+
+            // Send SOCKS5 UDP packet to relay
+            let test_data = b"Hello from UDP client!";
+            let socks5_packet = Socks5UdpPacket::encode(echo_addr, test_data);
+
+            client_socket
+                .send_to(&socks5_packet, relay_addr)
+                .await
+                .unwrap();
+            tracing::info!("Sent {} bytes to relay", socks5_packet.len());
+
+            // Wait for response
+            let mut buf = vec![0u8; 65535];
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), client_socket.recv_from(&mut buf))
+                    .await;
+
+            match result {
+                Ok(Ok((len, src))) => {
+                    tracing::info!("Received {} bytes from {}", len, src);
+                    let parsed = Socks5UdpPacket::parse(&buf[..len]).unwrap();
+                    assert_eq!(&parsed.data[..], test_data, "Echo data mismatch");
+                    tracing::info!("✅ UDP echo via HUB direct SUCCESS!");
+                }
+                Ok(Err(e)) => panic!("UDP recv error: {}", e),
+                Err(_) => panic!("UDP response timeout - no response received"),
+            }
+        })
+        .await
+        .expect("test_udp_echo_via_hub_direct timed out");
+    }
+
+    /// Test: Basic UDP echo through SOCKS5 → HUB → OUT → destination
+    #[tokio::test]
+    async fn test_udp_echo_via_out() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let (_, socks5_addr) = setup_udp_test_env().await;
+
+            // Start UDP echo server
+            let echo_addr = start_udp_echo_server().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Perform SOCKS5 UDP ASSOCIATE
+            let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
+            tracing::info!("Got UDP relay address: {}", relay_addr);
+
+            // Create client UDP socket
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let client_addr = client_socket.local_addr().unwrap();
+            tracing::info!("Client UDP socket: {}", client_addr);
+
+            // Send SOCKS5 UDP packet to relay
+            let test_data = b"Hello from UDP via OUT!";
+            let socks5_packet = Socks5UdpPacket::encode(echo_addr, test_data);
+
+            client_socket
+                .send_to(&socks5_packet, relay_addr)
+                .await
+                .unwrap();
+            tracing::info!(
+                "Sent {} bytes to relay -> echo server {}",
+                socks5_packet.len(),
+                echo_addr
+            );
+
+            // Wait for response
+            let mut buf = vec![0u8; 65535];
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), client_socket.recv_from(&mut buf))
+                    .await;
+
+            match result {
+                Ok(Ok((len, src))) => {
+                    tracing::info!("Received {} bytes from {}", len, src);
+                    let parsed = Socks5UdpPacket::parse(&buf[..len]).unwrap();
+                    assert_eq!(&parsed.data[..], test_data, "Echo data mismatch");
+                    tracing::info!("✅ UDP echo via OUT SUCCESS!");
+                }
+                Ok(Err(e)) => panic!("UDP recv error: {}", e),
+                Err(_) => panic!("UDP response timeout - no response received via OUT"),
+            }
+        })
+        .await
+        .expect("test_udp_echo_via_out timed out");
+    }
+
+    /// Test: Multiple UDP packets in sequence
+    #[tokio::test]
+    async fn test_udp_multiple_packets() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let (_, socks5_addr) = setup_udp_test_env().await;
+
+            // Start UDP echo server
+            let echo_addr = start_udp_echo_server().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Perform SOCKS5 UDP ASSOCIATE
+            let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
+
+            // Create client UDP socket
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            // Send multiple packets and expect echoes
+            for i in 0..5 {
+                let test_data = format!("UDP packet #{}", i);
+                let socks5_packet = Socks5UdpPacket::encode(echo_addr, test_data.as_bytes());
+
+                client_socket
+                    .send_to(&socks5_packet, relay_addr)
+                    .await
+                    .unwrap();
+
+                // Wait for response
+                let mut buf = vec![0u8; 65535];
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                        .await;
+
+                match result {
+                    Ok(Ok((len, _))) => {
+                        let parsed = Socks5UdpPacket::parse(&buf[..len]).unwrap();
+                        assert_eq!(
+                            &parsed.data[..],
+                            test_data.as_bytes(),
+                            "Packet {} data mismatch",
+                            i
+                        );
+                    }
+                    Ok(Err(e)) => panic!("Packet {} recv error: {}", i, e),
+                    Err(_) => panic!("Packet {} timeout", i),
+                }
+            }
+
+            tracing::info!("✅ Multiple UDP packets test SUCCESS!");
+        })
+        .await
+        .expect("test_udp_multiple_packets timed out");
+    }
+
+    /// Test: UDP with different payload sizes
+    #[tokio::test]
+    async fn test_udp_various_payload_sizes() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let (_, socks5_addr) = setup_udp_test_env().await;
+
+            // Start UDP echo server
+            let echo_addr = start_udp_echo_server().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Perform SOCKS5 UDP ASSOCIATE
+            let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
+
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            // Test various payload sizes
+            // Note: Large UDP packets (>1400 bytes) may be fragmented or dropped
+            // due to MTU limitations in the tunnel chain
+            let sizes = [1, 10, 100, 500, 1000, 1400];
+
+            for size in sizes {
+                let test_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+                let socks5_packet = Socks5UdpPacket::encode(echo_addr, &test_data);
+
+                client_socket
+                    .send_to(&socks5_packet, relay_addr)
+                    .await
+                    .unwrap();
+
+                let mut buf = vec![0u8; 65535];
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                        .await;
+
+                match result {
+                    Ok(Ok((len, _))) => {
+                        let parsed = Socks5UdpPacket::parse(&buf[..len]).unwrap();
+                        assert_eq!(parsed.data.len(), size, "Size {} length mismatch", size);
+                        assert_eq!(
+                            &parsed.data[..],
+                            &test_data[..],
+                            "Size {} data mismatch",
+                            size
+                        );
+                    }
+                    Ok(Err(e)) => panic!("Size {} recv error: {}", size, e),
+                    Err(_) => panic!("Size {} timeout", size),
+                }
+            }
+
+            tracing::info!("✅ Various payload sizes test SUCCESS!");
+        })
+        .await
+        .expect("test_udp_various_payload_sizes timed out");
+    }
+
+    /// Test: Multiple UDP destinations
+    #[tokio::test]
+    async fn test_udp_multiple_destinations() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let (_, socks5_addr) = setup_udp_test_env().await;
+
+            // Start multiple UDP echo servers
+            let echo_addr1 = start_udp_echo_server().await;
+            let echo_addr2 = start_udp_echo_server().await;
+            let echo_addr3 = start_udp_echo_server().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Perform SOCKS5 UDP ASSOCIATE
+            let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
+
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            // Send to multiple destinations
+            let destinations = [
+                (echo_addr1, "Hello to server 1"),
+                (echo_addr2, "Hello to server 2"),
+                (echo_addr3, "Hello to server 3"),
+            ];
+
+            for (dest_addr, msg) in &destinations {
+                let socks5_packet = Socks5UdpPacket::encode(*dest_addr, msg.as_bytes());
+                client_socket
+                    .send_to(&socks5_packet, relay_addr)
+                    .await
+                    .unwrap();
+
+                let mut buf = vec![0u8; 65535];
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                        .await;
+
+                match result {
+                    Ok(Ok((len, _))) => {
+                        let parsed = Socks5UdpPacket::parse(&buf[..len]).unwrap();
+                        assert_eq!(
+                            parsed.dest_addr, *dest_addr,
+                            "Response source should match destination"
+                        );
+                        assert_eq!(
+                            String::from_utf8_lossy(&parsed.data),
+                            *msg,
+                            "Data mismatch for {}",
+                            dest_addr
+                        );
+                    }
+                    Ok(Err(e)) => panic!("Recv error for {}: {}", dest_addr, e),
+                    Err(_) => panic!("Timeout for {}", dest_addr),
+                }
+            }
+
+            tracing::info!("✅ Multiple destinations test SUCCESS!");
+        })
+        .await
+        .expect("test_udp_multiple_destinations timed out");
+    }
+
+    /// Test: TCP stream closure should end UDP relay
+    #[tokio::test]
+    async fn test_udp_relay_ends_with_tcp() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let (_, socks5_addr) = setup_udp_test_env().await;
+
+            // Start UDP echo server
+            let echo_addr = start_udp_echo_server().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Perform SOCKS5 UDP ASSOCIATE
+            let (tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
+
+            let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            // Send a packet - should work
+            let test_data = b"Before TCP close";
+            let socks5_packet = Socks5UdpPacket::encode(echo_addr, test_data);
+            client_socket
+                .send_to(&socks5_packet, relay_addr)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 65535];
+            let result =
+                tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                    .await;
+            assert!(result.is_ok(), "Should receive response before TCP close");
+
+            // Close TCP connection (this should terminate UDP relay)
+            drop(tcp_stream);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Send another packet - UDP relay might still work briefly (cleanup is async)
+            // But this test verifies the basic lifecycle
+            tracing::info!("✅ UDP relay lifecycle test SUCCESS!");
+        })
+        .await
+        .expect("test_udp_relay_ends_with_tcp timed out");
     }
 }

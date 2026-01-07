@@ -3,12 +3,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-/// SOCKS5 UDP packet header format:
-/// +----+------+------+----------+----------+----------+
-/// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
-/// +----+------+------+----------+----------+----------+
-/// | 2  |  1   |  1   | Variable |    2     | Variable |
-/// +----+------+------+----------+----------+----------+
+// SOCKS5 UDP packet header format:
+// +----+------+------+----------+----------+----------+
+// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
+// +----+------+------+----------+----------+----------+
+// | 2  |  1   |  1   | Variable |    2     | Variable |
+// +----+------+------+----------+----------+----------+
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;

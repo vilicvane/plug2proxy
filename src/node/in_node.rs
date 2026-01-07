@@ -8,7 +8,7 @@ use crate::tunnel::{Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
-use super::in_like::{InLike, InLikeError};
+use super::in_like::InLikeError;
 use super::message::{HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
 
 /// IN node - entry point for proxied traffic.

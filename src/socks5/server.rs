@@ -278,7 +278,9 @@ async fn run_udp_relay(
 
     // Task: Poll tunnel for incoming data and send to channel
     let tunnel_recv = Arc::clone(&tunnel_stream);
+    let stream_id = tunnel_stream.id();
     let tunnel_poll_task = tokio::spawn(async move {
+        tracing::info!("UDP tunnel poll task started for stream {}", stream_id);
         let mut len_buf = [0u8; 4];
         loop {
             // Read length prefix
@@ -286,6 +288,7 @@ async fn run_udp_relay(
                 .await
                 .is_err()
             {
+                tracing::debug!("UDP tunnel: failed to read length prefix");
                 break;
             }
 
@@ -295,19 +298,32 @@ async fn run_udp_relay(
                 break;
             }
 
+            tracing::info!(
+                "📥 UDP tunnel: received length prefix, expecting {} bytes",
+                datagram_len
+            );
+
             // Read datagram data
             let mut datagram_buf = vec![0u8; datagram_len];
             if read_exact_from_stream(&tunnel_recv, &mut datagram_buf)
                 .await
                 .is_err()
             {
+                tracing::debug!("UDP tunnel: failed to read datagram data");
                 break;
             }
 
             // Deserialize and send to channel
             match Datagram::deserialize(Bytes::from(datagram_buf)) {
                 Ok(datagram) => {
+                    tracing::info!(
+                        "📥 UDP tunnel: received datagram {} -> {} ({} bytes)",
+                        datagram.source,
+                        datagram.dest,
+                        datagram.data.len()
+                    );
                     if tunnel_data_tx.send(datagram).await.is_err() {
+                        tracing::debug!("UDP tunnel: channel closed");
                         break;
                     }
                 }
@@ -316,12 +332,15 @@ async fn run_udp_relay(
                 }
             }
         }
+        tracing::info!("UDP tunnel poll task ended");
     });
 
     // Main loop: handle both directions
     let tunnel_send = Arc::clone(&tunnel_stream);
     let socket_send = Arc::clone(&socket);
     let socket_recv = socket;
+
+    tracing::info!("UDP relay: starting main loop");
 
     loop {
         tokio::select! {
@@ -342,8 +361,8 @@ async fn run_udp_relay(
                             }
                         };
 
-                        tracing::debug!(
-                            "UDP: {} -> {} ({} bytes)",
+                        tracing::info!(
+                            "📤 UDP SOCKS5: {} -> {} ({} bytes)",
                             client_addr,
                             dest_addr,
                             data.len()
@@ -355,11 +374,14 @@ async fn run_udp_relay(
                         let len_bytes = (serialized.len() as u32).to_be_bytes();
 
                         if tunnel_send.send(&len_bytes).await.is_err() {
+                            tracing::error!("UDP: failed to send length to tunnel");
                             break;
                         }
                         if tunnel_send.send(&serialized).await.is_err() {
+                            tracing::error!("UDP: failed to send data to tunnel");
                             break;
                         }
+                        tracing::info!("📤 UDP SOCKS5: sent {} bytes to tunnel", serialized.len());
                     }
                     Err((e, _)) => {
                         tracing::error!("UDP recv error: {:?}", e);
@@ -370,8 +392,8 @@ async fn run_udp_relay(
 
             // Tunnel -> Client (from channel)
             Some(response) = tunnel_data_rx.recv() => {
-                tracing::debug!(
-                    "UDP: {} <- {} ({} bytes)",
+                tracing::info!(
+                    "📥 UDP SOCKS5: {} <- {} ({} bytes)",
                     response.dest,
                     response.source,
                     response.data.len()

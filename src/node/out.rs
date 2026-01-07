@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -347,8 +346,8 @@ impl OutNode {
                 // Deserialize and forward to UDP proxy
                 match Datagram::deserialize(Bytes::from(datagram_buf)) {
                     Ok(datagram) => {
-                        tracing::debug!(
-                            "📤 OUT UDP: Forwarding {} -> {} ({} bytes)",
+                        tracing::info!(
+                            "📤 OUT UDP: Received from tunnel {} -> {} ({} bytes)",
                             datagram.source,
                             datagram.dest,
                             datagram.data.len()
@@ -364,13 +363,14 @@ impl OutNode {
                     }
                 }
             }
+            tracing::info!("OUT UDP recv task ended");
         });
 
         // Task 2: Read responses from UDP proxy and send back through tunnel
         let send_task = tokio::spawn(async move {
             while let Some(response) = outbound_rx.recv().await {
-                tracing::debug!(
-                    "📥 OUT UDP: Response {} <- {} ({} bytes)",
+                tracing::info!(
+                    "📥 OUT UDP: Sending response {} <- {} ({} bytes)",
                     response.dest,
                     response.source,
                     response.data.len()
@@ -470,15 +470,9 @@ impl OutNode {
 }
 
 impl OutLike for OutNode {
-    fn forward(
-        &self,
-        _tag: &str,
-        _stream: Stream,
-    ) -> impl Future<Output = Result<(), OutLikeError>> + Send {
-        async move {
-            // TODO: Implement actual forwarding (connect to target, relay data).
-            Ok(())
-        }
+    async fn forward(&self, _tag: &str, _stream: Stream) -> Result<(), OutLikeError> {
+        // TODO: Implement actual forwarding (connect to target, relay data).
+        Ok(())
     }
 }
 
