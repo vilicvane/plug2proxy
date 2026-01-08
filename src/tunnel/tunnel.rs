@@ -24,6 +24,12 @@ pub struct TcpConnectionHandle {
     add_connection_tx: mpsc::Sender<TcpConnectionWithData>,
     /// QUIC connection ID (for routing additional connections)
     connection_id: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Server address for reconnection (client-side only)
+    server_addr: Arc<Mutex<Option<SocketAddr>>>,
+    /// Desired number of TCP connections
+    desired_count: Arc<Mutex<usize>>,
+    /// Channel to request refueling
+    refuel_tx: mpsc::Sender<()>,
 }
 
 impl TcpConnectionHandle {
@@ -31,6 +37,23 @@ impl TcpConnectionHandle {
     pub async fn set_connection_id(&self, id: Vec<u8>) {
         let mut conn_id = self.connection_id.lock().await;
         *conn_id = Some(id);
+    }
+
+    /// Set the server address for reconnection (client-side only).
+    pub async fn set_server_addr(&self, addr: SocketAddr) {
+        let mut server_addr = self.server_addr.lock().await;
+        *server_addr = Some(addr);
+    }
+
+    /// Set the desired connection count.
+    pub async fn set_desired_count(&self, count: usize) {
+        let mut desired = self.desired_count.lock().await;
+        *desired = count;
+    }
+
+    /// Request a refuel (add more connections if needed).
+    pub fn request_refuel(&self) {
+        let _ = self.refuel_tx.try_send(());
     }
 
     /// Add a new TCP connection to the tunnel.
@@ -132,6 +155,7 @@ impl Tunnel {
     ///
     /// Establishes a single TCP connection first, waits for QUIC handshake to succeed,
     /// then adds additional TCP connections in the background if `connection_count > 1`.
+    /// TCP connections are automatically refueled if some disconnect while QUIC is alive.
     pub async fn connect_with_config(
         addr: SocketAddr,
         server_name: Option<&str>,
@@ -147,6 +171,10 @@ impl Tunnel {
         // Create tunnel with single connection first
         let tunnel =
             Self::from_tcp_streams_client(vec![first_stream], server_name, &mut config).await?;
+
+        // Set server address and desired count for refueling
+        tunnel.tcp_handle.set_server_addr(addr).await;
+        tunnel.tcp_handle.set_desired_count(connection_count).await;
 
         // If more connections are requested, add them in the background after handshake succeeds
         if connection_count > 1 {
@@ -763,6 +791,7 @@ fn spawn_tcp_io_tasks(
     mut outgoing_rx: mpsc::Receiver<Bytes>,
     incoming_tx: mpsc::Sender<Bytes>,
 ) -> TcpConnectionHandle {
+    let initial_count = tcp_streams.len();
     let mut senders = Vec::new();
     let mut receivers = Vec::new();
 
@@ -777,6 +806,23 @@ fn spawn_tcp_io_tasks(
     let (add_connection_tx, mut add_connection_rx) = mpsc::channel::<TcpConnectionWithData>(16);
     let incoming_tx_clone = incoming_tx.clone();
     let connection_id = Arc::new(Mutex::new(None));
+    let server_addr = Arc::new(Mutex::new(None));
+    let desired_count = Arc::new(Mutex::new(initial_count));
+
+    // Channel for refuel requests
+    let (refuel_tx, mut refuel_rx) = mpsc::channel::<()>(16);
+
+    // Track current connection count
+    let current_count = Arc::new(std::sync::atomic::AtomicUsize::new(initial_count));
+    let current_count_for_send = Arc::clone(&current_count);
+    let current_count_for_refuel = Arc::clone(&current_count);
+
+    // Clone for refueling task
+    let connection_id_for_refuel = Arc::clone(&connection_id);
+    let server_addr_for_refuel = Arc::clone(&server_addr);
+    let desired_count_for_refuel = Arc::clone(&desired_count);
+    let add_connection_tx_for_refuel = add_connection_tx.clone();
+    let refuel_tx_for_send = refuel_tx.clone();
 
     // Spawn task to distribute outgoing datagrams across TCP connections
     // This task also handles adding new connections dynamically
@@ -794,6 +840,7 @@ fn spawn_tcp_io_tasks(
                     let conn = FramedConnection::new(stream);
                     let (sender, receiver) = conn.split();
                     senders.push(sender);
+                    current_count_for_send.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                     // If there's initial data, inject it into the incoming channel first
                     if let Some(data) = initial_data {
@@ -805,7 +852,9 @@ fn spawn_tcp_io_tasks(
 
                     // Spawn a receive task for the new connection
                     let tx = incoming_tx_clone.clone();
-                    tokio::spawn(spawn_recv_task(receiver, tx));
+                    let count = Arc::clone(&current_count_for_send);
+                    let refuel = refuel_tx_for_send.clone();
+                    tokio::spawn(spawn_recv_task_with_refuel(receiver, tx, count, refuel));
 
                     tracing::debug!("added new TCP connection, total: {}", senders.len());
                 }
@@ -825,9 +874,11 @@ fn spawn_tcp_io_tasks(
                     index = (index + 1) % senders.len();
 
                     if let Err(e) = senders[send_index].send(data).await {
-                        tracing::warn!("TCP send error: {}", e);
-                        // Remove failed sender and continue with others
+                        tracing::warn!("TCP send error on connection {}: {}", send_index, e);
+                        // Remove failed sender
                         senders.remove(send_index);
+                        current_count_for_send.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
                         if senders.is_empty() {
                             tracing::warn!("all TCP connections failed");
                             break;
@@ -836,6 +887,9 @@ fn spawn_tcp_io_tasks(
                         if index >= senders.len() {
                             index = 0;
                         }
+
+                        // Request refuel
+                        let _ = refuel_tx_for_send.try_send(());
                     }
                 }
             }
@@ -845,17 +899,119 @@ fn spawn_tcp_io_tasks(
     // Spawn tasks to receive from each initial TCP connection
     for receiver in receivers {
         let tx = incoming_tx.clone();
-        tokio::spawn(spawn_recv_task(receiver, tx));
+        let count = Arc::clone(&current_count);
+        let refuel = refuel_tx.clone();
+        tokio::spawn(spawn_recv_task_with_refuel(receiver, tx, count, refuel));
     }
+
+    // Spawn refueling task (client-side only, server_addr must be set)
+    tokio::spawn(async move {
+        loop {
+            // Wait for refuel request
+            if refuel_rx.recv().await.is_none() {
+                break;
+            }
+
+            // Debounce: wait a bit and drain any additional requests
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            while refuel_rx.try_recv().is_ok() {}
+
+            // Check if we need to refuel
+            let current = current_count_for_refuel.load(std::sync::atomic::Ordering::Relaxed);
+            let desired = *desired_count_for_refuel.lock().await;
+
+            if current >= desired {
+                continue;
+            }
+
+            // Get server address (client-side only)
+            let addr = {
+                let addr_guard = server_addr_for_refuel.lock().await;
+                match *addr_guard {
+                    Some(addr) => addr,
+                    None => continue, // Server-side, no refueling
+                }
+            };
+
+            // Get connection ID
+            let conn_id: Vec<u8> = {
+                let id_guard = connection_id_for_refuel.lock().await;
+                match id_guard.clone() {
+                    Some(id) => id,
+                    None => continue, // No connection ID yet
+                }
+            };
+
+            let needed = desired - current;
+            tracing::info!(
+                "refueling TCP connections: current={}, desired={}, adding={}",
+                current,
+                desired,
+                needed
+            );
+
+            for i in 0..needed {
+                match TcpStream::connect(addr).await {
+                    Ok(stream) => {
+                        if let Err(e) = stream.set_nodelay(true) {
+                            tracing::warn!(
+                                "failed to set nodelay on refuel connection {}: {}",
+                                i,
+                                e
+                            );
+                            continue;
+                        }
+
+                        // Send routing header
+                        let mut header = vec![ROUTING_MAGIC, conn_id.len() as u8];
+                        header.extend_from_slice(&conn_id);
+
+                        let mut conn = FramedConnection::new(stream);
+                        if let Err(e) = conn.send(Bytes::from(header)).await {
+                            tracing::warn!("failed to send routing header on refuel: {}", e);
+                            continue;
+                        }
+
+                        let stream = conn.into_inner();
+                        if add_connection_tx_for_refuel
+                            .send(TcpConnectionWithData {
+                                stream,
+                                initial_data: None,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("failed to add refuel connection: channel closed");
+                            break;
+                        }
+
+                        tracing::debug!("added refuel connection {}", i + 1);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to establish refuel connection {}: {}", i, e);
+                    }
+                }
+            }
+        }
+    });
 
     TcpConnectionHandle {
         add_connection_tx,
         connection_id,
+        server_addr,
+        desired_count,
+        refuel_tx,
     }
 }
 
 /// Spawn a receive task for a single TCP connection.
-async fn spawn_recv_task(mut receiver: super::ConnectionReceiver, tx: mpsc::Sender<Bytes>) {
+/// Receive task that also triggers refueling when the connection closes.
+async fn spawn_recv_task_with_refuel(
+    mut receiver: super::ConnectionReceiver,
+    tx: mpsc::Sender<Bytes>,
+    current_count: Arc<std::sync::atomic::AtomicUsize>,
+    refuel_tx: mpsc::Sender<()>,
+) {
     loop {
         match receiver.recv().await {
             Ok(Some(data)) => {
@@ -863,13 +1019,21 @@ async fn spawn_recv_task(mut receiver: super::ConnectionReceiver, tx: mpsc::Send
                     break;
                 }
             }
-            Ok(None) => break,
+            Ok(None) => {
+                // Connection closed normally
+                tracing::debug!("TCP receive connection closed");
+                break;
+            }
             Err(e) => {
                 tracing::warn!("TCP recv error: {}", e);
                 break;
             }
         }
     }
+
+    // Decrement count and request refuel
+    current_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = refuel_tx.try_send(());
 }
 
 #[derive(Debug, thiserror::Error)]

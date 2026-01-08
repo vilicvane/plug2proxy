@@ -447,3 +447,209 @@ mod quic_config_tests {
         assert!(config.is_err());
     }
 }
+
+#[cfg(test)]
+mod tcp_refuel_tests {
+    use std::net::SocketAddr;
+
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
+    use crate::cert::{generate_ca, generate_node_cert};
+    use crate::tunnel::{QuicConfig, ROUTING_MAGIC, Tunnel};
+
+    const TEST_CERT_PATH: &str = "test.pem";
+
+    /// Ensure test certificate exists in cwd.
+    fn ensure_test_cert() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            if !std::path::Path::new(TEST_CERT_PATH).exists() {
+                let ca = generate_ca("test-ca").unwrap();
+                let server_cert =
+                    generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+                server_cert.write_to_file(TEST_CERT_PATH).unwrap();
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_tcp_handle_tracks_connection_id() {
+        ensure_test_cert();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server task
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(TEST_CERT_PATH, None)
+                .unwrap()
+                .into_inner();
+
+            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config)
+                .await
+                .unwrap();
+
+            // Keep tunnel alive briefly
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tunnel
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Client connects with 1 connection (no additional)
+        let tunnel = Tunnel::connect(addr, Some("localhost"), 1).await.unwrap();
+
+        // After handshake, connection ID should be set
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Get the connection ID
+        let conn_id = tunnel.connection_id().await;
+        assert!(
+            !conn_id.is_empty(),
+            "Connection ID should be set after handshake"
+        );
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_routing_header_format() {
+        // Test that the routing header is correctly formatted
+        let conn_id = vec![0x12, 0x34, 0x56, 0x78];
+
+        let mut header = vec![ROUTING_MAGIC, conn_id.len() as u8];
+        header.extend_from_slice(&conn_id);
+
+        assert_eq!(header[0], ROUTING_MAGIC);
+        assert_eq!(header[1], 4); // length
+        assert_eq!(&header[2..], &conn_id[..]);
+
+        // Verify parsing
+        assert_eq!(header[0], ROUTING_MAGIC);
+        let len = header[1] as usize;
+        let parsed_id = &header[2..2 + len];
+        assert_eq!(parsed_id, &conn_id[..]);
+    }
+
+    #[tokio::test]
+    async fn test_refuel_channel_behavior() {
+        // Test that refuel requests are properly buffered in the channel
+        let (tx, mut rx) = mpsc::channel::<()>(16);
+
+        // Send multiple rapid requests
+        for _ in 0..10 {
+            let _ = tx.try_send(());
+        }
+
+        // Should receive at least one
+        let first = rx.try_recv();
+        assert!(first.is_ok(), "Should receive at least one refuel request");
+
+        // Drain remaining
+        let mut count = 1;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+
+        // Should have received all 10 (they're buffered)
+        // The debouncing happens in the refuel task with the 100ms sleep
+        assert_eq!(count, 10, "All requests should be buffered in channel");
+    }
+
+    #[tokio::test]
+    async fn test_server_tunnel_no_refuel_addr() {
+        ensure_test_cert();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Start server
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(TEST_CERT_PATH, None)
+                .unwrap()
+                .into_inner();
+
+            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config)
+                .await
+                .unwrap();
+
+            // Server tunnel should work but won't refuel (no server_addr)
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tunnel
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = Tunnel::connect(addr, Some("localhost"), 1).await.unwrap();
+        assert!(client.is_established().await);
+
+        let server = server_task.await.unwrap();
+        assert!(server.is_established().await);
+    }
+
+    #[tokio::test]
+    async fn test_client_sets_refuel_metadata() {
+        ensure_test_cert();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server - just accept and keep alive
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(TEST_CERT_PATH, None)
+                .unwrap()
+                .into_inner();
+
+            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config)
+                .await
+                .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tunnel
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Connect with desired_count = 2
+        let tunnel = Tunnel::connect(addr, Some("localhost"), 2).await.unwrap();
+
+        // Wait for handshake
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify tunnel is established
+        assert!(tunnel.is_established().await);
+
+        // Connection ID should be set (used for refueling)
+        let conn_id = tunnel.connection_id().await;
+        assert!(!conn_id.is_empty());
+
+        server_task.await.unwrap();
+    }
+
+    #[test]
+    fn test_routing_magic_value() {
+        // ROUTING_MAGIC should be 0x50 ('P')
+        assert_eq!(ROUTING_MAGIC, 0x50);
+
+        // This value should not conflict with QUIC packet headers
+        // QUIC long header: first bit is 1 (0x80-0xFF)
+        // QUIC short header: first bit is 0, but has specific patterns
+        // 0x50 is in a safe range that won't be confused with QUIC
+        const { assert!(ROUTING_MAGIC < 0x80) }; // Not a QUIC long header
+    }
+}

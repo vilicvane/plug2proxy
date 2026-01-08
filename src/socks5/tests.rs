@@ -88,14 +88,14 @@ mod relay_tests {
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-    const TEST_CERT_PATH: &str = "certs/cert.pem";
+    const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
         use std::sync::Once;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| {
-            std::fs::create_dir_all("certs").unwrap();
+            std::fs::create_dir_all("tmp/certs").unwrap();
             if !std::path::Path::new(TEST_CERT_PATH).exists() {
                 let ca = generate_ca("test-ca").unwrap();
                 let server_cert =
@@ -713,14 +713,14 @@ mod socks5_server_tests {
     use crate::socks5::Socks5Server;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(15);
-    const TEST_CERT_PATH: &str = "certs/cert.pem";
+    const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
         use std::sync::Once;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| {
-            std::fs::create_dir_all("certs").unwrap();
+            std::fs::create_dir_all("tmp/certs").unwrap();
             if !std::path::Path::new(TEST_CERT_PATH).exists() {
                 let ca = generate_ca("test-ca").unwrap();
                 let server_cert =
@@ -1226,14 +1226,14 @@ mod udp_integration_tests {
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
 
-    const TEST_CERT_PATH: &str = "certs/cert.pem";
+    const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
         use std::sync::Once;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| {
-            std::fs::create_dir_all("certs").unwrap();
+            std::fs::create_dir_all("tmp/certs").unwrap();
             if !std::path::Path::new(TEST_CERT_PATH).exists() {
                 let ca = generate_ca("test-ca").unwrap();
                 let server_cert =
@@ -1415,14 +1415,14 @@ mod udp_e2e_tests {
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
-    const TEST_CERT_PATH: &str = "certs/cert.pem";
+    const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
         use std::sync::Once;
         static INIT: Once = Once::new();
 
         INIT.call_once(|| {
-            std::fs::create_dir_all("certs").unwrap();
+            std::fs::create_dir_all("tmp/certs").unwrap();
             if !std::path::Path::new(TEST_CERT_PATH).exists() {
                 let ca = generate_ca("test-ca").unwrap();
                 let server_cert =
