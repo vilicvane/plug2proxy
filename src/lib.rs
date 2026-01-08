@@ -1,6 +1,7 @@
 pub mod cert;
 pub mod config;
 pub mod fake_ip;
+pub mod geoip_updater;
 pub mod node;
 pub mod output;
 pub mod route;

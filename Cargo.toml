@@ -33,6 +33,19 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 hickory-client = "0.25"
 hickory-resolver = { version = "0.25", features = ["system-config"] }
 hickory-server = { version = "0.25", features = ["resolver"] }
+url = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+  "ring",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+] }
+webpki-roots = "0.26"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [lints.clippy]
 collapsible_else_if = "allow"

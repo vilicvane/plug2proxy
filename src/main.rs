@@ -219,31 +219,25 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
         tracing::info!("Direct OUT filter: {:?}", direct_filter);
     }
 
-    // Load GeoLite2 database if configured
-    let geolite2 = if let Some(ref geoip_db_path) = config.geoip_db {
-        match plug2proxy::route::GeoLite2::open(geoip_db_path) {
-            Ok(db) => {
-                tracing::info!("Loaded GeoIP database: {}", geoip_db_path.display());
-                Some(db)
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to load GeoIP database '{}': {}",
-                    geoip_db_path.display(),
-                    e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Fake-IP database path (convention)
+    // Convention-based paths
+    const GEOIP_DB_PATH: &str = "geolite2.mmdb";
     const FAKE_IP_DB_PATH: &str = "fakeip.db";
 
+    // Load GeoLite2 database if exists (convention: geolite2.mmdb)
+    let geolite2 = match plug2proxy::route::GeoLite2::open(GEOIP_DB_PATH) {
+        Ok(db) => {
+            tracing::info!("Loaded GeoIP database: {}", GEOIP_DB_PATH);
+            Some(db)
+        }
+        Err(e) => {
+            tracing::debug!("GeoIP database not available: {} ({})", GEOIP_DB_PATH, e);
+            None
+        }
+    };
+
     // Start fake-ip DNS server and create resolver if configured
-    let fake_ip_resolver = if let Some(listen_addr) = config.fake_ip {
+    let fake_ip_resolver = if let Some(ref fake_ip_config) = config.fake_ip {
+        let listen_addr = fake_ip_config.listen();
         tracing::info!("Starting fake-ip DNS server on: {}", listen_addr);
 
         // Create resolver for upstream DNS queries
@@ -286,8 +280,16 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
         }
     };
 
+    // Track spawned tasks to abort on reconnect
+    let mut spawned_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     // Auto-reconnect loop
     loop {
+        // Abort any previous tasks before starting new connection
+        for handle in spawned_tasks.drain(..) {
+            handle.abort();
+        }
+
         let mut in_node = InNode::new(
             client_config.clone(),
             direct_filter.clone(),
@@ -301,20 +303,27 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
 
                 // Start SOCKS5 server if configured
                 if let Some(ref socks5_config) = config.socks5 {
-                    tracing::info!("Starting SOCKS5 server on: {}", socks5_config.listen);
+                    tracing::info!("Starting SOCKS5 server on: {}", socks5_config.listen());
 
-                    let mut socks5 = Socks5Server::new(Arc::clone(&in_node), socks5_config.listen);
+                    let mut socks5 =
+                        Socks5Server::new(Arc::clone(&in_node), socks5_config.listen());
                     if let Some(ref resolver) = fake_ip_resolver {
                         socks5 = socks5.with_fake_ip_resolver(Arc::clone(resolver));
                     }
 
                     // Spawn message loop to receive updates from HUB
                     let in_node_clone = Arc::clone(&in_node);
-                    tokio::spawn(async move {
+                    spawned_tasks.push(tokio::spawn(async move {
                         if let Err(e) = in_node_clone.run().await {
                             tracing::error!("IN node message loop error: {}", e);
                         }
-                    });
+                    }));
+
+                    // Spawn GeoIP updater task (uses convention path geolite2.mmdb)
+                    let in_node_clone = Arc::clone(&in_node);
+                    spawned_tasks.push(tokio::spawn(async move {
+                        run_geoip_updater(in_node_clone, GEOIP_DB_PATH.to_string()).await;
+                    }));
 
                     // Run SOCKS5 server (blocks until HUB disconnects)
                     if let Err(e) = socks5.run().await {
@@ -340,5 +349,35 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+/// Run GeoIP database updater periodically.
+async fn run_geoip_updater(in_node: Arc<InNode>, db_path: String) {
+    use plug2proxy::geoip_updater::GeoIpUpdater;
+
+    // Update interval: 24 hours
+    const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    // Initial delay: wait for network to stabilize
+    const INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+
+    tokio::time::sleep(INITIAL_DELAY).await;
+
+    let updater = GeoIpUpdater::new(&db_path);
+
+    loop {
+        match updater.update(Some(Arc::clone(&in_node))).await {
+            Ok(()) => {
+                tracing::info!("GeoIP database update completed successfully");
+                // Wait for next update cycle
+                tokio::time::sleep(UPDATE_INTERVAL).await;
+            }
+            Err(e) => {
+                tracing::warn!("GeoIP database update failed: {}", e);
+                // Wait for next update cycle
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::output::OutputConfig;
 use crate::route::{OneOrMany, RuleConfig};
@@ -91,12 +91,12 @@ pub struct InConfig {
     /// If empty, no direct connections are made (all traffic goes through HUB).
     #[serde(default)]
     pub direct: OneOrMany<String>,
-    /// Path to GeoLite2 database file for GeoIP-based routing rules.
-    pub geoip_db: Option<PathBuf>,
-    /// Fake-IP DNS listen address.
-    /// If set, a fake-IP DNS server will be started on this address.
+    /// Fake-IP DNS configuration.
+    /// Can be just an address string or a struct.
     /// Uses `fakeip.db` as the database file (convention).
-    pub fake_ip: Option<SocketAddr>,
+    pub fake_ip: Option<FakeIpConfig>,
+    /// SOCKS5 server configuration.
+    /// Can be just an address string or a struct.
     pub socks5: Option<Socks5Config>,
 }
 
@@ -127,8 +127,37 @@ pub struct HubConnectionFullConfig {
     pub address: SocketAddr,
 }
 
+/// SOCKS5 server configuration.
+/// Can be deserialized from either:
+/// - A string: `socks5: "127.0.0.1:1080"`
+/// - A struct: `socks5: { listen: "127.0.0.1:1080", auth: { ... } }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Socks5Config {
+#[serde(untagged)]
+pub enum Socks5Config {
+    /// Just the listen address string.
+    Address(SocketAddr),
+    /// Full config with listen address and optional auth.
+    Full(Socks5FullConfig),
+}
+
+impl Socks5Config {
+    pub fn listen(&self) -> SocketAddr {
+        match self {
+            Socks5Config::Address(addr) => *addr,
+            Socks5Config::Full(config) => config.listen,
+        }
+    }
+
+    pub fn auth(&self) -> Option<&AuthConfig> {
+        match self {
+            Socks5Config::Address(_) => None,
+            Socks5Config::Full(config) => config.auth.as_ref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Socks5FullConfig {
     pub listen: SocketAddr,
     pub auth: Option<AuthConfig>,
 }
@@ -137,6 +166,33 @@ pub struct Socks5Config {
 pub struct AuthConfig {
     pub username: String,
     pub password: String,
+}
+
+/// Fake-IP DNS configuration.
+/// Can be deserialized from either:
+/// - A string: `fake_ip: "127.0.0.1:53"`
+/// - A struct: `fake_ip: { listen: "127.0.0.1:53" }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FakeIpConfig {
+    /// Just the listen address string.
+    Address(SocketAddr),
+    /// Full config with listen address.
+    Full(FakeIpFullConfig),
+}
+
+impl FakeIpConfig {
+    pub fn listen(&self) -> SocketAddr {
+        match self {
+            FakeIpConfig::Address(addr) => *addr,
+            FakeIpConfig::Full(config) => config.listen,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FakeIpFullConfig {
+    pub listen: SocketAddr,
 }
 
 /// Routing configuration for Hub (sent to IN nodes).
@@ -176,7 +232,6 @@ impl Default for InConfig {
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
             direct: OneOrMany::default(),
-            geoip_db: None,
             fake_ip: None,
             socks5: Some(Socks5Config::default()),
         }
@@ -185,9 +240,6 @@ impl Default for InConfig {
 
 impl Default for Socks5Config {
     fn default() -> Self {
-        Self {
-            listen: "127.0.0.1:1080".parse().unwrap(),
-            auth: None,
-        }
+        Socks5Config::Address("127.0.0.1:1080".parse().unwrap())
     }
 }

@@ -86,6 +86,28 @@ impl ProxyStream {
             }
         }
     }
+
+    /// Convert to TCP stream (only works for TCP variant).
+    /// Useful for wrapping with TLS.
+    pub fn into_tcp_stream(self) -> Result<TcpStream, TunnelError> {
+        match self {
+            ProxyStream::Tcp(tcp) => Ok(tcp),
+            ProxyStream::Quic(_) => Err(TunnelError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "cannot convert QUIC stream to TCP stream",
+            ))),
+        }
+    }
+
+    /// Check if this is a TCP stream (can be wrapped in TLS).
+    pub fn is_tcp(&self) -> bool {
+        matches!(self, ProxyStream::Tcp(_))
+    }
+
+    /// Check if this is a QUIC stream.
+    pub fn is_quic(&self) -> bool {
+        matches!(self, ProxyStream::Quic(_))
+    }
 }
 
 /// Relay between QUIC stream and client.

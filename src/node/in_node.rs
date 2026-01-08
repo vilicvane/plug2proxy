@@ -218,6 +218,17 @@ impl InNode {
         self.outs.read().await.values().cloned().collect()
     }
 
+    /// Reload the GeoIP database from disk.
+    /// Returns Ok(true) if reloaded, Ok(false) if no database configured.
+    pub fn reload_geoip(&self) -> Result<bool, String> {
+        if let Some(ref geolite2) = self.geolite2 {
+            geolite2.reload().map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Get HubConnector for creating proxied connections through HUB.
     pub fn hub_connector(&self) -> Option<HubConnector> {
         self.hub_conn
@@ -287,6 +298,37 @@ impl InNode {
             .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
 
         Ok(ProxyStream::from_tcp(tcp_stream))
+    }
+
+    /// Connect to target using a specific label.
+    /// Useful for special routing like GeoIP updates.
+    pub async fn connect_with_label(
+        &self,
+        target: &str,
+        label: &str,
+    ) -> Result<ProxyStream, InNodeError> {
+        use super::message::RouteEntry;
+
+        // Check if HUB connection is still alive
+        if !self.is_hub_connected().await {
+            return Err(InNodeError::NotConnected);
+        }
+
+        let routes = vec![RouteEntry {
+            label: Label::Custom(label.to_string()),
+            tag: None,
+        }];
+
+        // Try direct OUT connection first
+        if let Some(stream) = self.try_direct_out_connect(label, target, &routes).await? {
+            return Ok(ProxyStream::from_quic(stream));
+        }
+
+        // Fall back to HUB relay
+        let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
+        let stream = connector.connect_tcp_with_routes(target, routes).await?;
+
+        Ok(ProxyStream::from_quic(stream))
     }
 
     /// Try to connect directly to an OUT node.

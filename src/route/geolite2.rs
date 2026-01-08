@@ -1,22 +1,36 @@
 use std::net::IpAddr;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use maxminddb::Reader;
 
 /// GeoLite2 database reader for IP geolocation.
+/// Supports reloading the database from disk without restarting.
 #[derive(Clone)]
 pub struct GeoLite2 {
-    reader: Arc<Reader<Vec<u8>>>,
+    path: PathBuf,
+    reader: Arc<RwLock<Reader<Vec<u8>>>>,
 }
 
 impl GeoLite2 {
     /// Open a GeoLite2 database from file.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, maxminddb::MaxMindDBError> {
-        let reader = Reader::open_readfile(path)?;
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, maxminddb::MaxMindDBError> {
+        let path = path.into();
+        let reader = Reader::open_readfile(&path)?;
         Ok(Self {
-            reader: Arc::new(reader),
+            path,
+            reader: Arc::new(RwLock::new(reader)),
         })
+    }
+
+    /// Reload the database from disk.
+    /// This allows picking up updates without restarting the application.
+    pub fn reload(&self) -> Result<(), maxminddb::MaxMindDBError> {
+        let new_reader = Reader::open_readfile(&self.path)?;
+        let mut writer = self.reader.write().unwrap();
+        *writer = new_reader;
+        tracing::info!("GeoIP database reloaded from: {:?}", self.path);
+        Ok(())
     }
 
     /// Lookup an IP address and return region codes.
@@ -24,7 +38,8 @@ impl GeoLite2 {
     /// Returns a list of region codes (country ISO code, continent code).
     /// Returns None if the IP is not found in the database.
     pub fn lookup(&self, ip: IpAddr) -> Option<Vec<String>> {
-        let record: maxminddb::geoip2::Country = self.reader.lookup(ip).ok()?;
+        let reader = self.reader.read().unwrap();
+        let record: maxminddb::geoip2::Country = reader.lookup(ip).ok()?;
 
         let mut codes = Vec::new();
 
@@ -42,11 +57,7 @@ impl GeoLite2 {
             }
         }
 
-        if codes.is_empty() {
-            None
-        } else {
-            Some(codes)
-        }
+        if codes.is_empty() { None } else { Some(codes) }
     }
 }
 
@@ -60,6 +71,7 @@ impl std::fmt::Debug for GeoLite2 {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+    use std::path::Path;
 
     #[test]
     fn test_geolite2_lookup() {
