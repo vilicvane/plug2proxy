@@ -335,29 +335,8 @@ impl Hub {
                         // Notify all INs about new OUT
                         self.broadcast_out_update().await;
 
-                        // Keep connection alive (OUT waits for forwarded streams)
-                        let tunnel_clone = Arc::clone(&tunnel);
+                        // Monitor OUT connection (no heartbeat needed - QUIC handles keep-alive)
                         tokio::spawn(async move {
-                            // Heartbeat task to prevent QUIC idle timeout
-                            tokio::spawn(async move {
-                                let heartbeat_stream_result = tunnel_clone.open_bi_stream().await;
-                                if let Ok(heartbeat_stream) = heartbeat_stream_result {
-                                    loop {
-                                        tokio::time::sleep(std::time::Duration::from_secs(10))
-                                            .await;
-                                        if tunnel_clone.is_closed().await {
-                                            break;
-                                        }
-                                        // Send a ping by writing empty data
-                                        if let Err(e) = heartbeat_stream.send(b"ping").await {
-                                            tracing::debug!("Heartbeat send error: {}", e);
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
-
-                            // Monitor connection
                             loop {
                                 if tunnel.is_closed().await {
                                     tracing::info!("OUT {} disconnected", out_id);
@@ -556,27 +535,15 @@ impl Hub {
             return Self::handle_udp_forward(stream).await;
         }
 
-        // Parse target address
-        let target_addr: SocketAddr = request
-            .target
-            .parse()
-            .or_else(|_| {
-                // Try adding default port
-                format!("{}:80", request.target).parse()
-            })
-            .map_err(|e| {
-                HubError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("invalid target: {}", e),
-                ))
-            })?;
+        // Connect to target (supports both IP:port and domain:port)
+        let target = if request.target.contains(':') {
+            request.target.clone()
+        } else {
+            format!("{}:80", request.target)
+        };
 
-        // Connect to target
-        let mut target_stream = TcpStream::connect(target_addr).await?;
-        tracing::info!(
-            "✅ HUB EXIT: Connected to {} directly from HUB",
-            target_addr
-        );
+        let mut target_stream = TcpStream::connect(&target).await?;
+        tracing::info!("✅ HUB EXIT: Connected to {} directly from HUB", target);
 
         // Relay data between tunnel stream and target
         Self::relay(stream, &mut target_stream).await?;

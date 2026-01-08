@@ -17,27 +17,32 @@ const NODE_PEM_PATH: &str = "node.pem";
 #[command(name = "plug2proxy")]
 #[command(about = "QUIC-over-TCP proxy with SOCKS5 support", long_about = None)]
 struct Args {
-    /// Path to configuration file (default: config.yaml)
-    #[arg(short, long, default_value = "config.yaml")]
-    config: PathBuf,
-
     /// Generate node certificate under <name>/ directory (for IN/OUT nodes)
     /// The node will use <name>/node.pem for authentication
     #[arg(long)]
     node_cert: Option<String>,
 }
 
+/// Conventional config file name.
+const CONFIG_PATH: &str = "config.yaml";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
-    let config = Config::from_file(&args.config)?;
+
+    // If --node-cert is provided, just generate the certificate and exit
+    if let Some(node_name) = args.node_cert {
+        return generate_node_cert_for_distribution(&node_name);
+    }
+
+    let config = Config::from_file(CONFIG_PATH)?;
 
     match config {
         Config::Hub(hub_config) => run_hub(hub_config).await,
-        Config::Out(out_config) => run_out(out_config, args.node_cert).await,
-        Config::In(in_config) => run_in(in_config, args.node_cert).await,
+        Config::Out(out_config) => run_out(out_config).await,
+        Config::In(in_config) => run_in(in_config).await,
     }
 }
 
@@ -128,18 +133,13 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result<()> {
+async fn run_out(config: OutConfig) -> anyhow::Result<()> {
     let tags = config.tag.clone().into_vec();
     let hub_addr = config.hub.address();
     tracing::info!("Starting OUT node with tags: {:?}", tags);
     tracing::info!("Connecting to HUB: {}", hub_addr);
 
     let connections = config.connections.unwrap_or(1);
-
-    // If --node-cert is provided, generate cert for distribution
-    if let Some(ref name) = node_cert {
-        generate_node_cert_for_distribution(name)?;
-    }
 
     // Use node.pem from cwd for connection (contains cert + key + CA cert)
     let node_pem_path = Path::new(NODE_PEM_PATH);
@@ -182,17 +182,12 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
     }
 }
 
-async fn run_in(config: InConfig, node_cert: Option<String>) -> anyhow::Result<()> {
+async fn run_in(config: InConfig) -> anyhow::Result<()> {
     let hub_addr = config.hub.address();
     tracing::info!("Starting IN node");
     tracing::info!("Connecting to HUB: {}", hub_addr);
 
     let connections = config.connections.unwrap_or(1);
-
-    // If --node-cert is provided, generate cert for distribution
-    if let Some(ref name) = node_cert {
-        generate_node_cert_for_distribution(name)?;
-    }
 
     // Use node.pem from cwd for connection (contains cert + key + CA cert)
     let node_pem_path = Path::new(NODE_PEM_PATH);

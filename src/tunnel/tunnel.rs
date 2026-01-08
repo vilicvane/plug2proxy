@@ -920,7 +920,7 @@ fn spawn_tcp_io_tasks(
             }
 
             // Debounce: wait a bit and drain any additional requests
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             while refuel_rx.try_recv().is_ok() {}
 
             // Check if we need to refuel
@@ -950,7 +950,7 @@ fn spawn_tcp_io_tasks(
             };
 
             let needed = desired - current;
-            tracing::info!(
+            tracing::debug!(
                 "refueling TCP connections: current={}, desired={}, adding={}",
                 current,
                 desired,

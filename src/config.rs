@@ -121,7 +121,7 @@ impl Default for HubConfig {
 impl Default for OutConfig {
     fn default() -> Self {
         Self {
-            tag: OneOrMany::One("default".to_string()),
+            tag: OneOrMany::Many(vec![]),
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
             outputs: vec![],
