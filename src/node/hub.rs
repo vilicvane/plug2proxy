@@ -448,7 +448,7 @@ impl Hub {
             match &route.label {
                 Label::BuiltIn(BuiltInLabel::Direct) => {
                     // Direct connection - exit from HUB
-                    tracing::info!("🔀 ROUTING: {} → HUB DIRECT (DIRECT)", request.host);
+                    tracing::info!("🔀 RELAY: {} → HUB DIRECT (DIRECT)", request.host);
                     return Self::exit_tcp_from_hub(stream, &request.host).await;
                 }
                 Label::BuiltIn(BuiltInLabel::Proxy) => {
@@ -462,7 +462,7 @@ impl Hub {
                     };
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
-                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (PROXY)", request.host, out_id);
+                        tracing::info!("🔀 RELAY: {} → OUT [{}] (PROXY)", request.host, out_id);
                         // Forward with tag info for second-level routing at OUT
                         return Self::forward_tcp_to_out(stream, out_tunnel, request).await;
                     }
@@ -479,10 +479,10 @@ impl Hub {
                     };
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
-                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (ANY)", request.host, out_id);
+                        tracing::info!("🔀 RELAY: {} → OUT [{}] (ANY)", request.host, out_id);
                         return Self::forward_tcp_to_out(stream, out_tunnel, request).await;
                     } else {
-                        tracing::info!("🔀 ROUTING: {} → HUB DIRECT (ANY)", request.host);
+                        tracing::info!("🔀 RELAY: {} → HUB DIRECT (ANY)", request.host);
                         return Self::exit_tcp_from_hub(stream, &request.host).await;
                     }
                 }
@@ -498,7 +498,7 @@ impl Hub {
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
                         tracing::info!(
-                            "🔀 ROUTING: {} → OUT [{}] (label: '{}', tag: {:?})",
+                            "🔀 RELAY: {} → OUT [{}] (label: '{}', tag: {:?})",
                             request.host,
                             out_id,
                             node_label,
@@ -509,7 +509,7 @@ impl Hub {
                     } else if hub_labels.contains(node_label) {
                         // HUB itself has this tag, exit from HUB
                         tracing::info!(
-                            "🔀 ROUTING: {} → HUB DIRECT (label: '{}')",
+                            "🔀 RELAY: {} → HUB DIRECT (label: '{}')",
                             request.host,
                             node_label
                         );
@@ -522,10 +522,10 @@ impl Hub {
 
         // No routes matched - exit directly from HUB
         if request.routes.is_empty() {
-            tracing::info!("🔀 ROUTING: {} → HUB DIRECT (no routes)", request.host);
+            tracing::info!("🔀 RELAY: {} → HUB DIRECT (no routes)", request.host);
         } else {
             tracing::warn!(
-                "⚠️  ROUTING: {} → HUB DIRECT (no OUT found for routes: {:?})",
+                "⚠️ RELAY: {} → HUB DIRECT (no OUT found for routes: {:?})",
                 request.host,
                 request.routes
             );
@@ -587,7 +587,7 @@ impl Hub {
         for route in &request.routes {
             match &route.label {
                 Label::BuiltIn(BuiltInLabel::Direct) => {
-                    tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (DIRECT)");
+                    tracing::info!("🔀 RELAY: UDP → HUB DIRECT (DIRECT)");
                     return Self::handle_udp_forward(stream).await;
                 }
                 Label::BuiltIn(BuiltInLabel::Proxy) => {
@@ -600,7 +600,7 @@ impl Hub {
                     };
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
-                        tracing::info!("🔀 ROUTING: UDP → OUT [{}] (PROXY)", out_id);
+                        tracing::info!("🔀 RELAY: UDP → OUT [{}] (PROXY)", out_id);
                         return Self::forward_udp_to_out(stream, out_tunnel, request).await;
                     }
                 }
@@ -614,10 +614,10 @@ impl Hub {
                     };
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
-                        tracing::info!("🔀 ROUTING: UDP → OUT [{}] (ANY)", out_id);
+                        tracing::info!("🔀 RELAY: UDP → OUT [{}] (ANY)", out_id);
                         return Self::forward_udp_to_out(stream, out_tunnel, request).await;
                     } else {
-                        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (ANY)");
+                        tracing::info!("🔀 RELAY: UDP → HUB DIRECT (ANY)");
                         return Self::handle_udp_forward(stream).await;
                     }
                 }
@@ -632,13 +632,13 @@ impl Hub {
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
                         tracing::info!(
-                            "🔀 ROUTING: UDP → OUT [{}] (label: '{}')",
+                            "🔀 RELAY: UDP → OUT [{}] (label: '{}')",
                             out_id,
                             node_label
                         );
                         return Self::forward_udp_to_out(stream, out_tunnel, request).await;
                     } else if hub_labels.contains(node_label) {
-                        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (label: '{}')", node_label);
+                        tracing::info!("🔀 RELAY: UDP → HUB DIRECT (label: '{}')", node_label);
                         return Self::handle_udp_forward(stream).await;
                     }
                 }
@@ -646,7 +646,7 @@ impl Hub {
         }
 
         // No routes matched - exit directly from HUB
-        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (no routes)");
+        tracing::info!("🔀 RELAY: UDP → HUB DIRECT (no routes)");
         Self::handle_udp_forward(stream).await
     }
 

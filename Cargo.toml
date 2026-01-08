@@ -28,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 x509-parser = "0.16"
+maxminddb = "0.24"
 
 [lints.clippy]
 collapsible_else_if = "allow"

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::route::{Label, MatchContext, Router, RuleConfig};
+use crate::route::{GeoLite2, Label, MatchContext, Router, RuleConfig};
 use crate::tunnel::{Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
@@ -19,6 +19,8 @@ pub struct InNode {
     client_config: ClientConfig,
     /// Router for matching targets.
     router: Arc<RwLock<Router>>,
+    /// GeoLite2 database for IP geolocation.
+    geolite2: Option<GeoLite2>,
     /// Available OUTs (received from HUB).
     outs: Arc<RwLock<HashMap<String, OutInfo>>>,
     /// Direct connections to OUT nodes (for IN→OUT bypass).
@@ -31,10 +33,15 @@ pub struct InNode {
 }
 
 impl InNode {
-    pub fn new(client_config: ClientConfig, direct_filter: Vec<String>) -> Self {
+    pub fn new(
+        client_config: ClientConfig,
+        direct_filter: Vec<String>,
+        geolite2: Option<GeoLite2>,
+    ) -> Self {
         Self {
             client_config,
             router: Arc::new(RwLock::new(Router::new(Vec::new()))),
+            geolite2,
             outs: Arc::new(RwLock::new(HashMap::new())),
             direct_out_tunnels: Arc::new(RwLock::new(HashMap::new())),
             direct_filter,
@@ -155,22 +162,36 @@ impl InNode {
         };
 
         // Check if host is a domain or IP
-        let domain = if host.chars().any(|c| !c.is_ascii_digit() && c != '.') {
-            Some(host)
+        let is_ip = host.parse::<IpAddr>().is_ok();
+        let domain = if is_ip { None } else { Some(host) };
+
+        // Try to parse as IP address, or resolve domain if GeoIP is needed
+        let ip: Option<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+            Some(ip)
         } else {
-            None
+            // Try DNS resolution for GeoIP lookup
+            tokio::net::lookup_host(format!("{}:{}", host, port))
+                .await
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .map(|addr| addr.ip())
         };
 
-        // Try to parse as IP address, or use a placeholder
-        let addr: SocketAddr = target.parse().unwrap_or_else(|_| {
-            // Can't parse as socket addr, use placeholder
-            format!("0.0.0.0:{}", port).parse().unwrap()
+        let addr: SocketAddr = ip
+            .map(|ip| SocketAddr::new(ip, port))
+            .unwrap_or_else(|| format!("0.0.0.0:{}", port).parse().unwrap());
+
+        // Look up region codes from GeoIP database
+        let region_codes = ip.and_then(|ip| {
+            self.geolite2
+                .as_ref()
+                .and_then(|geolite2| geolite2.lookup(ip))
         });
 
         let ctx = MatchContext {
             address: addr,
             domain,
-            region_codes: None, // GeoIP not implemented yet
+            region_codes: region_codes.as_deref(),
         };
 
         let results = router.match_target(&ctx).await;

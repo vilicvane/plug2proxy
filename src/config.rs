@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::output::OutputConfig;
 use crate::route::{OneOrMany, RuleConfig};
@@ -91,6 +91,8 @@ pub struct InConfig {
     /// If empty, no direct connections are made (all traffic goes through HUB).
     #[serde(default)]
     pub direct: OneOrMany<String>,
+    /// Path to GeoLite2 database file for GeoIP-based routing rules.
+    pub geoip_db: Option<PathBuf>,
     pub socks5: Option<Socks5Config>,
 }
 
@@ -170,6 +172,7 @@ impl Default for InConfig {
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
             direct: OneOrMany::default(),
+            geoip_db: None,
             socks5: Some(Socks5Config::default()),
         }
     }

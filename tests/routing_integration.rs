@@ -145,7 +145,7 @@ impl TestNetwork {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Start IN node
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         tracing::info!("IN node connected");
 
@@ -552,7 +552,7 @@ impl SecondLevelTestNetwork {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Start IN node
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         tracing::info!("IN node connected");
 

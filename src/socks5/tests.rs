@@ -35,7 +35,7 @@ mod socks5_integration_tests {
     #[tokio::test]
     async fn test_socks5_server_creation() {
         // This test just verifies that we can create all the components
-        let in_node = Arc::new(InNode::new(test_client_config(), vec![]));
+        let in_node = Arc::new(InNode::new(test_client_config(), vec![], None));
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let _socks5_server = Socks5Server::new(in_node, bind_addr);
@@ -65,7 +65,7 @@ mod socks5_integration_tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Connect IN node
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         let result: Result<(), _> = in_node.connect_hub(hub_addr, 1).await;
 
         // We expect this to succeed
@@ -139,7 +139,7 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         (hub_addr, Arc::new(in_node))
@@ -182,7 +182,7 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Add a catch-all route rule to route through OUT
@@ -763,7 +763,7 @@ mod socks5_server_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         let in_node = Arc::new(in_node);
 
@@ -1323,7 +1323,7 @@ mod udp_integration_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 4. Start IN node
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("IN node connected");
 
@@ -1473,7 +1473,7 @@ mod udp_e2e_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect IN node
-        let mut in_node = InNode::new(test_client_config(), vec![]);
+        let mut in_node = InNode::new(test_client_config(), vec![], None);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         let in_node = Arc::new(in_node);
 
@@ -1616,7 +1616,7 @@ mod udp_e2e_tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Connect IN node
-            let mut in_node = InNode::new(test_client_config(), vec![]);
+            let mut in_node = InNode::new(test_client_config(), vec![], None);
             in_node.connect_hub(hub_addr, 1).await.unwrap();
             let in_node = Arc::new(in_node);
 

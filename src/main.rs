@@ -219,6 +219,26 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
         tracing::info!("Direct OUT filter: {:?}", direct_filter);
     }
 
+    // Load GeoLite2 database if configured
+    let geolite2 = if let Some(ref geoip_db_path) = config.geoip_db {
+        match plug2proxy::route::GeoLite2::open(geoip_db_path) {
+            Ok(db) => {
+                tracing::info!("Loaded GeoIP database: {}", geoip_db_path.display());
+                Some(db)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load GeoIP database '{}': {}",
+                    geoip_db_path.display(),
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Use node.pem from cwd for connection (contains cert + key + CA cert)
     let node_pem_path = Path::new(NODE_PEM_PATH);
     let client_config = if node_pem_path.exists() {
@@ -237,7 +257,11 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
 
     // Auto-reconnect loop
     loop {
-        let mut in_node = InNode::new(client_config.clone(), direct_filter.clone());
+        let mut in_node = InNode::new(
+            client_config.clone(),
+            direct_filter.clone(),
+            geolite2.clone(),
+        );
 
         match in_node.connect_hub(hub_addr, connections).await {
             Ok(()) => {
