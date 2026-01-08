@@ -25,6 +25,7 @@ impl Socks5Server {
     }
 
     /// Run the SOCKS5 server.
+    /// Returns when HUB connection is lost.
     pub async fn run(&self) -> Result<(), Socks5Error> {
         let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
         let auth = Arc::new(socks5_server::auth::NoAuth);
@@ -32,22 +33,45 @@ impl Socks5Server {
 
         tracing::info!("SOCKS5 server listening on {}", self.bind_addr);
 
-        loop {
-            match server.accept().await {
-                Ok((conn, addr)) => {
-                    tracing::debug!("accepted SOCKS5 connection from {}", addr);
+        // Spawn a task to check HUB connection health
+        let in_node_health = Arc::clone(&self.in_node);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-                    let in_node = Arc::clone(&self.in_node);
-                    let bind_addr = self.bind_addr;
-
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_connection(conn, in_node, bind_addr).await {
-                            tracing::error!("SOCKS5 client {} error: {}", addr, e);
-                        }
-                    });
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if !in_node_health.is_hub_connected().await {
+                    tracing::warn!("HUB connection lost, shutting down SOCKS5 server");
+                    let _ = shutdown_tx.send(());
+                    break;
                 }
-                Err(e) => {
-                    tracing::error!("failed to accept connection: {}", e);
+            }
+        });
+
+        loop {
+            tokio::select! {
+                result = server.accept() => {
+                    match result {
+                        Ok((conn, addr)) => {
+                            tracing::debug!("accepted SOCKS5 connection from {}", addr);
+
+                            let in_node = Arc::clone(&self.in_node);
+                            let bind_addr = self.bind_addr;
+
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(conn, in_node, bind_addr).await {
+                                    tracing::error!("SOCKS5 client {} error: {}", addr, e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("failed to accept connection: {}", e);
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    tracing::info!("SOCKS5 server shutting down");
+                    return Ok(());
                 }
             }
         }

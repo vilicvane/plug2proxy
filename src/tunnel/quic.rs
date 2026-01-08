@@ -35,7 +35,7 @@ impl QuicConfig {
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
-        config.set_max_idle_timeout(60_000); // 60 seconds
+        config.set_max_idle_timeout(60_000); // 60 seconds - allow some idle time but detect dead connections
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -71,7 +71,7 @@ impl QuicConfig {
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
-        config.set_max_idle_timeout(60_000); // 60 seconds
+        config.set_max_idle_timeout(60_000); // 60 seconds - allow some idle time but detect dead connections
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);

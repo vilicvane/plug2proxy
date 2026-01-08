@@ -12,6 +12,9 @@ use super::{FramedConnection, QuicConfig, QuicConnection, QuicError};
 /// We use 0x50 ('P' for plug2proxy) which is in the reserved range.
 pub const ROUTING_MAGIC: u8 = 0x50;
 
+/// ACK byte sent by server after accepting a routing header.
+pub const ROUTING_ACK: u8 = 0x51;
+
 /// A TCP connection with optional initial data already read.
 pub struct TcpConnectionWithData {
     pub stream: TcpStream,
@@ -30,6 +33,8 @@ pub struct TcpConnectionHandle {
     desired_count: Arc<Mutex<usize>>,
     /// Channel to request refueling
     refuel_tx: mpsc::Sender<()>,
+    /// Flag indicating all TCP connections have died
+    transport_dead: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TcpConnectionHandle {
@@ -56,9 +61,17 @@ impl TcpConnectionHandle {
         let _ = self.refuel_tx.try_send(());
     }
 
+    /// Check if the transport layer (all TCP connections) is dead.
+    pub fn is_transport_dead(&self) -> bool {
+        self.transport_dead
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Add a new TCP connection to the tunnel.
-    /// For additional connections, sends a routing header first (as a framed message).
+    /// For additional connections, sends a routing header first and waits for ACK.
     pub async fn add_connection(&self, stream: TcpStream) -> Result<(), TunnelError> {
+        stream.set_nodelay(true)?;
+
         // If we have a connection ID, send routing header first as a framed message
         if let Some(ref conn_id) = *self.connection_id.lock().await {
             // Create routing header: MAGIC + length (1 byte) + connection ID
@@ -70,6 +83,33 @@ impl TcpConnectionHandle {
             conn.send(Bytes::from(header))
                 .await
                 .map_err(|e| TunnelError::Io(std::io::Error::other(e.to_string())))?;
+
+            // Wait for ACK from server
+            let ack = tokio::time::timeout(std::time::Duration::from_secs(5), conn.recv()).await;
+            match ack {
+                Ok(Ok(Some(data))) if !data.is_empty() && data[0] == ROUTING_ACK => {
+                    // ACK received, connection accepted
+                }
+                Ok(Ok(Some(_))) => {
+                    tracing::debug!("received unexpected response instead of routing ACK");
+                    return Err(TunnelError::ConnectionFailed);
+                }
+                Ok(Ok(None)) => {
+                    // Connection closed - server rejected (likely stale connection ID)
+                    tracing::debug!(
+                        "connection closed while waiting for routing ACK (stale connection ID?)"
+                    );
+                    return Err(TunnelError::ConnectionFailed);
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("error receiving routing ACK: {}", e);
+                    return Err(TunnelError::ConnectionFailed);
+                }
+                Err(_) => {
+                    tracing::debug!("timeout waiting for routing ACK");
+                    return Err(TunnelError::ConnectionTimeout);
+                }
+            }
 
             // Get the stream back and add to the pool
             let stream = conn.into_inner();
@@ -543,6 +583,11 @@ impl Tunnel {
     ) -> Result<Stream, TunnelError> {
         let recv_notify = self.quic.recv_notify();
         loop {
+            // Check if connection is closed
+            if self.is_closed().await {
+                return Err(TunnelError::ConnectionFailed);
+            }
+
             // Register for notification BEFORE checking for streams
             let notified = recv_notify.notified();
 
@@ -559,8 +604,12 @@ impl Tunnel {
                 }
             }
 
-            // All readable streams are already handled, wait for new activity
-            notified.await;
+            // All readable streams are already handled, wait for new activity with timeout
+            // Timeout allows periodic re-check of connection status
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
         }
     }
 
@@ -569,9 +618,9 @@ impl Tunnel {
         self.quic.is_established().await
     }
 
-    /// Check if the tunnel is closed.
+    /// Check if the tunnel is closed (either QUIC closed or all TCP connections died).
     pub async fn is_closed(&self) -> bool {
-        self.quic.is_closed().await
+        self.quic.is_closed().await || self.tcp_handle.is_transport_dead()
     }
 
     /// Close the tunnel.
@@ -824,6 +873,10 @@ fn spawn_tcp_io_tasks(
     let current_count_for_send = Arc::clone(&current_count);
     let current_count_for_refuel = Arc::clone(&current_count);
 
+    // Flag to track if all TCP connections have died
+    let transport_dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let transport_dead_for_send = Arc::clone(&transport_dead);
+
     // Clone for refueling task
     let connection_id_for_refuel = Arc::clone(&connection_id);
     let server_addr_for_refuel = Arc::clone(&server_addr);
@@ -873,7 +926,8 @@ fn spawn_tcp_io_tasks(
                     };
 
                     if senders.is_empty() {
-                        tracing::warn!("no TCP connections available for sending");
+                        tracing::warn!("no TCP connections available for sending, marking transport as dead");
+                        transport_dead_for_send.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
                     }
 
@@ -887,7 +941,8 @@ fn spawn_tcp_io_tasks(
                         current_count_for_send.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
                         if senders.is_empty() {
-                            tracing::warn!("all TCP connections failed");
+                            tracing::warn!("all TCP connections failed, marking transport as dead");
+                            transport_dead_for_send.store(true, std::sync::atomic::Ordering::Relaxed);
                             break;
                         }
                         // Adjust index if needed
@@ -911,8 +966,14 @@ fn spawn_tcp_io_tasks(
         tokio::spawn(spawn_recv_task_with_refuel(receiver, tx, count, refuel));
     }
 
+    // Clone transport_dead for refuel task
+    let transport_dead_for_refuel = Arc::clone(&transport_dead);
+
     // Spawn refueling task (client-side only, server_addr must be set)
     tokio::spawn(async move {
+        let mut consecutive_failures = 0u32;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
         loop {
             // Wait for refuel request
             if refuel_rx.recv().await.is_none() {
@@ -924,10 +985,12 @@ fn spawn_tcp_io_tasks(
             while refuel_rx.try_recv().is_ok() {}
 
             // Check if we need to refuel
-            let current = current_count_for_refuel.load(std::sync::atomic::Ordering::Relaxed);
+            let current_before =
+                current_count_for_refuel.load(std::sync::atomic::Ordering::Relaxed);
             let desired = *desired_count_for_refuel.lock().await;
 
-            if current >= desired {
+            if current_before >= desired {
+                consecutive_failures = 0; // Reset on success
                 continue;
             }
 
@@ -949,13 +1012,16 @@ fn spawn_tcp_io_tasks(
                 }
             };
 
-            let needed = desired - current;
+            let needed = desired - current_before;
             tracing::debug!(
                 "refueling TCP connections: current={}, desired={}, adding={}",
-                current,
+                current_before,
                 desired,
                 needed
             );
+
+            let mut added_count = 0;
+            let mut rejected_count = 0;
 
             for i in 0..needed {
                 match TcpStream::connect(addr).await {
@@ -979,24 +1045,93 @@ fn spawn_tcp_io_tasks(
                             continue;
                         }
 
-                        let stream = conn.into_inner();
-                        if add_connection_tx_for_refuel
-                            .send(TcpConnectionWithData {
-                                stream,
-                                initial_data: None,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("failed to add refuel connection: channel closed");
-                            break;
-                        }
+                        // Wait for ACK from server
+                        let ack =
+                            tokio::time::timeout(std::time::Duration::from_secs(5), conn.recv())
+                                .await;
 
-                        tracing::debug!("added refuel connection {}", i + 1);
+                        match ack {
+                            Ok(Ok(Some(data))) if !data.is_empty() && data[0] == ROUTING_ACK => {
+                                // ACK received, connection accepted
+                                let stream = conn.into_inner();
+                                if add_connection_tx_for_refuel
+                                    .send(TcpConnectionWithData {
+                                        stream,
+                                        initial_data: None,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "failed to add refuel connection: channel closed"
+                                    );
+                                    break;
+                                }
+                                added_count += 1;
+                                tracing::debug!("added refuel connection {}", i + 1);
+                            }
+                            Ok(Ok(Some(_))) => {
+                                tracing::debug!("refuel {}: unexpected response instead of ACK", i);
+                                rejected_count += 1;
+                            }
+                            Ok(Ok(None)) => {
+                                // Connection closed - server rejected (stale connection ID)
+                                tracing::debug!(
+                                    "refuel {}: connection closed (stale connection ID?)",
+                                    i
+                                );
+                                rejected_count += 1;
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!("refuel {}: error receiving ACK: {}", i, e);
+                                rejected_count += 1;
+                            }
+                            Err(_) => {
+                                tracing::debug!("refuel {}: timeout waiting for ACK", i);
+                                rejected_count += 1;
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("failed to establish refuel connection {}: {}", i, e);
                     }
+                }
+            }
+
+            // Check if refueling was successful
+            let current_after = current_count_for_refuel.load(std::sync::atomic::Ordering::Relaxed);
+
+            if added_count > 0 {
+                consecutive_failures = 0; // Reset on success
+                tracing::debug!("refuel succeeded: added {} connections", added_count);
+            } else if rejected_count > 0 {
+                // All connections were rejected - likely stale connection ID
+                consecutive_failures += 1;
+
+                // If we have NO working connections and refuel failed, mark dead immediately
+                if current_after == 0 {
+                    tracing::error!(
+                        "all TCP connections dead and refuel rejected ({} connections), marking transport as dead",
+                        rejected_count
+                    );
+                    transport_dead_for_refuel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+
+                tracing::warn!(
+                    "refuel failed: {} connections rejected ({}/{}), {} connections still alive",
+                    rejected_count,
+                    consecutive_failures,
+                    MAX_CONSECUTIVE_FAILURES,
+                    current_after
+                );
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    tracing::error!(
+                        "too many consecutive refuel failures, marking transport as dead"
+                    );
+                    transport_dead_for_refuel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
                 }
             }
         }
@@ -1008,6 +1143,7 @@ fn spawn_tcp_io_tasks(
         server_addr,
         desired_count,
         refuel_tx,
+        transport_dead,
     }
 }
 

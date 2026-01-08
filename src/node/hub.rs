@@ -109,7 +109,7 @@ impl Hub {
         stream: TcpStream,
         client_addr: SocketAddr,
     ) -> Result<(), HubError> {
-        use futures::StreamExt;
+        use futures::{SinkExt, StreamExt};
         use tokio_util::codec::Decoder;
 
         // Read the first frame
@@ -149,12 +149,21 @@ impl Hub {
                     "routing additional TCP connection from {} to existing tunnel",
                     client_addr
                 );
+                // Send ACK before adding connection
+                framed
+                    .send(bytes::Bytes::from_static(&[crate::tunnel::ROUTING_ACK]))
+                    .await
+                    .map_err(|e| {
+                        HubError::Tunnel(TunnelError::Io(std::io::Error::other(e.to_string())))
+                    })?;
                 let tcp_stream = framed.into_inner();
                 tunnel.add_tcp_connection(tcp_stream).await?;
                 return Ok(());
             } else {
-                tracing::warn!(
-                    "received routing header for unknown connection ID from {}",
+                // This can happen when clients reconnect after HUB restart -
+                // they may try to use old connection IDs. Log at debug level.
+                tracing::debug!(
+                    "received routing header for unknown connection ID from {} (stale connection?)",
                     client_addr
                 );
                 return Err(HubError::Tunnel(TunnelError::ConnectionFailed));

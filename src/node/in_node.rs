@@ -225,6 +225,15 @@ impl InNode {
             .map(|conn| HubConnector::new(Arc::clone(conn.tunnel())))
     }
 
+    /// Check if the HUB connection is still alive.
+    pub async fn is_hub_connected(&self) -> bool {
+        if let Some(conn) = &self.hub_conn {
+            !conn.tunnel().is_closed().await
+        } else {
+            false
+        }
+    }
+
     /// Create a proxied TCP connection to target.
     ///
     /// Resolves routing and handles:
@@ -251,6 +260,11 @@ impl InNode {
                     return Ok(ProxyStream::from_quic(stream));
                 }
             }
+        }
+
+        // Check if HUB connection is still alive before using it
+        if !self.is_hub_connected().await {
+            return Err(InNodeError::NotConnected);
         }
 
         // Fall back to HUB relay
