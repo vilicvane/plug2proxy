@@ -42,6 +42,50 @@ impl ProxyStream {
             ProxyStream::Tcp(_) => 0,
         }
     }
+
+    /// Send data on this stream.
+    pub async fn send(&mut self, data: &[u8]) -> Result<usize, TunnelError> {
+        match self {
+            ProxyStream::Quic(stream) => stream.send(data).await,
+            ProxyStream::Tcp(tcp) => {
+                tcp.write_all(data).await.map_err(TunnelError::Io)?;
+                Ok(data.len())
+            }
+        }
+    }
+
+    /// Receive data from this stream (non-blocking for QUIC, blocking for TCP).
+    pub async fn recv(&mut self, buf: &mut [u8]) -> Result<(usize, bool), TunnelError> {
+        match self {
+            ProxyStream::Quic(stream) => stream.recv(buf).await,
+            ProxyStream::Tcp(tcp) => {
+                let n = tcp.read(buf).await.map_err(TunnelError::Io)?;
+                Ok((n, n == 0))
+            }
+        }
+    }
+
+    /// Wait for data to be available, then receive.
+    pub async fn recv_wait(&mut self, buf: &mut [u8]) -> Result<(usize, bool), TunnelError> {
+        match self {
+            ProxyStream::Quic(stream) => stream.recv_wait(buf).await,
+            ProxyStream::Tcp(tcp) => {
+                let n = tcp.read(buf).await.map_err(TunnelError::Io)?;
+                Ok((n, n == 0))
+            }
+        }
+    }
+
+    /// Close the stream.
+    pub async fn close(&self) -> Result<(), TunnelError> {
+        match self {
+            ProxyStream::Quic(stream) => stream.close().await,
+            ProxyStream::Tcp(_) => {
+                // TCP stream will be closed when dropped
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Relay between QUIC stream and client.

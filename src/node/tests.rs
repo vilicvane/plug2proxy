@@ -133,7 +133,7 @@ async fn test_full_proxy_flow() {
     tracing::info!("IN connected to HUB");
 
     // Create proxied connection to echo server through HUB
-    let stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
+    let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
     tracing::info!("proxied connection established");
 
     // Wait for relay to be set up on HUB side
@@ -276,7 +276,7 @@ async fn test_multi_out_with_routing() {
 
     // Test 1: Connect to echo1 (no matching rule, should go through HUB)
     tracing::info!("\n=== Test 1: No matching rule (HUB handles) ===");
-    let stream1 = in_node.connect(&echo1_addr.to_string()).await.unwrap();
+    let mut stream1 = in_node.connect(&echo1_addr.to_string()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let test_msg1 = b"test-hub";

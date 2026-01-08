@@ -241,7 +241,7 @@ mod relay_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
+            let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send request
@@ -277,7 +277,7 @@ mod relay_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
+            let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send request
@@ -312,7 +312,7 @@ mod relay_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
+            let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send multiple requests on same stream (like HTTP keep-alive)
@@ -354,7 +354,7 @@ mod relay_tests {
             // Open 150 streams sequentially via OUT - more than the 100 stream limit
             // This will fail if streams aren't being released properly
             for i in 0..150 {
-                let stream = match tokio::time::timeout(
+                let mut stream = match tokio::time::timeout(
                     Duration::from_secs(5),
                     in_node.connect(&echo_addr.to_string()),
                 )
@@ -401,7 +401,7 @@ mod relay_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
+            let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send multiple requests on same stream (like HTTP keep-alive)
@@ -453,7 +453,7 @@ mod relay_tests {
                 let echo_addr = echo_addr.to_string();
 
                 let handle = tokio::spawn(async move {
-                    let stream = in_node.connect(&echo_addr).await.unwrap();
+                    let mut stream = in_node.connect(&echo_addr).await.unwrap();
                     tokio::time::sleep(Duration::from_millis(50)).await;
 
                     let test_data = format!("Stream {} data", i);
@@ -510,7 +510,7 @@ mod relay_tests {
             // Open 150 streams sequentially - more than the 100 stream limit
             // This will fail if streams aren't being released properly
             for i in 0..150 {
-                let stream = match tokio::time::timeout(
+                let mut stream = match tokio::time::timeout(
                     Duration::from_secs(5),
                     in_node.connect(&echo_addr.to_string()),
                 )
@@ -560,7 +560,7 @@ mod relay_tests {
 
             // Rapidly open and close streams
             for i in 0..20 {
-                let stream = match tokio::time::timeout(
+                let mut stream = match tokio::time::timeout(
                     Duration::from_secs(5),
                     in_node.connect(&echo_addr.to_string()),
                 )
@@ -606,7 +606,7 @@ mod relay_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
+            let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send 100KB
@@ -643,7 +643,9 @@ mod relay_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let stream = Arc::new(in_node.connect(&echo_addr.to_string()).await.unwrap());
+            let stream = Arc::new(tokio::sync::Mutex::new(
+                in_node.connect(&echo_addr.to_string()).await.unwrap(),
+            ));
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let stream_send = Arc::clone(&stream);
@@ -653,7 +655,13 @@ mod relay_tests {
             let sender = tokio::spawn(async move {
                 for i in 0..10 {
                     let data = format!("Chunk{}", i);
-                    if stream_send.send(data.as_bytes()).await.is_err() {
+                    if stream_send
+                        .lock()
+                        .await
+                        .send(data.as_bytes())
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -672,7 +680,7 @@ mod relay_tests {
                 while total < expected_len && tokio::time::Instant::now() < deadline {
                     match tokio::time::timeout(
                         Duration::from_secs(1),
-                        stream_recv.recv_wait(&mut buf[total..]),
+                        stream_recv.lock().await.recv_wait(&mut buf[total..]),
                     )
                     .await
                     {

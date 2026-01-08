@@ -161,7 +161,7 @@ impl TestNetwork {
     }
 
     /// Connect to a target through the IN node.
-    async fn connect(&self, target: &str) -> Result<plug2proxy::tunnel::Stream, String> {
+    async fn connect(&self, target: &str) -> Result<plug2proxy::tunnel::ProxyStream, String> {
         self.in_node
             .connect(target)
             .await
@@ -396,7 +396,7 @@ async fn test_e2e_connection_through_out() {
 
     // Test 1: Connect through HUB direct (fallback)
     tracing::info!("\n=== Test: HUB Direct Connection ===");
-    let stream = network.connect(&echo_hub_addr.to_string()).await.unwrap();
+    let mut stream = network.connect(&echo_hub_addr.to_string()).await.unwrap();
     stream.send(b"hello-hub").await.unwrap();
 
     let mut buf = vec![0u8; 1024];
@@ -567,7 +567,7 @@ impl SecondLevelTestNetwork {
     }
 
     /// Connect to a target through the IN node.
-    async fn connect(&self, target: &str) -> Result<plug2proxy::tunnel::Stream, String> {
+    async fn connect(&self, target: &str) -> Result<plug2proxy::tunnel::ProxyStream, String> {
         self.in_node
             .connect(target)
             .await
@@ -627,7 +627,7 @@ async fn test_second_level_routing_tags_passed_to_out() {
     // Since we can't actually resolve google.com in tests, we'll use IP address
     // which falls back to no-tag (direct output)
     tracing::info!("\n=== Test: Connection through OUT with second-level routing ===");
-    let stream = network.connect(&echo_addr.to_string()).await.unwrap();
+    let mut stream = network.connect(&echo_addr.to_string()).await.unwrap();
     stream.send(b"test-second-level").await.unwrap();
 
     let mut buf = vec![0u8; 1024];
@@ -700,7 +700,7 @@ async fn test_hub_fixed_tag() {
     tracing::info!("✓ Route resolves to 'hub' label");
 
     // Test actual connection through HUB
-    let stream = network.connect(&echo_addr.to_string()).await.unwrap();
+    let mut stream = network.connect(&echo_addr.to_string()).await.unwrap();
     stream.send(b"test-hub-tag").await.unwrap();
 
     let mut buf = vec![0u8; 1024];
@@ -793,7 +793,7 @@ async fn test_second_level_routing_multiple_outputs() {
     tracing::info!("✓ unknown.local gets no tag (uses direct output)");
 
     // Verify actual connections work
-    let stream = network.connect(&echo1_addr.to_string()).await.unwrap();
+    let mut stream = network.connect(&echo1_addr.to_string()).await.unwrap();
     stream.send(b"test").await.unwrap();
 
     let mut buf = vec![0u8; 1024];
