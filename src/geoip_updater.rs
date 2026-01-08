@@ -7,6 +7,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::node::InNode;
+use crate::util::set_socket_mark;
 
 /// Default GeoLite2 database URL (GitHub mirror).
 pub const DEFAULT_GEOIP_URL: &str =
@@ -140,6 +141,18 @@ impl GeoIpUpdater {
                 let tcp = tokio::net::TcpStream::connect(&target)
                     .await
                     .map_err(|e| GeoIpUpdateError::Io(e.to_string()))?;
+
+                // Apply traffic mark if configured
+                if let Some(ref in_node) = in_node {
+                    if let Some(mark) = in_node.mark() {
+                        if let Err(e) = set_socket_mark(&tcp, mark) {
+                            tracing::warn!(
+                                "failed to set SO_MARK on GeoIP updater connection: {}",
+                                e
+                            );
+                        }
+                    }
+                }
 
                 let tls_stream = wrap_tls(tcp, host).await?;
                 https_get(tls_stream, &url, host).await

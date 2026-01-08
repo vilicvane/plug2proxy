@@ -218,7 +218,9 @@ mod tunnel_tests {
 
     async fn setup_client(addr: SocketAddr) -> Tunnel {
         // Request 2 connections - client will establish 1 first, then extend after handshake
-        Tunnel::connect(addr, Some("localhost"), 2).await.unwrap()
+        Tunnel::connect(addr, Some("localhost"), 2, None)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -241,7 +243,7 @@ mod tunnel_tests {
                 .unwrap()
                 .into_inner();
 
-            let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config)
+            let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config, None)
                 .await
                 .unwrap();
 
@@ -278,7 +280,7 @@ mod tunnel_tests {
                 .unwrap()
                 .into_inner();
 
-            let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config)
+            let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config, None)
                 .await
                 .unwrap();
 
@@ -353,7 +355,7 @@ mod tunnel_tests {
                 .unwrap()
                 .into_inner();
 
-            let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config)
+            let tunnel = Tunnel::from_tcp_streams_server(tcp_streams, &mut config, None)
                 .await
                 .unwrap();
 
@@ -492,7 +494,7 @@ mod tcp_refuel_tests {
                 .unwrap()
                 .into_inner();
 
-            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config)
+            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config, None)
                 .await
                 .unwrap();
 
@@ -504,7 +506,9 @@ mod tcp_refuel_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Client connects with 1 connection (no additional)
-        let tunnel = Tunnel::connect(addr, Some("localhost"), 1).await.unwrap();
+        let tunnel = Tunnel::connect(addr, Some("localhost"), 1, None)
+            .await
+            .unwrap();
 
         // After handshake, connection ID should be set
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -580,7 +584,7 @@ mod tcp_refuel_tests {
                 .unwrap()
                 .into_inner();
 
-            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config)
+            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config, None)
                 .await
                 .unwrap();
 
@@ -591,7 +595,9 @@ mod tcp_refuel_tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = Tunnel::connect(addr, Some("localhost"), 1).await.unwrap();
+        let client = Tunnel::connect(addr, Some("localhost"), 1, None)
+            .await
+            .unwrap();
         assert!(client.is_established().await);
 
         let server = server_task.await.unwrap();
@@ -615,7 +621,7 @@ mod tcp_refuel_tests {
                 .unwrap()
                 .into_inner();
 
-            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config)
+            let tunnel = Tunnel::from_tcp_streams_server(vec![stream], &mut config, None)
                 .await
                 .unwrap();
 
@@ -626,7 +632,9 @@ mod tcp_refuel_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Connect with desired_count = 2
-        let tunnel = Tunnel::connect(addr, Some("localhost"), 2).await.unwrap();
+        let tunnel = Tunnel::connect(addr, Some("localhost"), 2, None)
+            .await
+            .unwrap();
 
         // Wait for handshake
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -83,6 +83,7 @@ impl OutNode {
                 connection_count,
                 self.client_config.pem_path.as_deref(),
                 self.client_config.ca_pem_path.as_deref(),
+                None, // OUT doesn't mark traffic
             )
             .await?,
         );
@@ -250,6 +251,7 @@ impl OutNode {
             tcp_stream,
             first_frame,
             &mut quic_config,
+            None, // OUT doesn't mark traffic
         )
         .await?;
         let tunnel = Arc::new(tunnel);

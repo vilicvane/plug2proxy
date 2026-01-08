@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use crate::route::{BuiltInLabel, GeoLite2, Label, MatchContext, Router, RuleConfig};
 use crate::tunnel::{ProxyStream, Stream, Tunnel, TunnelError};
 use crate::udp_proxy::{Datagram, NatMappingTable};
+use crate::util::set_socket_mark;
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
@@ -141,6 +142,7 @@ impl InNode {
                 connection_count,
                 self.client_config.pem_path.as_deref(),
                 self.client_config.ca_pem_path.as_deref(),
+                self.mark,
             )
             .await?,
         );
@@ -306,6 +308,11 @@ impl InNode {
         } else {
             Ok(false)
         }
+    }
+
+    /// Get the traffic mark configured for this IN node.
+    pub fn mark(&self) -> Option<u32> {
+        self.mark
     }
 
     /// Get HubConnector for creating proxied connections through HUB.
@@ -523,6 +530,7 @@ impl InNode {
             1, // Single TCP connection for direct
             self.client_config.pem_path.as_deref(),
             self.client_config.ca_pem_path.as_deref(),
+            self.mark,
         )
         .await?;
 
@@ -593,36 +601,6 @@ impl InNode {
             reverse_index,
         }))
     }
-}
-
-/// Set SO_MARK on a socket (Linux-specific, for TPROXY).
-#[cfg(target_os = "linux")]
-fn set_socket_mark<T>(socket: &T, mark: u32) -> Result<(), std::io::Error>
-where
-    T: std::os::unix::io::AsRawFd,
-{
-    unsafe {
-        let ret = libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_MARK,
-            &mark as *const u32 as *const libc::c_void,
-            std::mem::size_of::<u32>() as libc::socklen_t,
-        );
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_socket_mark<T>(_socket: &T, _mark: u32) -> Result<(), std::io::Error>
-where
-    T: std::os::unix::io::AsRawFd,
-{
-    // SO_MARK is Linux-specific, no-op on other platforms
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

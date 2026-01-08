@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 use super::{FramedConnection, QuicConfig, QuicConnection, QuicError};
+use crate::util::set_socket_mark;
 
 /// Magic byte for routing header (distinguishes from QUIC packets which start with 0x80-0xFF or 0x00-0x3F).
 /// We use 0x50 ('P' for plug2proxy) which is in the reserved range.
@@ -168,8 +169,9 @@ impl Tunnel {
         addr: SocketAddr,
         server_name: Option<&str>,
         connection_count: usize,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
-        Self::connect_with_cert(addr, server_name, connection_count, None, None).await
+        Self::connect_with_cert(addr, server_name, connection_count, None, None, mark).await
     }
 
     /// Create a client tunnel with optional client certificate authentication.
@@ -180,15 +182,24 @@ impl Tunnel {
     /// * `connection_count` - Number of TCP connections to use
     /// * `pem_path` - Optional path to client PEM file (cert + key)
     /// * `ca_pem_path` - Optional path to CA PEM file (for server verification)
+    /// * `mark` - Optional traffic mark (SO_MARK) for TCP connections
     pub async fn connect_with_cert(
         addr: SocketAddr,
         server_name: Option<&str>,
         connection_count: usize,
         pem_path: Option<&str>,
         ca_pem_path: Option<&str>,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
         let config = QuicConfig::new_client(pem_path, ca_pem_path)?;
-        Self::connect_with_config(addr, server_name, connection_count, config.into_inner()).await
+        Self::connect_with_config(
+            addr,
+            server_name,
+            connection_count,
+            config.into_inner(),
+            mark,
+        )
+        .await
     }
 
     /// Create a client tunnel with custom QUIC config.
@@ -201,16 +212,24 @@ impl Tunnel {
         server_name: Option<&str>,
         connection_count: usize,
         mut config: quiche::Config,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
         // Establish the first TCP connection
         let first_stream = TcpStream::connect(addr).await?;
+
+        // Apply traffic mark if configured
+        if let Some(mark) = mark {
+            set_socket_mark(&first_stream, mark)?;
+        }
+
         first_stream.set_nodelay(true)?;
 
         tracing::info!("established initial TCP connection to {}", addr);
 
         // Create tunnel with single connection first
         let tunnel =
-            Self::from_tcp_streams_client(vec![first_stream], server_name, &mut config).await?;
+            Self::from_tcp_streams_client(vec![first_stream], server_name, &mut config, mark)
+                .await?;
 
         // Set server address and desired count for refueling
         tunnel.tcp_handle.set_server_addr(addr).await;
@@ -221,10 +240,22 @@ impl Tunnel {
             let tcp_handle = tunnel.tcp_handle.clone();
             let additional_count = connection_count - 1;
 
+            let mark_clone = mark;
             tokio::spawn(async move {
                 for i in 0..additional_count {
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
+                            // Apply traffic mark if configured
+                            if let Some(mark) = mark_clone {
+                                if let Err(e) = set_socket_mark(&stream, mark) {
+                                    tracing::warn!(
+                                        "failed to set SO_MARK on connection {}: {}",
+                                        i + 2,
+                                        e
+                                    );
+                                }
+                            }
+
                             if let Err(e) = stream.set_nodelay(true) {
                                 tracing::warn!(
                                     "failed to set nodelay on connection {}: {}",
@@ -262,12 +293,13 @@ impl Tunnel {
         tcp_streams: Vec<TcpStream>,
         server_name: Option<&str>,
         config: &mut quiche::Config,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
         let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
 
         // Split TCP streams and spawn IO tasks
-        let tcp_handle = spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
+        let tcp_handle = spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx, mark);
 
         // Create QUIC connection
         let quic = QuicConnection::connect(server_name, config, outgoing_tx.clone(), incoming_rx)?;
@@ -321,12 +353,13 @@ impl Tunnel {
     pub async fn from_tcp_streams_server(
         tcp_streams: Vec<TcpStream>,
         config: &mut quiche::Config,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
         let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
 
         // Split TCP streams and spawn IO tasks
-        let tcp_handle = spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx);
+        let tcp_handle = spawn_tcp_io_tasks(tcp_streams, outgoing_rx, incoming_tx, mark);
 
         // Wait for the first packet to get the client's connection ID
         let mut rx = incoming_rx;
@@ -406,12 +439,14 @@ impl Tunnel {
         tcp_stream: TcpStream,
         initial_data: Bytes,
         config: &mut quiche::Config,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
         let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
 
         // Split TCP stream and spawn IO tasks
-        let tcp_handle = spawn_tcp_io_tasks(vec![tcp_stream], outgoing_rx, incoming_tx.clone());
+        let tcp_handle =
+            spawn_tcp_io_tasks(vec![tcp_stream], outgoing_rx, incoming_tx.clone(), mark);
 
         // The first packet was already read, parse it for connection ID
         let mut first_packet_buf = initial_data.to_vec();
@@ -477,12 +512,14 @@ impl Tunnel {
         tcp_stream: TcpStream,
         initial_data: Bytes,
         config: &mut quiche::Config,
+        mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
         let (outgoing_tx, outgoing_rx) = mpsc::channel(256);
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
 
         // Split TCP stream and spawn IO tasks
-        let tcp_handle = spawn_tcp_io_tasks(vec![tcp_stream], outgoing_rx, incoming_tx.clone());
+        let tcp_handle =
+            spawn_tcp_io_tasks(vec![tcp_stream], outgoing_rx, incoming_tx.clone(), mark);
 
         // The first packet was already read, parse it for connection ID
         let mut first_packet_buf = initial_data.to_vec();
@@ -846,6 +883,7 @@ fn spawn_tcp_io_tasks(
     tcp_streams: Vec<TcpStream>,
     mut outgoing_rx: mpsc::Receiver<Bytes>,
     incoming_tx: mpsc::Sender<Bytes>,
+    mark: Option<u32>,
 ) -> TcpConnectionHandle {
     let initial_count = tcp_streams.len();
     let mut senders = Vec::new();
@@ -883,6 +921,7 @@ fn spawn_tcp_io_tasks(
     let desired_count_for_refuel = Arc::clone(&desired_count);
     let add_connection_tx_for_refuel = add_connection_tx.clone();
     let refuel_tx_for_send = refuel_tx.clone();
+    let mark_for_refuel = mark;
 
     // Spawn task to distribute outgoing datagrams across TCP connections
     // This task also handles adding new connections dynamically
@@ -1026,6 +1065,17 @@ fn spawn_tcp_io_tasks(
             for i in 0..needed {
                 match TcpStream::connect(addr).await {
                     Ok(stream) => {
+                        // Apply traffic mark if configured
+                        if let Some(mark) = mark_for_refuel {
+                            if let Err(e) = set_socket_mark(&stream, mark) {
+                                tracing::warn!(
+                                    "failed to set SO_MARK on refuel connection {}: {}",
+                                    i,
+                                    e
+                                );
+                            }
+                        }
+
                         if let Err(e) = stream.set_nodelay(true) {
                             tracing::warn!(
                                 "failed to set nodelay on refuel connection {}: {}",

@@ -203,6 +203,7 @@ impl Hub {
                 stream,
                 first_frame,
                 &mut config,
+                None, // HUB doesn't mark traffic
             )
             .await?,
         );
