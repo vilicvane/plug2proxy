@@ -29,6 +29,10 @@ serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 x509-parser = "0.16"
 maxminddb = "0.24"
+rusqlite = { version = "0.32", features = ["bundled"] }
+hickory-client = "0.25"
+hickory-resolver = { version = "0.25", features = ["system-config"] }
+hickory-server = { version = "0.25", features = ["resolver"] }
 
 [lints.clippy]
 collapsible_else_if = "allow"

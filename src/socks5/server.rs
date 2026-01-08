@@ -9,6 +9,7 @@ use socks5_server::{
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use crate::fake_ip::FakeIpResolver;
 use crate::node::InNode;
 use crate::tunnel::Stream;
 use crate::udp_proxy::Datagram;
@@ -17,11 +18,22 @@ use crate::udp_proxy::Datagram;
 pub struct Socks5Server {
     in_node: Arc<InNode>,
     bind_addr: SocketAddr,
+    fake_ip_resolver: Option<Arc<FakeIpResolver>>,
 }
 
 impl Socks5Server {
     pub fn new(in_node: Arc<InNode>, bind_addr: SocketAddr) -> Self {
-        Self { in_node, bind_addr }
+        Self {
+            in_node,
+            bind_addr,
+            fake_ip_resolver: None,
+        }
+    }
+
+    /// Set the fake IP resolver for translating fake IPs to hostnames.
+    pub fn with_fake_ip_resolver(mut self, resolver: Arc<FakeIpResolver>) -> Self {
+        self.fake_ip_resolver = Some(resolver);
+        self
     }
 
     /// Run the SOCKS5 server.
@@ -57,9 +69,10 @@ impl Socks5Server {
 
                             let in_node = Arc::clone(&self.in_node);
                             let bind_addr = self.bind_addr;
+                            let fake_ip_resolver = self.fake_ip_resolver.clone();
 
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(conn, in_node, bind_addr).await {
+                                if let Err(e) = handle_connection(conn, in_node, bind_addr, fake_ip_resolver).await {
                                     tracing::error!("SOCKS5 client {} error: {}", addr, e);
                                 }
                             });
@@ -83,6 +96,7 @@ async fn handle_connection<A>(
     conn: IncomingConnection<A, socks5_server::connection::state::NeedAuthenticate>,
     in_node: Arc<InNode>,
     bind_addr: SocketAddr,
+    fake_ip_resolver: Option<Arc<FakeIpResolver>>,
 ) -> Result<(), Socks5Error> {
     // Perform authentication
     let (conn, _auth_result) = conn.authenticate().await.map_err(|(e, _)| e)?;
@@ -90,7 +104,7 @@ async fn handle_connection<A>(
     // Wait for command from client
     match conn.wait().await.map_err(|(e, _)| e)? {
         Command::Connect(connect, addr) => {
-            let target = address_to_string(&addr);
+            let target = resolve_target(&addr, fake_ip_resolver.as_deref());
             tracing::info!("SOCKS5 CONNECT to {}", target);
             handle_connect(connect, &target, in_node).await
         }
@@ -396,10 +410,35 @@ async fn read_exact_from_stream(stream: &Stream, buf: &mut [u8]) -> Result<(), (
     Ok(())
 }
 
-/// Convert socks5_server Address to string target.
-fn address_to_string(addr: &Address) -> String {
+/// Resolve target address, translating fake IPs to hostnames if resolver is available.
+fn resolve_target(addr: &Address, fake_ip_resolver: Option<&FakeIpResolver>) -> String {
     match addr {
-        Address::SocketAddress(addr) => addr.to_string(),
+        Address::SocketAddress(socket_addr) => {
+            // Try to resolve fake IP to hostname
+            if let Some(resolver) = fake_ip_resolver {
+                if let Some((real_ip, hostname)) = resolver.resolve(&socket_addr.ip()) {
+                    if let Some(hostname) = hostname {
+                        // Use hostname for the connection (important for SNI in TLS)
+                        tracing::debug!(
+                            "resolved fake IP {} to hostname {} (real IP: {})",
+                            socket_addr.ip(),
+                            hostname,
+                            real_ip
+                        );
+                        return format!("{}:{}", hostname, socket_addr.port());
+                    }
+                    // No hostname stored, use real IP
+                    tracing::debug!(
+                        "fake IP {} resolved to real IP {} (no hostname)",
+                        socket_addr.ip(),
+                        real_ip
+                    );
+                    return format!("{}:{}", real_ip, socket_addr.port());
+                }
+            }
+            // Not a fake IP or no resolver, use as-is
+            socket_addr.to_string()
+        }
         Address::DomainAddress(domain, port) => {
             let domain_str = String::from_utf8_lossy(domain);
             format!("{}:{}", domain_str, port)

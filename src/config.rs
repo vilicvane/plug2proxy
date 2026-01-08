@@ -93,6 +93,10 @@ pub struct InConfig {
     pub direct: OneOrMany<String>,
     /// Path to GeoLite2 database file for GeoIP-based routing rules.
     pub geoip_db: Option<PathBuf>,
+    /// Fake-IP DNS listen address.
+    /// If set, a fake-IP DNS server will be started on this address.
+    /// Uses `fakeip.db` as the database file (convention).
+    pub fake_ip: Option<SocketAddr>,
     pub socks5: Option<Socks5Config>,
 }
 
@@ -173,6 +177,7 @@ impl Default for InConfig {
             connections: Some(4),
             direct: OneOrMany::default(),
             geoip_db: None,
+            fake_ip: None,
             socks5: Some(Socks5Config::default()),
         }
     }

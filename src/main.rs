@@ -239,6 +239,37 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
         None
     };
 
+    // Fake-IP database path (convention)
+    const FAKE_IP_DB_PATH: &str = "fakeip.db";
+
+    // Start fake-ip DNS server and create resolver if configured
+    let fake_ip_resolver = if let Some(listen_addr) = config.fake_ip {
+        tracing::info!("Starting fake-ip DNS server on: {}", listen_addr);
+
+        // Create resolver for upstream DNS queries
+        let dns_resolver = Arc::new(hickory_resolver::TokioResolver::builder_tokio()?.build());
+        let db_path = std::path::PathBuf::from(FAKE_IP_DB_PATH);
+
+        tokio::spawn(async move {
+            let options = plug2proxy::fake_ip::FakeIpDnsOptions {
+                listen_address: listen_addr,
+                db_path: &db_path,
+            };
+            if let Err(e) = plug2proxy::fake_ip::run_fake_ip_dns(dns_resolver, options).await {
+                tracing::error!("Fake-IP DNS server error: {}", e);
+            }
+        });
+
+        // Create fake IP resolver for SOCKS5 to translate fake IPs to hostnames
+        Some(Arc::new(plug2proxy::fake_ip::FakeIpResolver::new(
+            FAKE_IP_DB_PATH,
+            plug2proxy::fake_ip::FAKE_IPV4_NET,
+            plug2proxy::fake_ip::FAKE_IPV6_NET,
+        )))
+    } else {
+        None
+    };
+
     // Use node.pem from cwd for connection (contains cert + key + CA cert)
     let node_pem_path = Path::new(NODE_PEM_PATH);
     let client_config = if node_pem_path.exists() {
@@ -272,7 +303,10 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
                 if let Some(ref socks5_config) = config.socks5 {
                     tracing::info!("Starting SOCKS5 server on: {}", socks5_config.listen);
 
-                    let socks5 = Socks5Server::new(Arc::clone(&in_node), socks5_config.listen);
+                    let mut socks5 = Socks5Server::new(Arc::clone(&in_node), socks5_config.listen);
+                    if let Some(ref resolver) = fake_ip_resolver {
+                        socks5 = socks5.with_fake_ip_resolver(Arc::clone(resolver));
+                    }
 
                     // Spawn message loop to receive updates from HUB
                     let in_node_clone = Arc::clone(&in_node);
