@@ -21,6 +21,12 @@ impl<T> OneOrMany<T> {
     }
 }
 
+impl<T> Default for OneOrMany<T> {
+    fn default() -> Self {
+        OneOrMany::Many(vec![])
+    }
+}
+
 /// Route rule configuration (for IN node).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]

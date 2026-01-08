@@ -10,6 +10,8 @@ pub enum NodeRole {
     Out,
 }
 
+// Note: RuleConfig import is kept for HubMessage::RouteConfig
+
 /// A routing decision with label and optional tag.
 /// - Label: determines which node to route to (first-level routing)
 /// - Tag: passed to OUT for second-level routing decisions
@@ -42,12 +44,6 @@ pub enum NodeMessage {
         role: NodeRole,
         /// Tags this node provides (for OUT) or empty (for IN).
         tags: Vec<String>,
-        /// Routing rules this OUT provides (empty for IN).
-        #[serde(default)]
-        routing_rules: Vec<RuleConfig>,
-        /// Priority for routing rules (for OUT).
-        #[serde(default)]
-        routing_priority: i64,
     },
 }
 

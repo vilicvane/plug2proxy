@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, mpsc};
 
-use crate::route::{BuiltInLabel, Label, Router, RuleConfig};
+use crate::route::{BuiltInLabel, Label, RuleConfig};
 use crate::tunnel::{FrameCodec, QuicConfig, QuicError, Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, NodeConnection};
@@ -47,8 +47,6 @@ pub struct Hub {
     outs: Arc<RwLock<HashMap<String, OutConnection>>>,
     /// Base routing rules (from config).
     route_rules: Arc<RwLock<Vec<RuleConfig>>>,
-    /// Router for matching targets.
-    router: Arc<Router>,
     /// Registry of active tunnels by QUIC connection ID (for routing additional TCP connections).
     tunnel_registry: Arc<RwLock<HashMap<Vec<u8>, Arc<Tunnel>>>>,
 }
@@ -76,7 +74,6 @@ impl Hub {
             ins: Arc::new(RwLock::new(HashMap::new())),
             outs: Arc::new(RwLock::new(HashMap::new())),
             route_rules: Arc::new(RwLock::new(Vec::new())),
-            router: Arc::new(Router::new(Vec::new())),
             tunnel_registry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -245,12 +242,7 @@ impl Hub {
         // Wait for registration
         let msg = conn.recv().await?;
         match msg {
-            NodeMessage::Register {
-                role,
-                tags,
-                routing_rules,
-                routing_priority,
-            } => {
+            NodeMessage::Register { role, tags } => {
                 // Generate a unique UUID for this node
                 let id = generate_node_id();
 
@@ -316,19 +308,6 @@ impl Hub {
                     NodeRole::Out => {
                         // Store OUT connection
                         let out_id = id.clone();
-                        let tunnel_id = tunnel
-                            .connection_id()
-                            .await
-                            .iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<String>();
-
-                        // Register OUT's routing rules with the router
-                        if !routing_rules.is_empty() {
-                            self.router
-                                .register_out(&out_id, &tunnel_id, routing_rules, routing_priority)
-                                .await;
-                        }
 
                         {
                             // Build tags: configured tags + CN (if present) as automatic tag

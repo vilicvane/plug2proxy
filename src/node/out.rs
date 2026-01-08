@@ -5,7 +5,6 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use crate::output::{OutputConfig, OutputMap};
-use crate::route::RuleConfig;
 use crate::tunnel::{Stream, Tunnel, TunnelError};
 use crate::udp_proxy::Datagram;
 
@@ -17,10 +16,6 @@ use super::out_like::{OutLike, OutLikeError};
 /// OUT node - exit point for proxied traffic.
 pub struct OutNode {
     tags: Vec<String>,
-    /// Routing rules this OUT provides.
-    routing_rules: Vec<RuleConfig>,
-    /// Priority for routing rules.
-    routing_priority: i64,
     /// Output map for second-level routing.
     output_map: Arc<OutputMap>,
     /// Client TLS configuration.
@@ -30,18 +25,10 @@ pub struct OutNode {
 }
 
 impl OutNode {
-    pub fn new(
-        tags: Vec<String>,
-        routing_rules: Vec<RuleConfig>,
-        routing_priority: i64,
-        outputs: Vec<OutputConfig>,
-        client_config: ClientConfig,
-    ) -> Self {
+    pub fn new(tags: Vec<String>, outputs: Vec<OutputConfig>, client_config: ClientConfig) -> Self {
         let output_map = Arc::new(OutputMap::from_configs(outputs));
         Self {
             tags,
-            routing_rules,
-            routing_priority,
             output_map,
             client_config,
             hub_conn: None,
@@ -76,8 +63,6 @@ impl OutNode {
         conn.send(&NodeMessage::Register {
             role: NodeRole::Out,
             tags: self.tags.clone(),
-            routing_rules: self.routing_rules.clone(),
-            routing_priority: self.routing_priority,
         })
         .await?;
 

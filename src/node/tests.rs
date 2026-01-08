@@ -61,13 +61,7 @@ async fn test_in_out_connect_to_hub() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect OUT first (so IN receives it in the initial update)
-    let mut out = OutNode::new(
-        vec!["direct".to_string()],
-        vec![],
-        0,
-        vec![],
-        test_client_config(),
-    );
+    let mut out = OutNode::new(vec!["direct".to_string()], vec![], test_client_config());
     out.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT connected");
 
@@ -251,23 +245,11 @@ async fn test_multi_out_with_routing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect OUT nodes with different tags
-    let mut out1 = OutNode::new(
-        vec!["out1".to_string()],
-        vec![],
-        0,
-        vec![],
-        test_client_config(),
-    );
+    let mut out1 = OutNode::new(vec!["out1".to_string()], vec![], test_client_config());
     out1.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT1 connected with tag 'out1'");
 
-    let mut out2 = OutNode::new(
-        vec!["out2".to_string()],
-        vec![],
-        0,
-        vec![],
-        test_client_config(),
-    );
+    let mut out2 = OutNode::new(vec!["out2".to_string()], vec![], test_client_config());
     out2.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT2 connected with tag 'out2'");
 

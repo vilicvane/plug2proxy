@@ -119,8 +119,6 @@ impl TestNetwork {
         // Start OUT1 with tag "us"
         let mut out1 = OutNode::new(
             vec!["us".to_string()],
-            vec![], // No additional routing rules from OUT
-            0,
             vec![], // No custom outputs
             test_client_config(),
         );
@@ -134,8 +132,6 @@ impl TestNetwork {
         // Start OUT2 with tag "cn"
         let mut out2 = OutNode::new(
             vec!["cn".to_string()],
-            vec![], // No additional routing rules from OUT
-            0,
             vec![], // No custom outputs
             test_client_config(),
         );
@@ -543,8 +539,6 @@ impl SecondLevelTestNetwork {
         // Start OUT with custom outputs for second-level routing
         let mut out = OutNode::new(
             vec!["exit".to_string()],
-            vec![], // No additional routing rules from OUT
-            0,
             outputs, // Custom outputs for second-level routing!
             test_client_config(),
         );
@@ -648,10 +642,7 @@ async fn test_second_level_routing_tags_passed_to_out() {
     }
     let response = String::from_utf8_lossy(&buf[..received]);
     tracing::info!("Echo response: {}", response);
-    assert!(
-        response.contains("[ECHO]"),
-        "Expected ECHO server response"
-    );
+    assert!(response.contains("[ECHO]"), "Expected ECHO server response");
     tracing::info!("✓ Second-level routing: connection works through OUT with output selection");
 
     echo_handle.abort();
@@ -660,15 +651,13 @@ async fn test_second_level_routing_tags_passed_to_out() {
 /// Test: Verify tag is preserved end-to-end
 #[tokio::test]
 async fn test_second_level_routing_tag_preserved_e2e() {
-    let rules = vec![
-        RuleConfig::Domain(DomainRuleConfig {
-            r#match: OneOrMany::One("special.com".to_string()),
-            negate: false,
-            out: OneOrMany::One(Label::Custom("exit".to_string())),
-            priority: Some(0),
-            tag: Some("special-output".to_string()),
-        }),
-    ];
+    let rules = vec![RuleConfig::Domain(DomainRuleConfig {
+        r#match: OneOrMany::One("special.com".to_string()),
+        negate: false,
+        out: OneOrMany::One(Label::Custom("exit".to_string())),
+        priority: Some(0),
+        tag: Some("special-output".to_string()),
+    })];
 
     // Create OUT with the matching output
     let outputs = vec![OutputConfig::Local(LocalOutputConfig {
@@ -741,7 +730,11 @@ async fn test_second_level_routing_multiple_outputs() {
     // Start echo servers for testing different outputs
     let (echo1_addr, echo1_handle) = start_echo_server("OUTPUT1").await;
     let (echo2_addr, echo2_handle) = start_echo_server("OUTPUT2").await;
-    tracing::info!("Echo servers: OUTPUT1={}, OUTPUT2={}", echo1_addr, echo2_addr);
+    tracing::info!(
+        "Echo servers: OUTPUT1={}, OUTPUT2={}",
+        echo1_addr,
+        echo2_addr
+    );
 
     let rules = vec![
         // Route with tag "output1"

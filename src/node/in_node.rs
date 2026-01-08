@@ -59,8 +59,6 @@ impl InNode {
         conn.send(&NodeMessage::Register {
             role: NodeRole::In,
             tags: vec![],
-            routing_rules: vec![],
-            routing_priority: 0,
         })
         .await?;
 

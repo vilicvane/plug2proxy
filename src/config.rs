@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::output::OutputConfig;
-use crate::route::RuleConfig;
+use crate::route::{OneOrMany, RuleConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -24,10 +24,12 @@ impl Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubConfig {
     /// Tags this HUB provides when acting as an OUT.
+    /// Can be a single tag or array of tags.
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub tag: OneOrMany<String>,
     pub listen: SocketAddr,
-    pub connection_count: Option<usize>,
+    /// Number of TCP connections underlying QUIC.
+    pub connections: Option<usize>,
     /// Routing rules (sent to IN nodes).
     #[serde(default)]
     pub routing: RoutingConfig,
@@ -36,21 +38,53 @@ pub struct HubConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutConfig {
     /// Tags this OUT node provides for routing.
-    pub tags: Vec<String>,
-    pub hub_addr: SocketAddr,
-    pub hub_host: Option<String>,
-    pub connection_count: Option<usize>,
-    /// Routing rules this OUT provides.
+    /// Can be a single tag or array of tags.
     #[serde(default)]
-    pub routing: OutRoutingConfig,
+    pub tag: OneOrMany<String>,
+    /// HUB connection config. Can be just an address string or a struct.
+    pub hub: HubConnectionConfig,
+    /// Number of TCP connections underlying QUIC.
+    pub connections: Option<usize>,
+    /// Output configurations for second-level routing.
+    /// Each output has a tag that can be selected by routing rules.
+    #[serde(default)]
+    pub outputs: Vec<OutputConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InConfig {
-    pub hub_addr: SocketAddr,
-    pub hub_host: Option<String>,
-    pub connection_count: Option<usize>,
+    /// HUB connection config. Can be just an address string or a struct.
+    pub hub: HubConnectionConfig,
+    /// Number of TCP connections underlying QUIC.
+    pub connections: Option<usize>,
     pub socks5: Option<Socks5Config>,
+}
+
+/// HUB connection configuration.
+/// Can be deserialized from either:
+/// - A string: `hub: "127.0.0.1:8765"`
+/// - A struct: `hub: { address: "127.0.0.1:8765" }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HubConnectionConfig {
+    /// Just the address string.
+    Address(SocketAddr),
+    /// Full config with address field.
+    Full(HubConnectionFullConfig),
+}
+
+impl HubConnectionConfig {
+    pub fn address(&self) -> SocketAddr {
+        match self {
+            HubConnectionConfig::Address(addr) => *addr,
+            HubConnectionConfig::Full(config) => config.address,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubConnectionFullConfig {
+    pub address: SocketAddr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,27 +107,12 @@ pub struct RoutingConfig {
     pub rules: Vec<RuleConfig>,
 }
 
-/// Routing configuration for OUT nodes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OutRoutingConfig {
-    /// Priority for rules from this OUT (lower = higher priority).
-    #[serde(default)]
-    pub priority: i64,
-    /// Routing rules this OUT provides.
-    #[serde(default)]
-    pub rules: Vec<RuleConfig>,
-    /// Output configurations for second-level routing.
-    /// Each output has a tag that can be selected by routing rules.
-    #[serde(default)]
-    pub outputs: Vec<OutputConfig>,
-}
-
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
-            tags: vec![],
+            tag: OneOrMany::Many(vec![]),
             listen: "127.0.0.1:8765".parse().unwrap(),
-            connection_count: Some(4),
+            connections: Some(4),
             routing: RoutingConfig::default(),
         }
     }
@@ -102,11 +121,10 @@ impl Default for HubConfig {
 impl Default for OutConfig {
     fn default() -> Self {
         Self {
-            tags: vec!["default".to_string()],
-            hub_addr: "127.0.0.1:8765".parse().unwrap(),
-            hub_host: Some("localhost".to_string()),
-            connection_count: Some(4),
-            routing: OutRoutingConfig::default(),
+            tag: OneOrMany::One("default".to_string()),
+            hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
+            connections: Some(4),
+            outputs: vec![],
         }
     }
 }
@@ -114,9 +132,8 @@ impl Default for OutConfig {
 impl Default for InConfig {
     fn default() -> Self {
         Self {
-            hub_addr: "127.0.0.1:8765".parse().unwrap(),
-            hub_host: Some("localhost".to_string()),
-            connection_count: Some(4),
+            hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
+            connections: Some(4),
             socks5: Some(Socks5Config::default()),
         }
     }

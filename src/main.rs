@@ -111,7 +111,7 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
     let hub_quic_config = plug2proxy::node::HubConfig {
         pem_path: HUB_PEM_PATH.to_string(),
         ca_pem_path: Some(CA_PEM_PATH.to_string()),
-        tags: config.tags.clone(),
+        tags: config.tag.clone().into_vec(),
     };
 
     let hub = Arc::new(Hub::new(hub_quic_config));
@@ -129,10 +129,12 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
 }
 
 async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result<()> {
-    tracing::info!("Starting OUT node with tags: {:?}", config.tags);
-    tracing::info!("Connecting to HUB: {}", config.hub_addr);
+    let tags = config.tag.clone().into_vec();
+    let hub_addr = config.hub.address();
+    tracing::info!("Starting OUT node with tags: {:?}", tags);
+    tracing::info!("Connecting to HUB: {}", hub_addr);
 
-    let connection_count = config.connection_count.unwrap_or(1);
+    let connections = config.connections.unwrap_or(1);
 
     // If --node-cert is provided, generate cert for distribution
     if let Some(ref name) = node_cert {
@@ -157,15 +159,9 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
 
     // Auto-reconnect loop
     loop {
-        let mut out = OutNode::new(
-            config.tags.clone(),
-            config.routing.rules.clone(),
-            config.routing.priority,
-            config.routing.outputs.clone(),
-            client_config.clone(),
-        );
+        let mut out = OutNode::new(tags.clone(), config.outputs.clone(), client_config.clone());
 
-        match out.connect_hub(config.hub_addr, connection_count).await {
+        match out.connect_hub(hub_addr, connections).await {
             Ok(()) => {
                 tracing::info!("✅ OUT node connected and registered with HUB");
 
@@ -187,10 +183,11 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
 }
 
 async fn run_in(config: InConfig, node_cert: Option<String>) -> anyhow::Result<()> {
+    let hub_addr = config.hub.address();
     tracing::info!("Starting IN node");
-    tracing::info!("Connecting to HUB: {}", config.hub_addr);
+    tracing::info!("Connecting to HUB: {}", hub_addr);
 
-    let connection_count = config.connection_count.unwrap_or(1);
+    let connections = config.connections.unwrap_or(1);
 
     // If --node-cert is provided, generate cert for distribution
     if let Some(ref name) = node_cert {
@@ -217,7 +214,7 @@ async fn run_in(config: InConfig, node_cert: Option<String>) -> anyhow::Result<(
     loop {
         let mut in_node = InNode::new(client_config.clone());
 
-        match in_node.connect_hub(config.hub_addr, connection_count).await {
+        match in_node.connect_hub(hub_addr, connections).await {
             Ok(()) => {
                 let in_node = Arc::new(in_node);
                 tracing::info!("✅ IN node connected and registered with HUB");
