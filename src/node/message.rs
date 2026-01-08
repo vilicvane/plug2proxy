@@ -24,12 +24,37 @@ pub struct RouteEntry {
     pub tag: Option<String>,
 }
 
-/// Connect request sent on a data stream.
+/// Request sent on a data stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectRequest {
-    /// Target address (e.g., "example.com:443").
-    pub target: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ForwardRequest {
+    /// TCP stream forwarding to a target.
+    Tcp(TcpForwardRequest),
+    /// UDP forwarding (full-cone NAT).
+    Udp(UdpForwardRequest),
+}
+
+/// TCP forwarding request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpForwardRequest {
+    /// Target hostname with port (e.g., "example.com:443").
+    /// Used for TLS SNI, logging, and routing decisions.
+    pub host: String,
+    /// Resolved address (e.g., "1.2.3.4:443").
+    /// If provided, used for actual connection instead of resolving hostname.
+    /// Useful for direct IN→OUT tunnels where IN has already resolved the address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     /// Routing entries (label + tag pairs, determined by IN via router).
+    #[serde(default)]
+    pub routes: Vec<RouteEntry>,
+}
+
+/// UDP forwarding request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UdpForwardRequest {
+    /// Routing entries (label + tag pairs, determined by IN via router).
+    #[serde(default)]
     pub routes: Vec<RouteEntry>,
 }
 

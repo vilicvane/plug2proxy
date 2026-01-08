@@ -258,7 +258,7 @@ async fn run_udp_relay(
     in_node: Arc<InNode>,
 ) -> Result<(), Socks5Error> {
     // Open tunnel stream for UDP forwarding
-    let tunnel_stream = match in_node.connect("udp-forward").await {
+    let tunnel_stream = match in_node.open_udp_forward().await {
         Ok(stream) => Arc::new(stream),
         Err(e) => {
             tracing::error!("failed to open UDP tunnel stream: {}", e);

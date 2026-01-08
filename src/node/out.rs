@@ -123,24 +123,44 @@ impl OutNode {
         stream: Stream,
         output_map: Arc<OutputMap>,
     ) -> Result<(), OutNodeError> {
-        // Read the connect request from HUB
-        let request = Self::read_connect_request(&stream).await?;
+        use super::message::ForwardRequest;
 
-        // Check if this is a UDP forwarding request
-        if request.target == "udp-forward" {
-            tracing::info!(
-                "✅ OUT EXIT: UDP forwarding stream {} activated",
-                stream.id()
-            );
-            return Self::handle_udp_forward(stream).await;
+        // Read the forward request from HUB
+        let request = Self::read_forward_request(&stream).await?;
+
+        match request {
+            ForwardRequest::Tcp(tcp_req) => {
+                Self::handle_tcp_forward(stream, output_map, tcp_req).await
+            }
+            ForwardRequest::Udp(_udp_req) => {
+                tracing::info!(
+                    "✅ OUT EXIT: UDP forwarding stream {} activated",
+                    stream.id()
+                );
+                Self::handle_udp_forward(stream).await
+            }
         }
+    }
 
+    async fn handle_tcp_forward(
+        stream: Stream,
+        output_map: Arc<OutputMap>,
+        request: super::message::TcpForwardRequest,
+    ) -> Result<(), OutNodeError> {
         // Extract tag from the first route entry (second-level routing)
         let tag = request.routes.first().and_then(|r| r.tag.as_deref());
 
+        // Use resolved address if provided, otherwise use hostname
+        let connect_target = request.address.as_deref().unwrap_or(&request.host);
+
         tracing::info!(
-            "✅ OUT EXIT: Received TCP request for {}{} (forwarded from HUB)",
-            request.target,
+            "✅ OUT EXIT: Received TCP request for {}{}{} (forwarded from HUB)",
+            request.host,
+            request
+                .address
+                .as_ref()
+                .map(|a| format!(" [addr: {}]", a))
+                .unwrap_or_default(),
             tag.map(|t| format!(" [tag: {}]", t)).unwrap_or_default()
         );
 
@@ -149,13 +169,13 @@ impl OutNode {
 
         // Connect to the actual target through the selected output
         let mut target_stream = output
-            .connect(&request.target)
+            .connect(connect_target)
             .await
             .map_err(|e| OutNodeError::Io(std::io::Error::other(e.to_string())))?;
 
         tracing::info!(
             "✅ OUT EXIT: Connected to {} from OUT node{}",
-            request.target,
+            connect_target,
             tag.map(|t| format!(" via output '{}'", t))
                 .unwrap_or_else(|| " (direct)".to_string())
         );
@@ -166,11 +186,11 @@ impl OutNode {
         Ok(())
     }
 
-    /// Read connect request from the stream.
-    async fn read_connect_request(
+    /// Read forward request from the stream.
+    async fn read_forward_request(
         stream: &Stream,
-    ) -> Result<super::message::ConnectRequest, OutNodeError> {
-        use super::message::ConnectRequest;
+    ) -> Result<super::message::ForwardRequest, OutNodeError> {
+        use super::message::ForwardRequest;
 
         // Read length-prefixed JSON
         let mut len_buf = [0u8; 4];
@@ -200,7 +220,7 @@ impl OutNode {
             offset += n;
         }
 
-        let request: ConnectRequest = serde_json::from_slice(&msg_buf).map_err(|e| {
+        let request: ForwardRequest = serde_json::from_slice(&msg_buf).map_err(|e| {
             OutNodeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
 

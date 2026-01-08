@@ -303,7 +303,7 @@ async fn test_multi_out_with_routing() {
     // For testing, we'll manually create a connection with routes
     let connector2 = in_node.hub_connector().unwrap();
     let stream2 = connector2
-        .connect_with_routes(
+        .connect_tcp_with_routes(
             &echo2_addr.to_string(),
             vec![RouteEntry {
                 label: Label::Custom("out1".to_string()),
@@ -339,7 +339,7 @@ async fn test_multi_out_with_routing() {
     // For testing, we'll manually create a connection with routes
     let connector3 = in_node.hub_connector().unwrap();
     let stream3 = connector3
-        .connect_with_routes(
+        .connect_tcp_with_routes(
             &echo3_addr.to_string(),
             vec![RouteEntry {
                 label: Label::Custom("out2".to_string()),

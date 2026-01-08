@@ -196,7 +196,7 @@ impl InNode {
             .map(|conn| HubConnector::new(Arc::clone(conn.tunnel())))
     }
 
-    /// Create a proxied connection to target.
+    /// Create a proxied TCP connection to target.
     ///
     /// Resolves routing and delegates to the appropriate connector.
     pub async fn connect(&self, target: &str) -> Result<Stream, InNodeError> {
@@ -209,8 +209,17 @@ impl InNode {
         //
         // For now, always use HubConnector.
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
-        let stream = connector.connect_with_routes(target, routes).await?;
+        let stream = connector.connect_tcp_with_routes(target, routes).await?;
 
+        Ok(stream)
+    }
+
+    /// Open a UDP forwarding stream.
+    pub async fn open_udp_forward(&self) -> Result<Stream, InNodeError> {
+        let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
+        // For UDP, we don't have a target to route, so use empty routes
+        // (routing will be determined by the stream content or default)
+        let stream = connector.open_udp_forward(vec![]).await?;
         Ok(stream)
     }
 }

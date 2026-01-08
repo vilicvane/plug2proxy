@@ -11,7 +11,10 @@ use crate::route::{BuiltInLabel, Label, RuleConfig};
 use crate::tunnel::{FrameCodec, QuicConfig, QuicError, Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, NodeConnection};
-use super::message::{ConnectRequest, HubMessage, NodeMessage, NodeRole, OutInfo};
+use super::message::{
+    ForwardRequest, HubMessage, NodeMessage, NodeRole, OutInfo, TcpForwardRequest,
+    UdpForwardRequest,
+};
 
 /// Generate a unique node ID using UUID v4.
 fn generate_node_id() -> String {
@@ -398,7 +401,7 @@ impl Hub {
         }
     }
 
-    /// Handle a single data stream (connect request from IN).
+    /// Handle a single data stream (forward request from IN).
     async fn handle_data_stream(
         stream: Stream,
         outs: Arc<RwLock<HashMap<String, OutConnection>>>,
@@ -406,17 +409,34 @@ impl Hub {
     ) -> Result<(), HubError> {
         tracing::debug!("handling data stream {}", stream.id());
 
-        // Read connect request
-        let request = Self::read_connect_request(&stream).await?;
+        // Read forward request
+        let request = Self::read_forward_request(&stream).await?;
 
+        match request {
+            ForwardRequest::Tcp(tcp_req) => {
+                Self::handle_tcp_forward(stream, outs, hub_tags, tcp_req).await
+            }
+            ForwardRequest::Udp(udp_req) => {
+                Self::handle_udp_forward_request(stream, outs, hub_tags, udp_req).await
+            }
+        }
+    }
+
+    /// Handle TCP forwarding request.
+    async fn handle_tcp_forward(
+        stream: Stream,
+        outs: Arc<RwLock<HashMap<String, OutConnection>>>,
+        hub_tags: Vec<String>,
+        request: TcpForwardRequest,
+    ) -> Result<(), HubError> {
         // Process routes to determine routing
         // Each route has a label (first-level routing) and optional tag (second-level for OUT)
         for route in &request.routes {
             match &route.label {
                 Label::BuiltIn(BuiltInLabel::Direct) => {
                     // Direct connection - exit from HUB
-                    tracing::info!("🔀 ROUTING: {} → HUB DIRECT (DIRECT)", request.target);
-                    return Self::exit_from_hub(stream, request).await;
+                    tracing::info!("🔀 ROUTING: {} → HUB DIRECT (DIRECT)", request.host);
+                    return Self::exit_tcp_from_hub(stream, &request.host).await;
                 }
                 Label::BuiltIn(BuiltInLabel::Proxy) => {
                     // Route through any available OUT
@@ -429,9 +449,9 @@ impl Hub {
                     };
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
-                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (PROXY)", request.target, out_id);
+                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (PROXY)", request.host, out_id);
                         // Forward with tag info for second-level routing at OUT
-                        return Self::forward_to_out(stream, out_tunnel, request).await;
+                        return Self::forward_tcp_to_out(stream, out_tunnel, request).await;
                     }
                     // No OUT available, fall through to try next route or exit from HUB
                 }
@@ -446,11 +466,11 @@ impl Hub {
                     };
 
                     if let Some((out_id, out_tunnel)) = out_tunnel {
-                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (ANY)", request.target, out_id);
-                        return Self::forward_to_out(stream, out_tunnel, request).await;
+                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (ANY)", request.host, out_id);
+                        return Self::forward_tcp_to_out(stream, out_tunnel, request).await;
                     } else {
-                        tracing::info!("🔀 ROUTING: {} → HUB DIRECT (ANY)", request.target);
-                        return Self::exit_from_hub(stream, request).await;
+                        tracing::info!("🔀 ROUTING: {} → HUB DIRECT (ANY)", request.host);
+                        return Self::exit_tcp_from_hub(stream, &request.host).await;
                     }
                 }
                 Label::Custom(node_tag) => {
@@ -466,21 +486,21 @@ impl Hub {
                     if let Some((out_id, out_tunnel)) = out_tunnel {
                         tracing::info!(
                             "🔀 ROUTING: {} → OUT [{}] (label: '{}', tag: {:?})",
-                            request.target,
+                            request.host,
                             out_id,
                             node_tag,
                             route.tag
                         );
                         // Forward request with tag info for second-level routing at OUT
-                        return Self::forward_to_out(stream, out_tunnel, request).await;
+                        return Self::forward_tcp_to_out(stream, out_tunnel, request).await;
                     } else if hub_tags.contains(node_tag) {
                         // HUB itself has this tag, exit from HUB
                         tracing::info!(
                             "🔀 ROUTING: {} → HUB DIRECT (label: '{}')",
-                            request.target,
+                            request.host,
                             node_tag
                         );
-                        return Self::exit_from_hub(stream, request).await;
+                        return Self::exit_tcp_from_hub(stream, &request.host).await;
                     }
                     // No match for this label, try next route
                 }
@@ -489,30 +509,31 @@ impl Hub {
 
         // No routes matched - exit directly from HUB
         if request.routes.is_empty() {
-            tracing::info!("🔀 ROUTING: {} → HUB DIRECT (no routes)", request.target);
+            tracing::info!("🔀 ROUTING: {} → HUB DIRECT (no routes)", request.host);
         } else {
             tracing::warn!(
                 "⚠️  ROUTING: {} → HUB DIRECT (no OUT found for routes: {:?})",
-                request.target,
+                request.host,
                 request.routes
             );
         }
 
-        Self::exit_from_hub(stream, request).await
+        Self::exit_tcp_from_hub(stream, &request.host).await
     }
 
-    /// Forward request to an OUT node.
-    async fn forward_to_out(
+    /// Forward TCP request to an OUT node.
+    async fn forward_tcp_to_out(
         in_stream: Stream,
         out_tunnel: Arc<Tunnel>,
-        request: ConnectRequest,
+        request: TcpForwardRequest,
     ) -> Result<(), HubError> {
         // Open a new stream to the OUT node
         let out_stream = out_tunnel.open_bi_stream().await?;
         tracing::debug!("opened stream {} to OUT", out_stream.id());
 
-        // Forward the connect request to the OUT
-        let json = serde_json::to_vec(&request)
+        // Forward as a ForwardRequest::Tcp
+        let forward_request = ForwardRequest::Tcp(request);
+        let json = serde_json::to_vec(&forward_request)
             .map_err(|e| HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         let len = (json.len() as u32).to_be_bytes();
         out_stream.send(&len).await?;
@@ -524,22 +545,13 @@ impl Hub {
         Ok(())
     }
 
-    /// HUB exits traffic directly to the target.
-    async fn exit_from_hub(stream: Stream, request: ConnectRequest) -> Result<(), HubError> {
-        // Check for UDP forwarding request
-        if request.target == "udp-forward" {
-            tracing::info!(
-                "✅ HUB EXIT: UDP forwarding stream {} activated",
-                stream.id()
-            );
-            return Self::handle_udp_forward(stream).await;
-        }
-
+    /// HUB exits TCP traffic directly to the target.
+    async fn exit_tcp_from_hub(stream: Stream, target: &str) -> Result<(), HubError> {
         // Connect to target (supports both IP:port and domain:port)
-        let target = if request.target.contains(':') {
-            request.target.clone()
+        let target = if target.contains(':') {
+            target.to_string()
         } else {
-            format!("{}:80", request.target)
+            format!("{}:80", target)
         };
 
         let mut target_stream = TcpStream::connect(&target).await?;
@@ -547,6 +559,103 @@ impl Hub {
 
         // Relay data between tunnel stream and target
         Self::relay(stream, &mut target_stream).await?;
+
+        Ok(())
+    }
+
+    /// Handle UDP forwarding request with routing.
+    async fn handle_udp_forward_request(
+        stream: Stream,
+        outs: Arc<RwLock<HashMap<String, OutConnection>>>,
+        hub_tags: Vec<String>,
+        request: UdpForwardRequest,
+    ) -> Result<(), HubError> {
+        // Process routes to determine routing (similar to TCP)
+        for route in &request.routes {
+            match &route.label {
+                Label::BuiltIn(BuiltInLabel::Direct) => {
+                    tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (DIRECT)");
+                    return Self::handle_udp_forward(stream).await;
+                }
+                Label::BuiltIn(BuiltInLabel::Proxy) => {
+                    let out_tunnel = {
+                        let outs_read = outs.read().await;
+                        outs_read
+                            .values()
+                            .next()
+                            .map(|out| (out.id.clone(), out.tunnel.clone()))
+                    };
+
+                    if let Some((out_id, out_tunnel)) = out_tunnel {
+                        tracing::info!("🔀 ROUTING: UDP → OUT [{}] (PROXY)", out_id);
+                        return Self::forward_udp_to_out(stream, out_tunnel, request).await;
+                    }
+                }
+                Label::BuiltIn(BuiltInLabel::Any) => {
+                    let out_tunnel = {
+                        let outs_read = outs.read().await;
+                        outs_read
+                            .values()
+                            .next()
+                            .map(|out| (out.id.clone(), out.tunnel.clone()))
+                    };
+
+                    if let Some((out_id, out_tunnel)) = out_tunnel {
+                        tracing::info!("🔀 ROUTING: UDP → OUT [{}] (ANY)", out_id);
+                        return Self::forward_udp_to_out(stream, out_tunnel, request).await;
+                    } else {
+                        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (ANY)");
+                        return Self::handle_udp_forward(stream).await;
+                    }
+                }
+                Label::Custom(node_tag) => {
+                    let out_tunnel = {
+                        let outs_read = outs.read().await;
+                        outs_read
+                            .values()
+                            .find(|out| out.tags.contains(node_tag))
+                            .map(|out| (out.id.clone(), out.tunnel.clone()))
+                    };
+
+                    if let Some((out_id, out_tunnel)) = out_tunnel {
+                        tracing::info!(
+                            "🔀 ROUTING: UDP → OUT [{}] (label: '{}')",
+                            out_id,
+                            node_tag
+                        );
+                        return Self::forward_udp_to_out(stream, out_tunnel, request).await;
+                    } else if hub_tags.contains(node_tag) {
+                        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (label: '{}')", node_tag);
+                        return Self::handle_udp_forward(stream).await;
+                    }
+                }
+            }
+        }
+
+        // No routes matched - exit directly from HUB
+        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (no routes)");
+        Self::handle_udp_forward(stream).await
+    }
+
+    /// Forward UDP request to an OUT node.
+    async fn forward_udp_to_out(
+        in_stream: Stream,
+        out_tunnel: Arc<Tunnel>,
+        request: UdpForwardRequest,
+    ) -> Result<(), HubError> {
+        let out_stream = out_tunnel.open_bi_stream().await?;
+        tracing::debug!("opened UDP stream {} to OUT", out_stream.id());
+
+        // Forward as a ForwardRequest::Udp
+        let forward_request = ForwardRequest::Udp(request);
+        let json = serde_json::to_vec(&forward_request)
+            .map_err(|e| HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let len = (json.len() as u32).to_be_bytes();
+        out_stream.send(&len).await?;
+        out_stream.send(&json).await?;
+
+        // Relay data bidirectionally between IN stream and OUT stream
+        Self::relay_streams(in_stream, out_stream).await?;
 
         Ok(())
     }
@@ -823,7 +932,7 @@ impl Hub {
         Ok(())
     }
 
-    async fn read_connect_request(stream: &Stream) -> Result<ConnectRequest, HubError> {
+    async fn read_forward_request(stream: &Stream) -> Result<ForwardRequest, HubError> {
         // Read length-prefixed JSON
         let mut len_buf = [0u8; 4];
         let mut offset = 0;
@@ -852,7 +961,7 @@ impl Hub {
             offset += n;
         }
 
-        let request: ConnectRequest = serde_json::from_slice(&msg_buf)
+        let request: ForwardRequest = serde_json::from_slice(&msg_buf)
             .map_err(|e| HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
         Ok(request)

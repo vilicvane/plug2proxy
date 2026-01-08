@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::tunnel::{Stream, Tunnel};
 
 use super::in_like::{InLike, InLikeError};
-use super::message::{ConnectRequest, RouteEntry};
+use super::message::{ForwardRequest, RouteEntry, TcpForwardRequest, UdpForwardRequest};
 
 /// Connector that forwards through HUB.
 pub struct HubConnector {
@@ -15,21 +15,11 @@ impl HubConnector {
         Self { tunnel }
     }
 
-    /// Connect with routes (label + tag pairs) for routing.
-    pub async fn connect_with_routes(
-        &self,
-        target: &str,
-        routes: Vec<RouteEntry>,
-    ) -> Result<Stream, InLikeError> {
-        // Open a new data stream to HUB
+    /// Send a forward request and return the stream.
+    async fn send_request(&self, request: ForwardRequest) -> Result<Stream, InLikeError> {
         let stream = self.tunnel.open_bi_stream().await?;
         tracing::debug!("opened data stream {}", stream.id());
 
-        // Send connect request with routes
-        let request = ConnectRequest {
-            target: target.to_string(),
-            routes: routes.clone(),
-        };
         let json = serde_json::to_vec(&request).map_err(|e| {
             InLikeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
@@ -38,15 +28,40 @@ impl HubConnector {
         let len = (json.len() as u32).to_be_bytes();
         stream.send(&len).await?;
         stream.send(&json).await?;
-        tracing::debug!("sent connect request for {} (routes: {:?})", target, routes);
 
         Ok(stream)
+    }
+
+    /// Connect TCP with routes (label + tag pairs) for routing.
+    pub async fn connect_tcp_with_routes(
+        &self,
+        target: &str,
+        routes: Vec<RouteEntry>,
+    ) -> Result<Stream, InLikeError> {
+        let request = ForwardRequest::Tcp(TcpForwardRequest {
+            host: target.to_string(),
+            address: None,
+            routes: routes.clone(),
+        });
+        tracing::debug!(
+            "sending TCP forward request for {} (routes: {:?})",
+            target,
+            routes
+        );
+        self.send_request(request).await
+    }
+
+    /// Open a UDP forwarding stream.
+    pub async fn open_udp_forward(&self, routes: Vec<RouteEntry>) -> Result<Stream, InLikeError> {
+        let request = ForwardRequest::Udp(UdpForwardRequest { routes });
+        tracing::debug!("sending UDP forward request");
+        self.send_request(request).await
     }
 }
 
 impl InLike for HubConnector {
     async fn connect(&self, target: &str) -> Result<Stream, InLikeError> {
-        self.connect_with_routes(target, vec![]).await
+        self.connect_tcp_with_routes(target, vec![]).await
     }
 }
 
@@ -79,13 +94,14 @@ impl DirectOutConnector {
 
 impl InLike for DirectOutConnector {
     async fn connect(&self, target: &str) -> Result<Stream, InLikeError> {
-        // Same protocol as HubConnector - open stream, send connect request
+        // Same protocol as HubConnector - open stream, send forward request
         let stream = self.tunnel.open_bi_stream().await?;
 
-        let request = ConnectRequest {
-            target: target.to_string(),
+        let request = ForwardRequest::Tcp(TcpForwardRequest {
+            host: target.to_string(),
+            address: None,
             routes: vec![],
-        };
+        });
         let json = serde_json::to_vec(&request).map_err(|e| {
             InLikeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
