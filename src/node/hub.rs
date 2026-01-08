@@ -7,10 +7,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, mpsc};
 
+use crate::route::{BuiltInLabel, Label, Router, RuleConfig};
 use crate::tunnel::{FrameCodec, QuicConfig, QuicError, Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, NodeConnection};
-use super::message::{ConnectRequest, HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
+use super::message::{ConnectRequest, HubMessage, NodeMessage, NodeRole, OutInfo};
 
 /// Generate a unique node ID using UUID v4.
 fn generate_node_id() -> String {
@@ -24,6 +25,8 @@ pub struct HubConfig {
     /// Path to CA PEM file (for verifying client certs).
     /// If None, client certificate verification is disabled.
     pub ca_pem_path: Option<String>,
+    /// Tags this HUB provides when acting as an OUT.
+    pub tags: Vec<String>,
 }
 
 /// Configuration for client nodes (IN/OUT).
@@ -42,8 +45,10 @@ pub struct Hub {
     ins: Arc<RwLock<HashMap<String, InConnection>>>,
     /// Connected OUT nodes.
     outs: Arc<RwLock<HashMap<String, OutConnection>>>,
-    /// Routing rules.
-    route_rules: Arc<RwLock<Vec<RouteRule>>>,
+    /// Base routing rules (from config).
+    route_rules: Arc<RwLock<Vec<RuleConfig>>>,
+    /// Router for matching targets.
+    router: Arc<Router>,
     /// Registry of active tunnels by QUIC connection ID (for routing additional TCP connections).
     tunnel_registry: Arc<RwLock<HashMap<Vec<u8>, Arc<Tunnel>>>>,
 }
@@ -71,6 +76,7 @@ impl Hub {
             ins: Arc::new(RwLock::new(HashMap::new())),
             outs: Arc::new(RwLock::new(HashMap::new())),
             route_rules: Arc::new(RwLock::new(Vec::new())),
+            router: Arc::new(Router::new(Vec::new())),
             tunnel_registry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -239,7 +245,12 @@ impl Hub {
         // Wait for registration
         let msg = conn.recv().await?;
         match msg {
-            NodeMessage::Register { role, tags } => {
+            NodeMessage::Register {
+                role,
+                tags,
+                routing_rules,
+                routing_priority,
+            } => {
                 // Generate a unique UUID for this node
                 let id = generate_node_id();
 
@@ -305,6 +316,20 @@ impl Hub {
                     NodeRole::Out => {
                         // Store OUT connection
                         let out_id = id.clone();
+                        let tunnel_id = tunnel
+                            .connection_id()
+                            .await
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>();
+
+                        // Register OUT's routing rules with the router
+                        if !routing_rules.is_empty() {
+                            self.router
+                                .register_out(&out_id, &tunnel_id, routing_rules, routing_priority)
+                                .await;
+                        }
+
                         {
                             let mut outs = self.outs.write().await;
                             outs.insert(
@@ -387,8 +412,9 @@ impl Hub {
                     tracing::debug!("accepting new data stream {}", stream_id);
 
                     let hub_outs = Arc::clone(&self.outs);
+                    let hub_tags = self.config.tags.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_data_stream(stream, hub_outs).await {
+                        if let Err(e) = Self::handle_data_stream(stream, hub_outs, hub_tags).await {
                             tracing::error!("data stream {} error: {}", stream_id, e);
                         }
                     });
@@ -405,43 +431,102 @@ impl Hub {
     async fn handle_data_stream(
         stream: Stream,
         outs: Arc<RwLock<HashMap<String, OutConnection>>>,
+        hub_tags: Vec<String>,
     ) -> Result<(), HubError> {
         tracing::debug!("handling data stream {}", stream.id());
 
         // Read connect request
         let request = Self::read_connect_request(&stream).await?;
 
-        // Determine if we should forward to an OUT or exit directly from HUB
-        if let Some(tag) = &request.tag {
-            // Try to find an OUT with matching tag
-            let out_tunnel = {
-                let outs_read = outs.read().await;
-                outs_read
-                    .values()
-                    .find(|out| out.tags.contains(tag))
-                    .map(|out| (out.id.clone(), out.tunnel.clone()))
-            };
+        // Process routes to determine routing
+        // Each route has a label (first-level routing) and optional tag (second-level for OUT)
+        for route in &request.routes {
+            match &route.label {
+                Label::BuiltIn(BuiltInLabel::Direct) => {
+                    // Direct connection - exit from HUB
+                    tracing::info!("🔀 ROUTING: {} → HUB DIRECT (DIRECT)", request.target);
+                    return Self::exit_from_hub(stream, request).await;
+                }
+                Label::BuiltIn(BuiltInLabel::Proxy) => {
+                    // Route through any available OUT
+                    let out_tunnel = {
+                        let outs_read = outs.read().await;
+                        outs_read
+                            .values()
+                            .next()
+                            .map(|out| (out.id.clone(), out.tunnel.clone()))
+                    };
 
-            if let Some((out_id, out_tunnel)) = out_tunnel {
-                tracing::info!(
-                    "🔀 ROUTING: {} → OUT [{}] (tag: '{}')",
-                    request.target,
-                    out_id,
-                    tag
-                );
-                return Self::forward_to_out(stream, out_tunnel, request).await;
-            } else {
-                tracing::warn!(
-                    "⚠️  ROUTING: {} → HUB DIRECT (no OUT found for tag '{}')",
-                    request.target,
-                    tag
-                );
+                    if let Some((out_id, out_tunnel)) = out_tunnel {
+                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (PROXY)", request.target, out_id);
+                        // Forward with tag info for second-level routing at OUT
+                        return Self::forward_to_out(stream, out_tunnel, request).await;
+                    }
+                    // No OUT available, fall through to try next route or exit from HUB
+                }
+                Label::BuiltIn(BuiltInLabel::Any) => {
+                    // Accept any route - try OUT first, then HUB
+                    let out_tunnel = {
+                        let outs_read = outs.read().await;
+                        outs_read
+                            .values()
+                            .next()
+                            .map(|out| (out.id.clone(), out.tunnel.clone()))
+                    };
+
+                    if let Some((out_id, out_tunnel)) = out_tunnel {
+                        tracing::info!("🔀 ROUTING: {} → OUT [{}] (ANY)", request.target, out_id);
+                        return Self::forward_to_out(stream, out_tunnel, request).await;
+                    } else {
+                        tracing::info!("🔀 ROUTING: {} → HUB DIRECT (ANY)", request.target);
+                        return Self::exit_from_hub(stream, request).await;
+                    }
+                }
+                Label::Custom(node_tag) => {
+                    // Try to find an OUT with matching tag (first-level routing)
+                    let out_tunnel = {
+                        let outs_read = outs.read().await;
+                        outs_read
+                            .values()
+                            .find(|out| out.tags.contains(node_tag))
+                            .map(|out| (out.id.clone(), out.tunnel.clone()))
+                    };
+
+                    if let Some((out_id, out_tunnel)) = out_tunnel {
+                        tracing::info!(
+                            "🔀 ROUTING: {} → OUT [{}] (label: '{}', tag: {:?})",
+                            request.target,
+                            out_id,
+                            node_tag,
+                            route.tag
+                        );
+                        // Forward request with tag info for second-level routing at OUT
+                        return Self::forward_to_out(stream, out_tunnel, request).await;
+                    } else if hub_tags.contains(node_tag) {
+                        // HUB itself has this tag, exit from HUB
+                        tracing::info!(
+                            "🔀 ROUTING: {} → HUB DIRECT (label: '{}')",
+                            request.target,
+                            node_tag
+                        );
+                        return Self::exit_from_hub(stream, request).await;
+                    }
+                    // No match for this label, try next route
+                }
             }
-        } else {
-            tracing::info!("🔀 ROUTING: {} → HUB DIRECT (no tag)", request.target);
         }
 
-        // No tag or no matching OUT - HUB exits directly
+        // No routes matched - exit directly from HUB
+        if request.routes.is_empty() {
+            tracing::info!("🔀 ROUTING: {} → HUB DIRECT (no routes)", request.target);
+        } else {
+            tracing::warn!(
+                "⚠️  ROUTING: {} → HUB DIRECT (no OUT found for routes: {:?})",
+                request.target,
+                request.routes
+            );
+        }
+
         Self::exit_from_hub(stream, request).await
     }
 
@@ -893,7 +978,7 @@ impl Hub {
     }
 
     /// Set routing rules.
-    pub async fn set_route_rules(&self, rules: Vec<RouteRule>) {
+    pub async fn set_route_rules(&self, rules: Vec<RuleConfig>) {
         let mut route_rules = self.route_rules.write().await;
         *route_rules = rules;
     }

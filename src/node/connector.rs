@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::tunnel::{Stream, Tunnel};
 
 use super::in_like::{InLike, InLikeError};
-use super::message::ConnectRequest;
+use super::message::{ConnectRequest, RouteEntry};
 
 /// Connector that forwards through HUB.
 pub struct HubConnector {
@@ -15,20 +15,20 @@ impl HubConnector {
         Self { tunnel }
     }
 
-    /// Connect with an optional tag for routing.
-    pub async fn connect_with_tag(
+    /// Connect with routes (label + tag pairs) for routing.
+    pub async fn connect_with_routes(
         &self,
         target: &str,
-        tag: Option<&str>,
+        routes: Vec<RouteEntry>,
     ) -> Result<Stream, InLikeError> {
         // Open a new data stream to HUB
         let stream = self.tunnel.open_bi_stream().await?;
         tracing::debug!("opened data stream {}", stream.id());
 
-        // Send connect request with tag
+        // Send connect request with routes
         let request = ConnectRequest {
             target: target.to_string(),
-            tag: tag.map(|t| t.to_string()),
+            routes: routes.clone(),
         };
         let json = serde_json::to_vec(&request).map_err(|e| {
             InLikeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -38,7 +38,7 @@ impl HubConnector {
         let len = (json.len() as u32).to_be_bytes();
         stream.send(&len).await?;
         stream.send(&json).await?;
-        tracing::debug!("sent connect request for {} (tag: {:?})", target, tag);
+        tracing::debug!("sent connect request for {} (routes: {:?})", target, routes);
 
         Ok(stream)
     }
@@ -46,7 +46,7 @@ impl HubConnector {
 
 impl InLike for HubConnector {
     async fn connect(&self, target: &str) -> Result<Stream, InLikeError> {
-        self.connect_with_tag(target, None).await
+        self.connect_with_routes(target, vec![]).await
     }
 }
 
@@ -84,7 +84,7 @@ impl InLike for DirectOutConnector {
 
         let request = ConnectRequest {
             target: target.to_string(),
-            tag: None,
+            routes: vec![],
         };
         let json = serde_json::to_vec(&request).map_err(|e| {
             InLikeError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))

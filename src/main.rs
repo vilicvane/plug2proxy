@@ -5,7 +5,7 @@ use clap::Parser;
 
 use plug2proxy::cert::{generate_ca, generate_node_cert, load_ca_from_pem};
 use plug2proxy::config::{Config, HubConfig, InConfig, OutConfig};
-use plug2proxy::node::{Hub, InNode, OutNode, RouteRule};
+use plug2proxy::node::{Hub, InNode, OutNode};
 use plug2proxy::socks5::Socks5Server;
 
 /// Conventional paths for certificates
@@ -111,22 +111,15 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
     let hub_quic_config = plug2proxy::node::HubConfig {
         pem_path: HUB_PEM_PATH.to_string(),
         ca_pem_path: Some(CA_PEM_PATH.to_string()),
+        tags: config.tags.clone(),
     };
 
     let hub = Arc::new(Hub::new(hub_quic_config));
 
     // Set routing rules
-    if !config.routes.is_empty() {
-        tracing::info!("Loading {} routing rules", config.routes.len());
-        let rules: Vec<RouteRule> = config
-            .routes
-            .iter()
-            .map(|r| RouteRule {
-                pattern: r.pattern.clone(),
-                tag: r.tag.clone(),
-            })
-            .collect();
-        hub.set_route_rules(rules).await;
+    if !config.routing.rules.is_empty() {
+        tracing::info!("Loading {} routing rules", config.routing.rules.len());
+        hub.set_route_rules(config.routing.rules.clone()).await;
     }
 
     hub.serve(config.listen).await?;
@@ -165,7 +158,12 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
 
     // Auto-reconnect loop
     loop {
-        let mut out = OutNode::new(config.tags.clone(), client_config.clone());
+        let mut out = OutNode::new(
+            config.tags.clone(),
+            config.routing.rules.clone(),
+            config.routing.priority,
+            client_config.clone(),
+        );
 
         match out.connect_hub(config.hub_addr, connection_count).await {
             Ok(()) => {

@@ -54,6 +54,7 @@ mod socks5_integration_tests {
         let hub: Arc<Hub> = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
+            tags: vec![],
         }));
 
         let hub_clone: Arc<Hub> = Arc::clone(&hub);
@@ -86,6 +87,7 @@ mod relay_tests {
 
     use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
+    use crate::route::{DomainPatternRuleConfig, Label, OneOrMany, RuleConfig};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
     const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
@@ -121,6 +123,7 @@ mod relay_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
+            tags: vec![],
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -145,8 +148,6 @@ mod relay_tests {
     /// Setup test infrastructure WITH OUT node routing
     /// This is the key difference - real traffic routes through OUT
     async fn setup_test_env_with_out() -> (SocketAddr, Arc<InNode>) {
-        use crate::node::RouteRule;
-
         let _ = tracing_subscriber::fmt::try_init();
         ensure_test_cert();
 
@@ -154,6 +155,7 @@ mod relay_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
+            tags: vec![],
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -169,7 +171,7 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect OUT node first (it needs to register before IN sees it)
-        let mut out_node = OutNode::new(vec!["test".to_string()], test_client_config());
+        let mut out_node = OutNode::new(vec!["test".to_string()], vec![], 0, test_client_config());
         out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Run OUT node in background
@@ -184,12 +186,15 @@ mod relay_tests {
         in_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Add a catch-all route rule to route through OUT
-        // Pattern "." matches any target since all targets contain "."
+        // Pattern ".*" matches any target
         in_node
-            .update_route_rules(vec![RouteRule {
-                pattern: ".".to_string(), // Match anything with a dot (like "127.0.0.1")
-                tag: "test".to_string(),
-            }])
+            .update_route_rules(vec![RuleConfig::DomainPattern(DomainPatternRuleConfig {
+                r#match: OneOrMany::One(".*".to_string()), // Match anything
+                negate: false,
+                out: OneOrMany::One(Label::Custom("test".to_string())),
+                priority: None,
+                tag: None,
+            })])
             .await;
 
         (hub_addr, Arc::new(in_node))
@@ -742,6 +747,7 @@ mod socks5_server_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
+            tags: vec![],
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1291,6 +1297,7 @@ mod udp_integration_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
+            tags: vec![],
         }));
 
         let hub_clone = Arc::clone(&hub);
@@ -1303,7 +1310,8 @@ mod udp_integration_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 3. Start OUT node
-        let mut out_node = OutNode::new(vec!["default".to_string()], test_client_config());
+        let mut out_node =
+            OutNode::new(vec!["default".to_string()], vec![], 0, test_client_config());
         out_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("OUT node connected");
 
@@ -1440,6 +1448,7 @@ mod udp_e2e_tests {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
+            tags: vec![],
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1455,7 +1464,7 @@ mod udp_e2e_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect OUT node (for UDP forwarding)
-        let mut out_node = OutNode::new(vec!["test".to_string()], test_client_config());
+        let mut out_node = OutNode::new(vec!["test".to_string()], vec![], 0, test_client_config());
         out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         tokio::spawn(async move {
@@ -1592,6 +1601,7 @@ mod udp_e2e_tests {
             let hub = Arc::new(Hub::new(HubConfig {
                 pem_path: TEST_CERT_PATH.to_string(),
                 ca_pem_path: None,
+                tags: vec![],
             }));
 
             let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

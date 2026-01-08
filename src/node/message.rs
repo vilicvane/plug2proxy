@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::route::{Label, RuleConfig};
+
 /// Node role identifier sent during registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -8,13 +10,25 @@ pub enum NodeRole {
     Out,
 }
 
+/// A routing decision with label and optional tag.
+/// - Label: determines which node to route to (first-level routing)
+/// - Tag: passed to OUT for second-level routing decisions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteEntry {
+    /// The routing label (e.g., DIRECT, PROXY, or custom OUT tag).
+    pub label: Label,
+    /// Optional tag for second-level routing at OUT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
 /// Connect request sent on a data stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectRequest {
     /// Target address (e.g., "example.com:443").
     pub target: String,
-    /// Routing tag (determined by IN).
-    pub tag: Option<String>,
+    /// Routing entries (label + tag pairs, determined by IN via router).
+    pub routes: Vec<RouteEntry>,
 }
 
 /// Messages from node to HUB.
@@ -28,6 +42,12 @@ pub enum NodeMessage {
         role: NodeRole,
         /// Tags this node provides (for OUT) or empty (for IN).
         tags: Vec<String>,
+        /// Routing rules this OUT provides (empty for IN).
+        #[serde(default)]
+        routing_rules: Vec<RuleConfig>,
+        /// Priority for routing rules (for OUT).
+        #[serde(default)]
+        routing_priority: i64,
     },
 }
 
@@ -38,18 +58,9 @@ pub enum HubMessage {
     /// Registration acknowledged.
     Registered,
     /// Routing configuration (sent to IN).
-    RouteConfig { rules: Vec<RouteRule> },
+    RouteConfig { rules: Vec<RuleConfig> },
     /// OUT node availability update (sent to IN).
     OutUpdate { outs: Vec<OutInfo> },
-}
-
-/// A routing rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteRule {
-    /// Pattern to match (e.g., domain pattern).
-    pub pattern: String,
-    /// Tag to route to.
-    pub tag: String,
 }
 
 /// Information about an OUT node.

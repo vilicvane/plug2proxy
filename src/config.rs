@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 
+use crate::route::RuleConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Config {
@@ -21,10 +23,12 @@ impl Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubConfig {
     pub id: String,
+    pub tags: Vec<String>,
     pub listen: SocketAddr,
     pub connection_count: Option<usize>,
+    /// Routing rules (sent to IN nodes).
     #[serde(default)]
-    pub routes: Vec<RouteRule>,
+    pub routing: RoutingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +38,9 @@ pub struct OutConfig {
     pub hub_addr: SocketAddr,
     pub hub_host: Option<String>,
     pub connection_count: Option<usize>,
+    /// Routing rules this OUT provides.
+    #[serde(default)]
+    pub routing: OutRoutingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,19 +64,33 @@ pub struct AuthConfig {
     pub password: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteRule {
-    pub pattern: String,
-    pub tag: String,
+/// Routing configuration for Hub (sent to IN nodes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// Routing rules.
+    #[serde(default)]
+    pub rules: Vec<RuleConfig>,
+}
+
+/// Routing configuration for OUT nodes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutRoutingConfig {
+    /// Priority for rules from this OUT (lower = higher priority).
+    #[serde(default)]
+    pub priority: i64,
+    /// Routing rules this OUT provides.
+    #[serde(default)]
+    pub rules: Vec<RuleConfig>,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
             id: "hub".to_string(),
+            tags: vec!["default".to_string()],
             listen: "127.0.0.1:8765".parse().unwrap(),
             connection_count: Some(4),
-            routes: vec![],
+            routing: RoutingConfig::default(),
         }
     }
 }
@@ -82,6 +103,7 @@ impl Default for OutConfig {
             hub_addr: "127.0.0.1:8765".parse().unwrap(),
             hub_host: Some("localhost".to_string()),
             connection_count: Some(4),
+            routing: OutRoutingConfig::default(),
         }
     }
 }

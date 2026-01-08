@@ -7,6 +7,8 @@ use tokio::net::TcpListener;
 
 use super::*;
 use crate::cert::{generate_ca, generate_node_cert};
+use crate::node::RouteEntry;
+use crate::route::{DomainRuleConfig, Label, OneOrMany, RuleConfig};
 
 const TEST_CERT_PATH: &str = "test.pem";
 
@@ -42,6 +44,7 @@ async fn test_in_out_connect_to_hub() {
     let hub = Arc::new(Hub::new(HubConfig {
         pem_path: TEST_CERT_PATH.to_string(),
         ca_pem_path: None,
+        tags: vec![],
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -58,7 +61,7 @@ async fn test_in_out_connect_to_hub() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect OUT first (so IN receives it in the initial update)
-    let mut out = OutNode::new(vec!["direct".to_string()], test_client_config());
+    let mut out = OutNode::new(vec!["direct".to_string()], vec![], 0, test_client_config());
     out.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT connected");
 
@@ -109,6 +112,7 @@ async fn test_full_proxy_flow() {
     let hub = Arc::new(Hub::new(HubConfig {
         pem_path: TEST_CERT_PATH.to_string(),
         ca_pem_path: None,
+        tags: vec![],
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -203,6 +207,7 @@ async fn test_multi_out_with_routing() {
     let hub = Arc::new(Hub::new(HubConfig {
         pem_path: TEST_CERT_PATH.to_string(),
         ca_pem_path: None,
+        tags: vec![],
     }));
 
     let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -215,14 +220,20 @@ async fn test_multi_out_with_routing() {
     // - "google.com" -> "out2" tag
     // - everything else -> no tag (handled by HUB)
     hub.set_route_rules(vec![
-        RouteRule {
-            pattern: "example.com".to_string(),
-            tag: "out1".to_string(),
-        },
-        RouteRule {
-            pattern: "google.com".to_string(),
-            tag: "out2".to_string(),
-        },
+        RuleConfig::Domain(DomainRuleConfig {
+            r#match: OneOrMany::One("example.com".to_string()),
+            negate: false,
+            out: OneOrMany::One(Label::Custom("out1".to_string())),
+            priority: None,
+            tag: None,
+        }),
+        RuleConfig::Domain(DomainRuleConfig {
+            r#match: OneOrMany::One("google.com".to_string()),
+            negate: false,
+            out: OneOrMany::One(Label::Custom("out2".to_string())),
+            priority: None,
+            tag: None,
+        }),
     ])
     .await;
 
@@ -234,11 +245,11 @@ async fn test_multi_out_with_routing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect OUT nodes with different tags
-    let mut out1 = OutNode::new(vec!["out1".to_string()], test_client_config());
+    let mut out1 = OutNode::new(vec!["out1".to_string()], vec![], 0, test_client_config());
     out1.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT1 connected with tag 'out1'");
 
-    let mut out2 = OutNode::new(vec!["out2".to_string()], test_client_config());
+    let mut out2 = OutNode::new(vec!["out2".to_string()], vec![], 0, test_client_config());
     out2.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("OUT2 connected with tag 'out2'");
 
@@ -289,10 +300,16 @@ async fn test_multi_out_with_routing() {
 
     // Test 2: Connect through OUT1 - manually set tag to match 'out1'
     tracing::info!("\n=== Test 2: Force routing through OUT1 (simulating 'example.com' match) ===");
-    // For testing, we'll manually create a connection with a tag
+    // For testing, we'll manually create a connection with routes
     let connector2 = in_node.hub_connector().unwrap();
     let stream2 = connector2
-        .connect_with_tag(&echo2_addr.to_string(), Some("out1"))
+        .connect_with_routes(
+            &echo2_addr.to_string(),
+            vec![RouteEntry {
+                label: Label::Custom("out1".to_string()),
+                tag: None,
+            }],
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -319,10 +336,16 @@ async fn test_multi_out_with_routing() {
 
     // Test 3: Connect through OUT2 - manually set tag to match 'out2'
     tracing::info!("\n=== Test 3: Force routing through OUT2 (simulating 'google.com' match) ===");
-    // For testing, we'll manually create a connection with a tag
+    // For testing, we'll manually create a connection with routes
     let connector3 = in_node.hub_connector().unwrap();
     let stream3 = connector3
-        .connect_with_tag(&echo3_addr.to_string(), Some("out2"))
+        .connect_with_routes(
+            &echo3_addr.to_string(),
+            vec![RouteEntry {
+                label: Label::Custom("out2".to_string()),
+                tag: None,
+            }],
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -347,23 +370,31 @@ async fn test_multi_out_with_routing() {
     assert!(response3.contains("[OUT2]"), "Expected OUT2 routing");
     assert!(response3.contains("test-out2"));
 
-    // Test 4: Verify tag resolution works
-    tracing::info!("\n=== Test 4: Verify tag resolution ===");
-    let tag_example = in_node.resolve_tag("example.com:80").await;
-    let tag_google = in_node.resolve_tag("google.com:443").await;
-    let tag_other = in_node.resolve_tag("other.com:80").await;
-    tracing::info!("Tag for 'example.com:80': {:?}", tag_example);
-    tracing::info!("Tag for 'google.com:443': {:?}", tag_google);
-    tracing::info!("Tag for 'other.com:80': {:?}", tag_other);
-    assert_eq!(tag_example, Some("out1".to_string()));
-    assert_eq!(tag_google, Some("out2".to_string()));
-    assert_eq!(tag_other, None);
+    // Test 4: Verify route resolution works
+    tracing::info!("\n=== Test 4: Verify route resolution ===");
+    let routes_example = in_node.resolve_routes("example.com:80").await;
+    let routes_google = in_node.resolve_routes("google.com:443").await;
+    let routes_other = in_node.resolve_routes("other.com:80").await;
+    tracing::info!("Routes for 'example.com:80': {:?}", routes_example);
+    tracing::info!("Routes for 'google.com:443': {:?}", routes_google);
+    tracing::info!("Routes for 'other.com:80': {:?}", routes_other);
+    assert!(
+        routes_example
+            .iter()
+            .any(|r| r.label == Label::Custom("out1".to_string()))
+    );
+    assert!(
+        routes_google
+            .iter()
+            .any(|r| r.label == Label::Custom("out2".to_string()))
+    );
+    assert!(routes_other.is_empty());
 
     tracing::info!("\n✅ Multi-OUT routing test completed!");
-    tracing::info!("✓ HUB direct exit (no tag): working");
-    tracing::info!("✓ OUT1 forwarding (tag 'out1'): working");
-    tracing::info!("✓ OUT2 forwarding (tag 'out2'): working");
-    tracing::info!("✓ Tag resolution: working");
+    tracing::info!("✓ HUB direct exit (no routes): working");
+    tracing::info!("✓ OUT1 forwarding (label 'out1'): working");
+    tracing::info!("✓ OUT2 forwarding (label 'out2'): working");
+    tracing::info!("✓ Route resolution: working");
 
     hub_handle.abort();
     echo1_handle.abort();

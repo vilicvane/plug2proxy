@@ -4,20 +4,21 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::route::{MatchContext, Router, RuleConfig};
 use crate::tunnel::{Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
 use super::hub::ClientConfig;
 use super::in_like::InLikeError;
-use super::message::{HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
+use super::message::{HubMessage, NodeMessage, NodeRole, OutInfo, RouteEntry};
 
 /// IN node - entry point for proxied traffic.
 pub struct InNode {
     /// Client TLS configuration.
     client_config: ClientConfig,
-    /// Routing rules (received from HUB).
-    route_rules: Arc<RwLock<Vec<RouteRule>>>,
+    /// Router for matching targets.
+    router: Arc<RwLock<Router>>,
     /// Available OUTs (received from HUB).
     outs: Arc<RwLock<HashMap<String, OutInfo>>>,
     /// Connection to HUB.
@@ -28,7 +29,7 @@ impl InNode {
     pub fn new(client_config: ClientConfig) -> Self {
         Self {
             client_config,
-            route_rules: Arc::new(RwLock::new(Vec::new())),
+            router: Arc::new(RwLock::new(Router::new(Vec::new()))),
             outs: Arc::new(RwLock::new(HashMap::new())),
             hub_conn: None,
         }
@@ -58,6 +59,8 @@ impl InNode {
         conn.send(&NodeMessage::Register {
             role: NodeRole::In,
             tags: vec![],
+            routing_rules: vec![],
+            routing_priority: 0,
         })
         .await?;
 
@@ -117,9 +120,9 @@ impl InNode {
     }
 
     /// Update routing rules.
-    pub async fn update_route_rules(&self, rules: Vec<RouteRule>) {
-        let mut route_rules = self.route_rules.write().await;
-        *route_rules = rules;
+    pub async fn update_route_rules(&self, rules: Vec<RuleConfig>) {
+        let mut router = self.router.write().await;
+        *router = Router::new(rules);
     }
 
     /// Update available OUTs.
@@ -131,16 +134,51 @@ impl InNode {
         }
     }
 
-    /// Determine route tag for a given target (e.g., domain).
-    pub async fn resolve_tag(&self, target: &str) -> Option<String> {
-        let rules = self.route_rules.read().await;
-        for rule in rules.iter() {
-            // TODO: Implement proper pattern matching.
-            if target.contains(&rule.pattern) {
-                return Some(rule.tag.clone());
-            }
-        }
-        None
+    /// Resolve routes for a given target using the router.
+    /// Returns RouteEntry pairs (label + tag) for routing decisions.
+    pub async fn resolve_routes(&self, target: &str) -> Vec<RouteEntry> {
+        let router = self.router.read().await;
+
+        // Parse target to extract host and port
+        let (host, port) = if let Some(colon_pos) = target.rfind(':') {
+            let host = &target[..colon_pos];
+            let port = target[colon_pos + 1..].parse::<u16>().unwrap_or(0);
+            (host, port)
+        } else {
+            (target, 0)
+        };
+
+        // Check if host is a domain or IP
+        let domain = if host.chars().any(|c| !c.is_ascii_digit() && c != '.') {
+            Some(host)
+        } else {
+            None
+        };
+
+        // Try to parse as IP address, or use a placeholder
+        let addr: SocketAddr = target.parse().unwrap_or_else(|_| {
+            // Can't parse as socket addr, use placeholder
+            format!("0.0.0.0:{}", port).parse().unwrap()
+        });
+
+        let ctx = MatchContext {
+            address: addr,
+            domain,
+            region_codes: None, // GeoIP not implemented yet
+        };
+
+        let results = router.match_target(&ctx).await;
+
+        // Flatten results into RouteEntry list, preserving tags
+        results
+            .into_iter()
+            .flat_map(|group| {
+                group.into_iter().map(|r| RouteEntry {
+                    label: r.label,
+                    tag: r.tag,
+                })
+            })
+            .collect()
     }
 
     /// Get HUB connection for forwarding.
@@ -164,16 +202,16 @@ impl InNode {
     ///
     /// Resolves routing and delegates to the appropriate connector.
     pub async fn connect(&self, target: &str) -> Result<Stream, InNodeError> {
-        let tag = self.resolve_tag(target).await;
+        let routes = self.resolve_routes(target).await;
 
-        // TODO: Based on tag, pick the right connector:
+        // TODO: Based on routes, pick the right connector:
         // - HubConnector for HUB-routed traffic
         // - DirectOutConnector for direct OUT connections
         // - LocalConnector for local exit
         //
         // For now, always use HubConnector.
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
-        let stream = connector.connect_with_tag(target, tag.as_deref()).await?;
+        let stream = connector.connect_with_routes(target, routes).await?;
 
         Ok(stream)
     }
