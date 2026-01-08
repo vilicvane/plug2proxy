@@ -5,12 +5,17 @@ use std::path::Path;
 use crate::output::OutputConfig;
 use crate::route::{OneOrMany, RuleConfig};
 
+/// Top-level config structure.
+/// Only one of `hub`, `out`, or `in` should be present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum Config {
-    Hub(HubConfig),
-    Out(OutConfig),
-    In(InConfig),
+pub struct Config {
+    /// HUB node configuration.
+    pub hub: Option<HubConfig>,
+    /// OUT node configuration.
+    pub out: Option<OutConfig>,
+    /// IN node configuration (use `r#in` in code due to reserved keyword).
+    #[serde(rename = "in")]
+    pub in_config: Option<InConfig>,
 }
 
 impl Config {
@@ -19,14 +24,35 @@ impl Config {
         let config: Config = serde_yaml::from_str(&content)?;
         Ok(config)
     }
+
+    /// Get the node type from the config.
+    pub fn node_type(&self) -> Option<NodeType> {
+        if self.hub.is_some() {
+            Some(NodeType::Hub)
+        } else if self.out.is_some() {
+            Some(NodeType::Out)
+        } else if self.in_config.is_some() {
+            Some(NodeType::In)
+        } else {
+            None
+        }
+    }
+}
+
+/// Node type enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeType {
+    Hub,
+    Out,
+    In,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubConfig {
-    /// Tags this HUB provides when acting as an OUT.
-    /// Can be a single tag or array of tags.
+    /// Labels this HUB provides when acting as an OUT (for level 1 routing).
+    /// Can be a single label or array of labels.
     #[serde(default)]
-    pub tag: OneOrMany<String>,
+    pub label: OneOrMany<String>,
     pub listen: SocketAddr,
     /// Number of TCP connections underlying QUIC.
     pub connections: Option<usize>,
@@ -37,15 +63,18 @@ pub struct HubConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutConfig {
-    /// Tags this OUT node provides for routing.
-    /// Can be a single tag or array of tags.
+    /// Labels this OUT node provides for level 1 routing.
+    /// Can be a single label or array of labels.
     #[serde(default)]
-    pub tag: OneOrMany<String>,
+    pub label: OneOrMany<String>,
     /// HUB connection config. Can be just an address string or a struct.
     pub hub: HubConnectionConfig,
     /// Number of TCP connections underlying QUIC.
     pub connections: Option<usize>,
-    /// Output configurations for second-level routing.
+    /// Listen address for direct IN→OUT connections (bypassing HUB relay).
+    /// If set, IN nodes can connect directly to this OUT.
+    pub listen: Option<SocketAddr>,
+    /// Output configurations for level 2 routing.
     /// Each output has a tag that can be selected by routing rules.
     #[serde(default)]
     pub outputs: Vec<OutputConfig>,
@@ -57,6 +86,11 @@ pub struct InConfig {
     pub hub: HubConnectionConfig,
     /// Number of TCP connections underlying QUIC.
     pub connections: Option<usize>,
+    /// OUT labels to connect directly (bypassing HUB relay).
+    /// Only OUTs matching these labels will be connected directly.
+    /// If empty, no direct connections are made (all traffic goes through HUB).
+    #[serde(default)]
+    pub direct: OneOrMany<String>,
     pub socks5: Option<Socks5Config>,
 }
 
@@ -110,7 +144,7 @@ pub struct RoutingConfig {
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
-            tag: OneOrMany::Many(vec![]),
+            label: OneOrMany::Many(vec![]),
             listen: "127.0.0.1:8765".parse().unwrap(),
             connections: Some(4),
             routing: RoutingConfig::default(),
@@ -121,9 +155,10 @@ impl Default for HubConfig {
 impl Default for OutConfig {
     fn default() -> Self {
         Self {
-            tag: OneOrMany::Many(vec![]),
+            label: OneOrMany::Many(vec![]),
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
+            listen: None,
             outputs: vec![],
         }
     }
@@ -134,6 +169,7 @@ impl Default for InConfig {
         Self {
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
+            direct: OneOrMany::default(),
             socks5: Some(Socks5Config::default()),
         }
     }

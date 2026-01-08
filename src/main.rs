@@ -39,10 +39,14 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_file(CONFIG_PATH)?;
 
-    match config {
-        Config::Hub(hub_config) => run_hub(hub_config).await,
-        Config::Out(out_config) => run_out(out_config).await,
-        Config::In(in_config) => run_in(in_config).await,
+    if let Some(hub_config) = config.hub {
+        run_hub(hub_config).await
+    } else if let Some(out_config) = config.out {
+        run_out(out_config).await
+    } else if let Some(in_config) = config.in_config {
+        run_in(in_config).await
+    } else {
+        anyhow::bail!("Config must specify one of: hub, out, or in")
     }
 }
 
@@ -116,7 +120,7 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
     let hub_quic_config = plug2proxy::node::HubConfig {
         pem_path: HUB_PEM_PATH.to_string(),
         ca_pem_path: Some(CA_PEM_PATH.to_string()),
-        tags: config.tag.clone().into_vec(),
+        labels: config.label.clone().into_vec(),
     };
 
     let hub = Arc::new(Hub::new(hub_quic_config));
@@ -134,9 +138,9 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
 }
 
 async fn run_out(config: OutConfig) -> anyhow::Result<()> {
-    let tags = config.tag.clone().into_vec();
+    let labels = config.label.clone().into_vec();
     let hub_addr = config.hub.address();
-    tracing::info!("Starting OUT node with tags: {:?}", tags);
+    tracing::info!("Starting OUT node with labels: {:?}", labels);
     tracing::info!("Connecting to HUB: {}", hub_addr);
 
     let connections = config.connections.unwrap_or(1);
@@ -157,9 +161,30 @@ async fn run_out(config: OutConfig) -> anyhow::Result<()> {
         }
     };
 
+    // Configure direct server for IN→OUT connections (if listen is set)
+    let direct_server_config = config.listen.map(|_| plug2proxy::node::DirectServerConfig {
+        pem_path: NODE_PEM_PATH.to_string(),
+        ca_pem_path: Some(NODE_PEM_PATH.to_string()),
+    });
+
+    if let Some(addr) = config.listen {
+        tracing::info!("Direct IN→OUT listener will be on: {}", addr);
+    }
+
     // Auto-reconnect loop
     loop {
-        let mut out = OutNode::new(tags.clone(), config.outputs.clone(), client_config.clone());
+        let mut out = OutNode::new(
+            labels.clone(),
+            config.outputs.clone(),
+            client_config.clone(),
+        );
+
+        // Configure direct listener if enabled
+        if let (Some(server_config), Some(listen_addr)) =
+            (direct_server_config.clone(), config.listen)
+        {
+            out = out.with_direct_server(server_config, listen_addr);
+        }
 
         match out.connect_hub(hub_addr, connections).await {
             Ok(()) => {
@@ -188,6 +213,11 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
     tracing::info!("Connecting to HUB: {}", hub_addr);
 
     let connections = config.connections.unwrap_or(1);
+    let direct_filter = config.direct.clone().into_vec();
+
+    if !direct_filter.is_empty() {
+        tracing::info!("Direct OUT filter: {:?}", direct_filter);
+    }
 
     // Use node.pem from cwd for connection (contains cert + key + CA cert)
     let node_pem_path = Path::new(NODE_PEM_PATH);
@@ -207,7 +237,7 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
 
     // Auto-reconnect loop
     loop {
-        let mut in_node = InNode::new(client_config.clone());
+        let mut in_node = InNode::new(client_config.clone(), direct_filter.clone());
 
         match in_node.connect_hub(hub_addr, connections).await {
             Ok(()) => {

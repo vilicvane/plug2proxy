@@ -5,7 +5,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use crate::output::{OutputConfig, OutputMap};
-use crate::tunnel::{Stream, Tunnel, TunnelError};
+use crate::tunnel::{QuicConfig, Stream, Tunnel, TunnelError};
 use crate::udp_proxy::Datagram;
 
 use super::connection::{ConnectionError, HubConnection};
@@ -13,30 +13,65 @@ use super::hub::ClientConfig;
 use super::message::{HubMessage, NodeMessage, NodeRole};
 use super::out_like::{OutLike, OutLikeError};
 
+/// Server configuration for direct IN→OUT connections.
+#[derive(Clone)]
+pub struct DirectServerConfig {
+    /// Path to server PEM file (cert + key).
+    pub pem_path: String,
+    /// Path to CA PEM file (for verifying IN client certs).
+    pub ca_pem_path: Option<String>,
+}
+
 /// OUT node - exit point for proxied traffic.
 pub struct OutNode {
-    tags: Vec<String>,
-    /// Output map for second-level routing.
+    /// Labels for level 1 routing.
+    labels: Vec<String>,
+    /// Output map for level 2 routing.
     output_map: Arc<OutputMap>,
-    /// Client TLS configuration.
+    /// Client TLS configuration (for connecting to HUB).
     client_config: ClientConfig,
+    /// Server configuration for direct IN connections.
+    direct_server_config: Option<DirectServerConfig>,
+    /// Direct listen address (for IN→OUT connections).
+    direct_addr: Option<SocketAddr>,
     /// Connection to HUB.
     hub_conn: Option<HubConnection>,
 }
 
 impl OutNode {
-    pub fn new(tags: Vec<String>, outputs: Vec<OutputConfig>, client_config: ClientConfig) -> Self {
+    pub fn new(
+        labels: Vec<String>,
+        outputs: Vec<OutputConfig>,
+        client_config: ClientConfig,
+    ) -> Self {
         let output_map = Arc::new(OutputMap::from_configs(outputs));
         Self {
-            tags,
+            labels,
             output_map,
             client_config,
+            direct_server_config: None,
+            direct_addr: None,
             hub_conn: None,
         }
     }
 
-    pub fn tags(&self) -> &[String] {
-        &self.tags
+    /// Set direct server configuration for IN→OUT connections.
+    pub fn with_direct_server(
+        mut self,
+        config: DirectServerConfig,
+        listen_addr: SocketAddr,
+    ) -> Self {
+        self.direct_server_config = Some(config);
+        self.direct_addr = Some(listen_addr);
+        self
+    }
+
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    pub fn direct_addr(&self) -> Option<SocketAddr> {
+        self.direct_addr
     }
 
     /// Connect to HUB.
@@ -62,7 +97,8 @@ impl OutNode {
         // Register with HUB (HUB assigns UUID, name is from our cert's CN)
         conn.send(&NodeMessage::Register {
             role: NodeRole::Out,
-            tags: self.tags.clone(),
+            labels: self.labels.clone(),
+            direct_addr: self.direct_addr.map(|a| a.to_string()),
         })
         .await?;
 
@@ -79,13 +115,35 @@ impl OutNode {
         Ok(())
     }
 
-    /// Run the OUT node (accept forwarded streams from HUB).
+    /// Run the OUT node (accept forwarded streams from HUB and direct IN connections).
     pub async fn run(&self) -> Result<(), OutNodeError> {
+        let output_map = Arc::clone(&self.output_map);
+
+        // Start direct listener if configured
+        if let (Some(config), Some(addr)) = (&self.direct_server_config, self.direct_addr) {
+            let direct_output_map = Arc::clone(&output_map);
+            let pem_path = config.pem_path.clone();
+            let ca_pem_path = config.ca_pem_path.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) =
+                    Self::run_direct_listener(addr, pem_path, ca_pem_path, direct_output_map).await
+                {
+                    tracing::error!("direct listener error: {}", e);
+                }
+            });
+        }
+
+        // Run HUB connection handler
+        self.run_hub_handler(output_map).await
+    }
+
+    /// Handle forwarded streams from HUB.
+    async fn run_hub_handler(&self, output_map: Arc<OutputMap>) -> Result<(), OutNodeError> {
         use std::collections::HashSet;
 
         let conn = self.hub_conn.as_ref().ok_or(OutNodeError::NotConnected)?;
         let tunnel = conn.tunnel();
-        let output_map = Arc::clone(&self.output_map);
 
         // Track streams we've already accepted to avoid re-accepting
         let mut handled_streams: HashSet<u64> = HashSet::new();
@@ -102,7 +160,7 @@ impl OutNode {
                 Ok(stream) => {
                     let stream_id = stream.id();
                     handled_streams.insert(stream_id);
-                    tracing::debug!("accepting forward stream {}", stream_id);
+                    tracing::debug!("accepting forward stream from HUB {}", stream_id);
 
                     let output_map = Arc::clone(&output_map);
                     tokio::spawn(async move {
@@ -112,11 +170,137 @@ impl OutNode {
                     });
                 }
                 Err(e) => {
-                    tracing::error!("stream accept error: {}", e);
+                    tracing::error!("HUB stream accept error: {}", e);
                     return Err(e.into());
                 }
             }
         }
+    }
+
+    /// Run direct listener for IN→OUT connections.
+    async fn run_direct_listener(
+        listen_addr: SocketAddr,
+        pem_path: String,
+        ca_pem_path: Option<String>,
+        output_map: Arc<OutputMap>,
+    ) -> Result<(), OutNodeError> {
+        use crate::tunnel::FrameCodec;
+        use futures::StreamExt;
+        use tokio::net::TcpListener;
+        use tokio_util::codec::Decoder;
+
+        tracing::info!("starting direct listener on {}", listen_addr);
+
+        // Bind TCP listener
+        let listener = TcpListener::bind(listen_addr).await?;
+        tracing::info!("✅ Direct listener ready on {}", listen_addr);
+
+        loop {
+            let (tcp_stream, peer_addr) = listener.accept().await?;
+            tcp_stream.set_nodelay(true)?;
+            tracing::debug!("direct connection from {}", peer_addr);
+
+            let pem_path = pem_path.clone();
+            let ca_pem_path = ca_pem_path.clone();
+            let output_map = Arc::clone(&output_map);
+
+            tokio::spawn(async move {
+                // Read the first frame
+                let mut framed = FrameCodec::new().framed(tcp_stream);
+                let first_frame = match framed.next().await {
+                    Some(Ok(data)) => data,
+                    Some(Err(e)) => {
+                        tracing::error!("direct connection {} frame error: {}", peer_addr, e);
+                        return;
+                    }
+                    None => {
+                        tracing::error!("direct connection {} closed early", peer_addr);
+                        return;
+                    }
+                };
+
+                let tcp_stream = framed.into_inner();
+
+                if let Err(e) = Self::handle_direct_connection(
+                    tcp_stream,
+                    first_frame,
+                    &pem_path,
+                    ca_pem_path.as_deref(),
+                    output_map,
+                )
+                .await
+                {
+                    tracing::error!("direct connection from {} error: {}", peer_addr, e);
+                }
+            });
+        }
+    }
+
+    /// Handle a direct IN→OUT connection.
+    async fn handle_direct_connection(
+        tcp_stream: tokio::net::TcpStream,
+        first_frame: bytes::Bytes,
+        pem_path: &str,
+        ca_pem_path: Option<&str>,
+        output_map: Arc<OutputMap>,
+    ) -> Result<(), OutNodeError> {
+        use std::collections::HashSet;
+
+        // Create QUIC server config (one per connection since it's not Clone)
+        let mut quic_config = QuicConfig::new_server(pem_path, ca_pem_path)?.into_inner();
+
+        // Create QUIC tunnel over the TCP connection
+        let tunnel = Tunnel::from_tcp_stream_server_with_initial_data(
+            tcp_stream,
+            first_frame,
+            &mut quic_config,
+        )
+        .await?;
+        let tunnel = Arc::new(tunnel);
+
+        // Get peer identity for logging
+        let peer_name = tunnel.peer_common_name().await;
+        tracing::info!(
+            "📥 Direct IN connected: {:?}",
+            peer_name.as_deref().unwrap_or("unknown")
+        );
+
+        // Handle streams from this IN
+        let mut handled_streams: HashSet<u64> = HashSet::new();
+
+        loop {
+            if tunnel.is_closed().await {
+                tracing::info!(
+                    "📤 Direct IN disconnected: {:?}",
+                    peer_name.as_deref().unwrap_or("unknown")
+                );
+                break;
+            }
+
+            match tunnel
+                .accept_bi_stream_wait_excluding(&handled_streams)
+                .await
+            {
+                Ok(stream) => {
+                    let stream_id = stream.id();
+                    handled_streams.insert(stream_id);
+                    tracing::debug!("accepting direct stream {}", stream_id);
+
+                    let output_map = Arc::clone(&output_map);
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_forward_stream(stream, output_map).await {
+                            tracing::error!("direct stream {} error: {}", stream_id, e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!("direct stream accept ended: {}", e);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn handle_forward_stream(
@@ -539,6 +723,8 @@ pub enum OutNodeError {
     Tunnel(#[from] TunnelError),
     #[error("connection error: {0}")]
     Connection(#[from] ConnectionError),
+    #[error("quic error: {0}")]
+    Quic(#[from] crate::tunnel::QuicError),
     #[error("not connected to HUB")]
     NotConnected,
     #[error("unexpected message from HUB")]

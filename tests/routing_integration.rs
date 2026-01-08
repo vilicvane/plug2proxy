@@ -98,7 +98,7 @@ impl TestNetwork {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
-            tags: vec!["hub".to_string()], // HUB can also act as an OUT
+            labels: vec!["hub".to_string()], // HUB can also act as an OUT
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -145,7 +145,7 @@ impl TestNetwork {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Start IN node
-        let mut in_node = InNode::new(test_client_config());
+        let mut in_node = InNode::new(test_client_config(), vec![]);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         tracing::info!("IN node connected");
 
@@ -420,9 +420,9 @@ async fn test_e2e_connection_through_out() {
     echo_hub_handle.abort();
 }
 
-/// Test: OUT node selection by tags
+/// Test: OUT node selection by labels
 #[tokio::test]
-async fn test_out_selection_by_tags() {
+async fn test_out_selection_by_labels() {
     let rules = vec![
         // All traffic goes to "us" OUT
         RuleConfig::Fallback(FallbackRuleConfig {
@@ -438,7 +438,7 @@ async fn test_out_selection_by_tags() {
     assert!(outs.len() >= 2, "Expected at least 2 OUT nodes");
     tracing::info!(
         "Available OUTs: {:?}",
-        outs.iter().map(|o| &o.tags).collect::<Vec<_>>()
+        outs.iter().map(|o| &o.labels).collect::<Vec<_>>()
     );
 
     // All routes should go to "us"
@@ -519,7 +519,7 @@ impl SecondLevelTestNetwork {
         let hub = Arc::new(Hub::new(HubConfig {
             pem_path: TEST_CERT_PATH.to_string(),
             ca_pem_path: None,
-            tags: vec!["hub".to_string()],
+            labels: vec!["hub".to_string()],
         }));
 
         let hub_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -552,7 +552,7 @@ impl SecondLevelTestNetwork {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Start IN node
-        let mut in_node = InNode::new(test_client_config());
+        let mut in_node = InNode::new(test_client_config(), vec![]);
         in_node.connect_hub(hub_addr, 1).await.unwrap();
         tracing::info!("IN node connected");
 

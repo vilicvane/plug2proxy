@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::route::{MatchContext, Router, RuleConfig};
+use crate::route::{Label, MatchContext, Router, RuleConfig};
 use crate::tunnel::{Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
@@ -21,16 +21,23 @@ pub struct InNode {
     router: Arc<RwLock<Router>>,
     /// Available OUTs (received from HUB).
     outs: Arc<RwLock<HashMap<String, OutInfo>>>,
+    /// Direct connections to OUT nodes (for IN→OUT bypass).
+    direct_out_tunnels: Arc<RwLock<HashMap<String, Arc<Tunnel>>>>,
+    /// Filter for which OUT labels to connect directly.
+    /// Empty means no direct connections (all through HUB).
+    direct_filter: Vec<String>,
     /// Connection to HUB.
     hub_conn: Option<HubConnection>,
 }
 
 impl InNode {
-    pub fn new(client_config: ClientConfig) -> Self {
+    pub fn new(client_config: ClientConfig, direct_filter: Vec<String>) -> Self {
         Self {
             client_config,
             router: Arc::new(RwLock::new(Router::new(Vec::new()))),
             outs: Arc::new(RwLock::new(HashMap::new())),
+            direct_out_tunnels: Arc::new(RwLock::new(HashMap::new())),
+            direct_filter,
             hub_conn: None,
         }
     }
@@ -58,7 +65,8 @@ impl InNode {
         // Register with HUB (HUB assigns UUID, name is from our cert's CN)
         conn.send(&NodeMessage::Register {
             role: NodeRole::In,
-            tags: vec![],
+            labels: vec![],
+            direct_addr: None,
         })
         .await?;
 
@@ -198,20 +206,148 @@ impl InNode {
 
     /// Create a proxied TCP connection to target.
     ///
-    /// Resolves routing and delegates to the appropriate connector.
+    /// Resolves routing and tries direct OUT connection if available,
+    /// otherwise falls back to HUB relay.
     pub async fn connect(&self, target: &str) -> Result<Stream, InNodeError> {
         let routes = self.resolve_routes(target).await;
 
-        // TODO: Based on routes, pick the right connector:
-        // - HubConnector for HUB-routed traffic
-        // - DirectOutConnector for direct OUT connections
-        // - LocalConnector for local exit
-        //
-        // For now, always use HubConnector.
+        // Try to find a direct OUT connection for the first matching route
+        for route in &routes {
+            if let Label::Custom(tag) = &route.label {
+                // Check if this OUT has direct connection
+                if let Some(stream) = self.try_direct_out_connect(tag, target, &routes).await? {
+                    tracing::debug!("using direct OUT connection for {}", target);
+                    return Ok(stream);
+                }
+            }
+        }
+
+        // Fall back to HUB relay
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
         let stream = connector.connect_tcp_with_routes(target, routes).await?;
 
         Ok(stream)
+    }
+
+    /// Try to connect directly to an OUT node.
+    async fn try_direct_out_connect(
+        &self,
+        out_label: &str,
+        target: &str,
+        routes: &[RouteEntry],
+    ) -> Result<Option<Stream>, InNodeError> {
+        use super::message::{ForwardRequest, TcpForwardRequest};
+
+        // Check if this OUT tag is in our direct filter
+        // Empty filter means no direct connections allowed
+        if self.direct_filter.is_empty() || !self.direct_filter.contains(&out_label.to_string()) {
+            return Ok(None);
+        }
+
+        // Find OUT with this tag
+        let out_info = {
+            let outs = self.outs.read().await;
+            outs.values()
+                .find(|out| out.labels.contains(&out_label.to_string()))
+                .cloned()
+        };
+
+        let out_info = match out_info {
+            Some(info) => info,
+            None => return Ok(None),
+        };
+
+        // Check if OUT has direct address
+        let direct_addr = match &out_info.direct_addr {
+            Some(addr) => addr.clone(),
+            None => return Ok(None),
+        };
+
+        // Try to get or create direct tunnel
+        let tunnel = self
+            .get_or_create_direct_tunnel(&out_info.id, &direct_addr)
+            .await?;
+
+        // Open stream and send request
+        let stream = tunnel.open_bi_stream().await?;
+        tracing::debug!(
+            "opened direct stream {} to OUT {} at {}",
+            stream.id(),
+            out_info.id,
+            direct_addr
+        );
+
+        // Send forward request directly to OUT
+        let request = ForwardRequest::Tcp(TcpForwardRequest {
+            host: target.to_string(),
+            address: None,
+            routes: routes.to_vec(),
+        });
+        let json = serde_json::to_vec(&request).map_err(|e| {
+            InNodeError::Connect(InLikeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e,
+            )))
+        })?;
+
+        let len = (json.len() as u32).to_be_bytes();
+        stream.send(&len).await?;
+        stream.send(&json).await?;
+
+        tracing::info!(
+            "📡 Direct connection to {} via OUT {} ({})",
+            target,
+            out_info.name.as_deref().unwrap_or(&out_info.id),
+            direct_addr
+        );
+
+        Ok(Some(stream))
+    }
+
+    /// Get or create a direct tunnel to an OUT node.
+    async fn get_or_create_direct_tunnel(
+        &self,
+        out_id: &str,
+        direct_addr: &str,
+    ) -> Result<Arc<Tunnel>, InNodeError> {
+        // Check if we already have a connection
+        {
+            let tunnels = self.direct_out_tunnels.read().await;
+            if let Some(tunnel) = tunnels.get(out_id) {
+                if !tunnel.is_closed().await {
+                    return Ok(Arc::clone(tunnel));
+                }
+            }
+        }
+
+        // Parse address
+        let addr: SocketAddr = direct_addr.parse().map_err(|e| {
+            InNodeError::Connect(InLikeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid direct address {}: {}", direct_addr, e),
+            )))
+        })?;
+
+        // Create new connection
+        tracing::info!("establishing direct connection to OUT at {}", direct_addr);
+        let tunnel = Tunnel::connect_with_cert(
+            addr,
+            None,
+            1, // Single TCP connection for direct
+            self.client_config.pem_path.as_deref(),
+            self.client_config.ca_pem_path.as_deref(),
+        )
+        .await?;
+
+        let tunnel = Arc::new(tunnel);
+
+        // Store for reuse
+        {
+            let mut tunnels = self.direct_out_tunnels.write().await;
+            tunnels.insert(out_id.to_string(), Arc::clone(&tunnel));
+        }
+
+        Ok(tunnel)
     }
 
     /// Open a UDP forwarding stream.

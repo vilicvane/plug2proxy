@@ -67,8 +67,12 @@ pub enum NodeMessage {
     /// The node's name is extracted from its TLS certificate's Common Name.
     Register {
         role: NodeRole,
-        /// Tags this node provides (for OUT) or empty (for IN).
-        tags: Vec<String>,
+        /// Labels this node provides for level 1 routing (for OUT) or empty (for IN).
+        labels: Vec<String>,
+        /// Direct connection address for IN→OUT (OUT only).
+        /// If set, IN nodes can connect directly to this OUT.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        direct_addr: Option<String>,
     },
 }
 
@@ -91,7 +95,8 @@ pub struct OutInfo {
     pub id: String,
     /// Human-readable name (from TLS certificate Common Name).
     pub name: Option<String>,
-    pub tags: Vec<String>,
+    /// Labels for level 1 routing.
+    pub labels: Vec<String>,
     /// Connection info for direct connection (if applicable).
     pub direct_addr: Option<String>,
 }

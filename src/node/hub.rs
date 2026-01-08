@@ -28,8 +28,8 @@ pub struct HubConfig {
     /// Path to CA PEM file (for verifying client certs).
     /// If None, client certificate verification is disabled.
     pub ca_pem_path: Option<String>,
-    /// Tags this HUB provides when acting as an OUT.
-    pub tags: Vec<String>,
+    /// Labels this HUB provides for level 1 routing (when acting as an OUT).
+    pub labels: Vec<String>,
 }
 
 /// Configuration for client nodes (IN/OUT).
@@ -64,7 +64,10 @@ struct InConnection {
 struct OutConnection {
     id: String,
     name: Option<String>,
-    tags: Vec<String>,
+    /// Labels for level 1 routing.
+    labels: Vec<String>,
+    /// Direct address for IN→OUT connections (if available).
+    direct_addr: Option<String>,
     #[allow(dead_code)]
     conn: NodeConnection,
     tunnel: Arc<Tunnel>,
@@ -245,7 +248,11 @@ impl Hub {
         // Wait for registration
         let msg = conn.recv().await?;
         match msg {
-            NodeMessage::Register { role, tags } => {
+            NodeMessage::Register {
+                role,
+                labels,
+                direct_addr,
+            } => {
                 // Generate a unique UUID for this node
                 let id = generate_node_id();
 
@@ -313,12 +320,12 @@ impl Hub {
                         let out_id = id.clone();
 
                         {
-                            // Build tags: configured tags + CN (if present) as automatic tag
-                            let mut all_tags = tags;
+                            // Build labels: configured labels + CN (if present) as automatic label
+                            let mut all_labels = labels;
                             if let Some(ref cn) = peer_name {
-                                // Add CN as automatic tag if not already present
-                                if !all_tags.contains(cn) {
-                                    all_tags.push(cn.clone());
+                                // Add CN as automatic label if not already present
+                                if !all_labels.contains(cn) {
+                                    all_labels.push(cn.clone());
                                 }
                             }
 
@@ -327,12 +334,17 @@ impl Hub {
                                 id.clone(),
                                 OutConnection {
                                     id: id.clone(),
-                                    name: peer_name,
-                                    tags: all_tags,
+                                    name: peer_name.clone(),
+                                    labels: all_labels,
+                                    direct_addr: direct_addr.clone(),
                                     conn,
                                     tunnel: Arc::clone(&tunnel),
                                 },
                             );
+
+                            if direct_addr.is_some() {
+                                tracing::info!("OUT {} has direct address: {:?}", id, direct_addr);
+                            }
                         }
 
                         // Notify all INs about new OUT
@@ -382,13 +394,14 @@ impl Hub {
                     tracing::debug!("accepting new data stream {}", stream_id);
 
                     let hub_outs = Arc::clone(&self.outs);
-                    // HUB always has "hub" as a fixed tag, plus any configured tags
-                    let mut hub_tags = self.config.tags.clone();
-                    if !hub_tags.contains(&"hub".to_string()) {
-                        hub_tags.push("hub".to_string());
+                    // HUB always has "hub" as a fixed label, plus any configured labels
+                    let mut hub_labels = self.config.labels.clone();
+                    if !hub_labels.contains(&"hub".to_string()) {
+                        hub_labels.push("hub".to_string());
                     }
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_data_stream(stream, hub_outs, hub_tags).await {
+                        if let Err(e) = Self::handle_data_stream(stream, hub_outs, hub_labels).await
+                        {
                             tracing::error!("data stream {} error: {}", stream_id, e);
                         }
                     });
@@ -405,7 +418,7 @@ impl Hub {
     async fn handle_data_stream(
         stream: Stream,
         outs: Arc<RwLock<HashMap<String, OutConnection>>>,
-        hub_tags: Vec<String>,
+        hub_labels: Vec<String>,
     ) -> Result<(), HubError> {
         tracing::debug!("handling data stream {}", stream.id());
 
@@ -414,10 +427,10 @@ impl Hub {
 
         match request {
             ForwardRequest::Tcp(tcp_req) => {
-                Self::handle_tcp_forward(stream, outs, hub_tags, tcp_req).await
+                Self::handle_tcp_forward(stream, outs, hub_labels, tcp_req).await
             }
             ForwardRequest::Udp(udp_req) => {
-                Self::handle_udp_forward_request(stream, outs, hub_tags, udp_req).await
+                Self::handle_udp_forward_request(stream, outs, hub_labels, udp_req).await
             }
         }
     }
@@ -426,7 +439,7 @@ impl Hub {
     async fn handle_tcp_forward(
         stream: Stream,
         outs: Arc<RwLock<HashMap<String, OutConnection>>>,
-        hub_tags: Vec<String>,
+        hub_labels: Vec<String>,
         request: TcpForwardRequest,
     ) -> Result<(), HubError> {
         // Process routes to determine routing
@@ -473,13 +486,13 @@ impl Hub {
                         return Self::exit_tcp_from_hub(stream, &request.host).await;
                     }
                 }
-                Label::Custom(node_tag) => {
+                Label::Custom(node_label) => {
                     // Try to find an OUT with matching tag (first-level routing)
                     let out_tunnel = {
                         let outs_read = outs.read().await;
                         outs_read
                             .values()
-                            .find(|out| out.tags.contains(node_tag))
+                            .find(|out| out.labels.contains(node_label))
                             .map(|out| (out.id.clone(), out.tunnel.clone()))
                     };
 
@@ -488,17 +501,17 @@ impl Hub {
                             "🔀 ROUTING: {} → OUT [{}] (label: '{}', tag: {:?})",
                             request.host,
                             out_id,
-                            node_tag,
+                            node_label,
                             route.tag
                         );
                         // Forward request with tag info for second-level routing at OUT
                         return Self::forward_tcp_to_out(stream, out_tunnel, request).await;
-                    } else if hub_tags.contains(node_tag) {
+                    } else if hub_labels.contains(node_label) {
                         // HUB itself has this tag, exit from HUB
                         tracing::info!(
                             "🔀 ROUTING: {} → HUB DIRECT (label: '{}')",
                             request.host,
-                            node_tag
+                            node_label
                         );
                         return Self::exit_tcp_from_hub(stream, &request.host).await;
                     }
@@ -567,7 +580,7 @@ impl Hub {
     async fn handle_udp_forward_request(
         stream: Stream,
         outs: Arc<RwLock<HashMap<String, OutConnection>>>,
-        hub_tags: Vec<String>,
+        hub_labels: Vec<String>,
         request: UdpForwardRequest,
     ) -> Result<(), HubError> {
         // Process routes to determine routing (similar to TCP)
@@ -608,12 +621,12 @@ impl Hub {
                         return Self::handle_udp_forward(stream).await;
                     }
                 }
-                Label::Custom(node_tag) => {
+                Label::Custom(node_label) => {
                     let out_tunnel = {
                         let outs_read = outs.read().await;
                         outs_read
                             .values()
-                            .find(|out| out.tags.contains(node_tag))
+                            .find(|out| out.labels.contains(node_label))
                             .map(|out| (out.id.clone(), out.tunnel.clone()))
                     };
 
@@ -621,11 +634,11 @@ impl Hub {
                         tracing::info!(
                             "🔀 ROUTING: UDP → OUT [{}] (label: '{}')",
                             out_id,
-                            node_tag
+                            node_label
                         );
                         return Self::forward_udp_to_out(stream, out_tunnel, request).await;
-                    } else if hub_tags.contains(node_tag) {
-                        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (label: '{}')", node_tag);
+                    } else if hub_labels.contains(node_label) {
+                        tracing::info!("🔀 ROUTING: UDP → HUB DIRECT (label: '{}')", node_label);
                         return Self::handle_udp_forward(stream).await;
                     }
                 }
@@ -1039,8 +1052,8 @@ impl Hub {
             .map(|out| OutInfo {
                 id: out.id.clone(),
                 name: out.name.clone(),
-                tags: out.tags.clone(),
-                direct_addr: None, // TODO: populate if direct connection supported
+                labels: out.labels.clone(),
+                direct_addr: out.direct_addr.clone(),
             })
             .collect()
     }
