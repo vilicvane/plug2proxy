@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::route::{GeoLite2, Label, MatchContext, Router, RuleConfig};
-use crate::tunnel::{Stream, Tunnel, TunnelError};
+use crate::route::{BuiltInLabel, GeoLite2, Label, MatchContext, Router, RuleConfig};
+use crate::tunnel::{ProxyStream, Stream, Tunnel, TunnelError};
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
@@ -227,18 +227,28 @@ impl InNode {
 
     /// Create a proxied TCP connection to target.
     ///
-    /// Resolves routing and tries direct OUT connection if available,
-    /// otherwise falls back to HUB relay.
-    pub async fn connect(&self, target: &str) -> Result<Stream, InNodeError> {
+    /// Resolves routing and handles:
+    /// 1. DIRECT - connect directly from IN to target
+    /// 2. Custom label with direct OUT - connect directly to OUT
+    /// 3. Fallback - relay through HUB
+    pub async fn connect(&self, target: &str) -> Result<ProxyStream, InNodeError> {
         let routes = self.resolve_routes(target).await;
+
+        // Check for DIRECT label first - exit directly from IN
+        for route in &routes {
+            if matches!(route.label, Label::BuiltIn(BuiltInLabel::Direct)) {
+                tracing::debug!("DIRECT exit from IN for {}", target);
+                return self.connect_direct(target).await;
+            }
+        }
 
         // Try to find a direct OUT connection for the first matching route
         for route in &routes {
-            if let Label::Custom(tag) = &route.label {
+            if let Label::Custom(label) = &route.label {
                 // Check if this OUT has direct connection
-                if let Some(stream) = self.try_direct_out_connect(tag, target, &routes).await? {
+                if let Some(stream) = self.try_direct_out_connect(label, target, &routes).await? {
                     tracing::debug!("using direct OUT connection for {}", target);
-                    return Ok(stream);
+                    return Ok(ProxyStream::from_quic(stream));
                 }
             }
         }
@@ -247,7 +257,18 @@ impl InNode {
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
         let stream = connector.connect_tcp_with_routes(target, routes).await?;
 
-        Ok(stream)
+        Ok(ProxyStream::from_quic(stream))
+    }
+
+    /// Connect directly to target without proxy (for DIRECT routing).
+    async fn connect_direct(&self, target: &str) -> Result<ProxyStream, InNodeError> {
+        use tokio::net::TcpStream;
+
+        let tcp_stream = TcpStream::connect(target)
+            .await
+            .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
+
+        Ok(ProxyStream::from_tcp(tcp_stream))
     }
 
     /// Try to connect directly to an OUT node.
@@ -389,6 +410,8 @@ pub enum InNodeError {
     Connection(#[from] ConnectionError),
     #[error("connect error: {0}")]
     Connect(#[from] InLikeError),
+    #[error("direct connect error: {0}")]
+    DirectConnect(String),
     #[error("not connected to HUB")]
     NotConnected,
     #[error("unexpected message from HUB")]

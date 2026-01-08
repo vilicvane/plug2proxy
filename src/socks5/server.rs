@@ -6,7 +6,6 @@ use socks5_server::{
     AssociatedUdpSocket, Command, IncomingConnection, Server,
     proto::{Address, Reply},
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -89,7 +88,7 @@ async fn handle_connect(
     in_node: Arc<InNode>,
 ) -> Result<(), Socks5Error> {
     // Connect through InNode
-    let tunnel_stream = match in_node.connect(target).await {
+    let mut proxy_stream = match in_node.connect(target).await {
         Ok(stream) => stream,
         Err(e) => {
             tracing::error!("failed to connect to {}: {}", target, e);
@@ -100,8 +99,8 @@ async fn handle_connect(
         }
     };
 
-    let stream_id = tunnel_stream.id();
-    tracing::info!("connected to {} via stream {}", target, stream_id);
+    let stream_id = proxy_stream.id();
+    tracing::info!("connected to {} via stream {:?}", target, proxy_stream);
 
     // Send success reply
     let mut client = connect
@@ -109,89 +108,14 @@ async fn handle_connect(
         .await
         .map_err(|(e, _)| e)?;
 
-    // Relay data directly without adapter
-    let result = relay_bidirectional(&mut client, tunnel_stream).await;
+    // Relay data bidirectionally
+    let result = proxy_stream
+        .relay_bidirectional(&mut client)
+        .await
+        .map_err(|e| Socks5Error::IoError(std::io::Error::other(e)));
 
     tracing::debug!("stream {}: relay completed", stream_id);
     result
-}
-
-/// Relay data bidirectionally between client and tunnel stream.
-async fn relay_bidirectional<C>(client: &mut C, stream: Stream) -> Result<(), Socks5Error>
-where
-    C: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    let stream_id = stream.id();
-    let stream = Arc::new(stream);
-    let stream_read = Arc::clone(&stream);
-
-    let mut client_buf = vec![0u8; 16384];
-    let mut stream_buf = vec![0u8; 16384];
-
-    let mut client_closed = false;
-    let mut stream_closed = false;
-
-    loop {
-        tokio::select! {
-            // Client -> Stream: read from client
-            result = client.read(&mut client_buf), if !client_closed => {
-                match result {
-                    Ok(0) => {
-                        tracing::trace!("stream {}: client EOF", stream_id);
-                        let _ = stream.close().await; // Send FIN to peer
-                        client_closed = true;
-                    }
-                    Ok(n) => {
-                        tracing::trace!("stream {}: client -> tunnel {} bytes", stream_id, n);
-                        if let Err(e) = stream.send(&client_buf[..n]).await {
-                            tracing::debug!("stream {}: tunnel send error: {}", stream_id, e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("stream {}: client read error: {}", stream_id, e);
-                        break;
-                    }
-                }
-            }
-
-            // Stream -> Client: wait for data using proper async notification
-            result = stream_read.recv_wait(&mut stream_buf), if !stream_closed => {
-                match result {
-                    Ok((0, true)) => {
-                        tracing::trace!("stream {}: tunnel EOF", stream_id);
-                        let _ = client.shutdown().await;
-                        stream_closed = true;
-                    }
-                    Ok((n, fin)) => {
-                        tracing::trace!("stream {}: tunnel -> client {} bytes", stream_id, n);
-                        if let Err(e) = client.write_all(&stream_buf[..n]).await {
-                            tracing::debug!("stream {}: client write error: {}", stream_id, e);
-                            break;
-                        }
-                        if fin {
-                            tracing::trace!("stream {}: tunnel FIN", stream_id);
-                            let _ = client.shutdown().await;
-                            stream_closed = true;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("stream {}: tunnel recv error: {}", stream_id, e);
-                        break;
-                    }
-                }
-            }
-        }
-
-        if client_closed && stream_closed {
-            break;
-        }
-    }
-
-    // Close stream with FIN to properly return stream credits
-    let _ = stream.close().await;
-
-    Ok(())
 }
 
 /// Handle UDP ASSOCIATE command.

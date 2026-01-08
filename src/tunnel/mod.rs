@@ -1,5 +1,6 @@
 mod connection;
 mod frame;
+mod proxy_stream;
 mod transport;
 
 mod client;
@@ -13,6 +14,7 @@ mod tests;
 
 pub use connection::*;
 pub use frame::*;
+pub use proxy_stream::*;
 pub use transport::*;
 
 pub use client::*;
