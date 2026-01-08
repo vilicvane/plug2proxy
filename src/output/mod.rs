@@ -29,6 +29,7 @@ pub struct DirectOutput;
 impl Output for DirectOutput {
     async fn connect(&self, target: &str) -> Result<TcpStream, OutputError> {
         let stream = TcpStream::connect(target).await?;
+        stream.set_nodelay(true)?;
         Ok(stream)
     }
 }

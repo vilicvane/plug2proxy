@@ -73,7 +73,10 @@ async fn handle_connect(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Connect directly to target
     let target_stream = match TcpStream::connect(target).await {
-        Ok(s) => s,
+        Ok(s) => {
+            s.set_nodelay(true)?;
+            s
+        }
         Err(e) => {
             tracing::error!("failed to connect to {}: {}", target, e);
             let _ = connect

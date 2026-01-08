@@ -268,6 +268,10 @@ impl InNode {
             .await
             .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
 
+        tcp_stream
+            .set_nodelay(true)
+            .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
+
         Ok(ProxyStream::from_tcp(tcp_stream))
     }
 

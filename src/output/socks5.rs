@@ -34,6 +34,7 @@ impl Output for Socks5Output {
     async fn connect(&self, target: &str) -> Result<TcpStream, OutputError> {
         // Connect to SOCKS5 proxy
         let mut stream = TcpStream::connect(self.proxy_addr).await?;
+        stream.set_nodelay(true)?;
 
         // Parse target
         let (host, port) = parse_target(target)?;

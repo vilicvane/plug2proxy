@@ -568,6 +568,7 @@ impl Hub {
         };
 
         let mut target_stream = TcpStream::connect(&target).await?;
+        target_stream.set_nodelay(true)?;
         tracing::info!("✅ HUB EXIT: Connected to {} directly from HUB", target);
 
         // Relay data between tunnel stream and target

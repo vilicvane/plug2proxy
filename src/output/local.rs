@@ -63,10 +63,12 @@ impl Output for LocalOutput {
                 return Err(e.into());
             }
 
+            stream.set_nodelay(true)?;
             Ok(stream)
         } else {
             // No bind address, just connect directly
             let stream = TcpStream::connect(target).await?;
+            stream.set_nodelay(true)?;
             Ok(stream)
         }
     }
