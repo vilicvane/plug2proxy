@@ -91,6 +91,10 @@ pub struct InConfig {
     /// If empty, no direct connections are made (all traffic goes through HUB).
     #[serde(default)]
     pub direct: OneOrMany<String>,
+    /// Traffic mark (SO_MARK) for all outgoing packets (TCP and UDP).
+    /// Used for TPROXY interception. Set to 0 to disable marking.
+    #[serde(default)]
+    pub mark: Option<u32>,
     /// Fake-IP DNS configuration.
     /// Can be just an address string or a struct.
     /// Uses `fakeip.db` as the database file (convention).
@@ -232,6 +236,7 @@ impl Default for InConfig {
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
             direct: OneOrMany::default(),
+            mark: None,
             fake_ip: None,
             socks5: Some(Socks5Config::default()),
         }

@@ -69,7 +69,7 @@ async fn test_in_out_connect_to_hub() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect IN
-    let mut in_node = InNode::new(test_client_config(), vec![], None);
+    let mut in_node = InNode::new(test_client_config(), vec![], None, None);
     in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected");
 
@@ -128,7 +128,7 @@ async fn test_full_proxy_flow() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect IN
-    let mut in_node = InNode::new(test_client_config(), vec![], None);
+    let mut in_node = InNode::new(test_client_config(), vec![], None, None);
     in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected to HUB");
 
@@ -265,7 +265,7 @@ async fn test_multi_out_with_routing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Connect IN
-    let mut in_node = InNode::new(test_client_config(), vec![], None);
+    let mut in_node = InNode::new(test_client_config(), vec![], None, None);
     in_node.connect_hub(hub_addr, 1).await.unwrap();
     tracing::info!("IN connected to HUB");
 

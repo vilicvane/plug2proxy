@@ -61,9 +61,16 @@ impl Outbound {
         channel_rx: ChannelReceiver,
         channel_tx: ChannelSender,
         mappings: NatMappingTable,
+        mark: Option<u32>,
     ) -> Result<Self, OutboundError> {
         // Bind to any available address (0.0.0.0:0)
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
+
+        // Apply traffic mark if configured
+        if let Some(mark) = mark {
+            set_socket_mark(&socket, mark)?;
+        }
+
         let local_addr = socket.local_addr()?;
         tracing::info!(addr = %local_addr, "outbound socket bound");
         Ok(Self::new(socket, channel_rx, channel_tx, mappings))
@@ -75,8 +82,15 @@ impl Outbound {
         channel_rx: ChannelReceiver,
         channel_tx: ChannelSender,
         mappings: NatMappingTable,
+        mark: Option<u32>,
     ) -> Result<Self, OutboundError> {
         let socket = UdpSocket::bind(addr).await?;
+
+        // Apply traffic mark if configured
+        if let Some(mark) = mark {
+            set_socket_mark(&socket, mark)?;
+        }
+
         tracing::info!(addr = %addr, "outbound socket bound");
         Ok(Self::new(socket, channel_rx, channel_tx, mappings))
     }
@@ -108,8 +122,13 @@ impl Outbound {
 
         // Task: receive from channel, forward to destinations
         let forward_task = tokio::spawn(async move {
-            Self::run_forward_loop(recv_socket, channel_rx, recv_mappings, forward_reverse_index)
-                .await
+            Self::run_forward_loop(
+                recv_socket,
+                channel_rx,
+                recv_mappings,
+                forward_reverse_index,
+            )
+            .await
         });
 
         // Task: receive from destinations, send back to channel
@@ -118,9 +137,8 @@ impl Outbound {
         });
 
         // Task: periodic cleanup of expired mappings
-        let cleanup_task = tokio::spawn(async move {
-            Self::run_cleanup_loop(cleanup_mappings).await
-        });
+        let cleanup_task =
+            tokio::spawn(async move { Self::run_cleanup_loop(cleanup_mappings).await });
 
         tokio::select! {
             result = forward_task => {
@@ -216,7 +234,8 @@ impl Outbound {
             };
 
             if let Some(internal_addr) = internal_addr {
-                let response = Datagram::new(src, internal_addr, Bytes::copy_from_slice(&buf[..len]));
+                let response =
+                    Datagram::new(src, internal_addr, Bytes::copy_from_slice(&buf[..len]));
 
                 tracing::trace!(
                     src = %src,
@@ -263,8 +282,13 @@ pub struct OutboundForwarder {
 impl OutboundForwarder {
     /// Run the forward loop.
     pub async fn run(self) -> Result<(), OutboundError> {
-        Outbound::run_forward_loop(self.socket, self.channel_rx, self.mappings, self.reverse_index)
-            .await
+        Outbound::run_forward_loop(
+            self.socket,
+            self.channel_rx,
+            self.mappings,
+            self.reverse_index,
+        )
+        .await
     }
 
     /// Receive the next datagram from the channel.
@@ -336,6 +360,36 @@ impl OutboundResponder {
         let mut index = self.reverse_index.write().await;
         index.insert(remote_addr, internal_addr);
     }
+}
+
+/// Set SO_MARK on a socket (Linux-specific, for TPROXY).
+#[cfg(target_os = "linux")]
+fn set_socket_mark<T>(socket: &T, mark: u32) -> Result<(), std::io::Error>
+where
+    T: std::os::unix::io::AsRawFd,
+{
+    unsafe {
+        let ret = libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            &mark as *const u32 as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        );
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_socket_mark<T>(_socket: &T, _mark: u32) -> Result<(), std::io::Error>
+where
+    T: std::os::unix::io::AsRawFd,
+{
+    // SO_MARK is Linux-specific, no-op on other platforms
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

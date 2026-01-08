@@ -2,10 +2,13 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use bytes::Bytes;
+use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
 use crate::route::{BuiltInLabel, GeoLite2, Label, MatchContext, Router, RuleConfig};
 use crate::tunnel::{ProxyStream, Stream, Tunnel, TunnelError};
+use crate::udp_proxy::{Datagram, NatMappingTable};
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
@@ -28,8 +31,82 @@ pub struct InNode {
     /// Filter for which OUT labels to connect directly.
     /// Empty means no direct connections (all through HUB).
     direct_filter: Vec<String>,
+    /// Traffic mark (SO_MARK) for outgoing packets.
+    mark: Option<u32>,
     /// Connection to HUB.
     hub_conn: Option<HubConnection>,
+}
+
+/// UDP forwarding handler - can be either tunnel-based or direct.
+pub enum UdpForwardHandler {
+    /// Tunnel-based forwarding (through HUB/OUT).
+    Tunnel(Stream),
+    /// Direct forwarding (local UDP socket).
+    Direct(DirectUdpHandler),
+}
+
+/// Direct UDP forwarding handler (bypasses tunnel).
+pub struct DirectUdpHandler {
+    socket: Arc<UdpSocket>,
+    mappings: NatMappingTable,
+    reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>,
+}
+
+impl DirectUdpHandler {
+    /// Send a datagram to a destination.
+    pub async fn send(&self, datagram: Datagram) -> Result<(), InNodeError> {
+        // Use the mappings for full-cone NAT
+        let dest = datagram.dest;
+        let mapped_port = self
+            .mappings
+            .get_or_create(datagram.source, dest)
+            .await
+            .ok_or_else(|| {
+                InNodeError::DirectConnect("failed to allocate NAT mapping port".to_string())
+            })?;
+
+        // Construct mapped address using the socket's local IP and the mapped port
+        let local_addr = self
+            .socket
+            .local_addr()
+            .map_err(|e| InNodeError::DirectConnect(format!("failed to get local addr: {}", e)))?;
+        let mapped_addr = SocketAddr::new(local_addr.ip(), mapped_port);
+
+        // Update reverse index
+        {
+            let mut index = self.reverse_index.write().await;
+            index.insert(dest, datagram.source);
+        }
+
+        self.socket
+            .send_to(&datagram.data, mapped_addr)
+            .await
+            .map_err(|e| InNodeError::DirectConnect(format!("UDP send failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Receive a datagram from the socket.
+    pub async fn recv(&self) -> Result<Datagram, InNodeError> {
+        let mut buf = vec![0u8; 65535];
+        let (len, src) = self
+            .socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(|e| InNodeError::DirectConnect(format!("UDP recv failed: {}", e)))?;
+
+        // Look up the original client address from reverse index
+        let client_addr = {
+            let index = self.reverse_index.read().await;
+            index.get(&src).copied().unwrap_or(src)
+        };
+
+        Ok(Datagram::new(
+            client_addr,
+            src,
+            Bytes::copy_from_slice(&buf[..len]),
+        ))
+    }
 }
 
 impl InNode {
@@ -37,6 +114,7 @@ impl InNode {
         client_config: ClientConfig,
         direct_filter: Vec<String>,
         geolite2: Option<GeoLite2>,
+        mark: Option<u32>,
     ) -> Self {
         Self {
             client_config,
@@ -45,6 +123,7 @@ impl InNode {
             outs: Arc::new(RwLock::new(HashMap::new())),
             direct_out_tunnels: Arc::new(RwLock::new(HashMap::new())),
             direct_filter,
+            mark,
             hub_conn: None,
         }
     }
@@ -293,6 +372,12 @@ impl InNode {
             .await
             .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
 
+        // Apply traffic mark if configured
+        if let Some(mark) = self.mark {
+            set_socket_mark(&tcp_stream, mark)
+                .map_err(|e| InNodeError::DirectConnect(format!("failed to set SO_MARK: {}", e)))?;
+        }
+
         tcp_stream
             .set_nodelay(true)
             .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
@@ -453,13 +538,91 @@ impl InNode {
     }
 
     /// Open a UDP forwarding stream.
-    pub async fn open_udp_forward(&self) -> Result<Stream, InNodeError> {
+    /// Checks routing rules - if DIRECT, creates a local UDP socket.
+    /// Otherwise, uses tunnel forwarding.
+    pub async fn open_udp_forward(&self) -> Result<UdpForwardHandler, InNodeError> {
+        // Check routing rules for a dummy target to see if we should use DIRECT
+        // We use a placeholder target since UDP doesn't have a specific target at open time
+        let routes = self.resolve_routes("0.0.0.0:0").await;
+
+        // Check for DIRECT label first
+        for route in &routes {
+            if matches!(route.label, Label::BuiltIn(BuiltInLabel::Direct)) {
+                tracing::debug!("UDP DIRECT exit from IN");
+                return self.open_udp_forward_direct().await;
+            }
+        }
+
+        // Fall back to tunnel forwarding
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
-        // For UDP, we don't have a target to route, so use empty routes
-        // (routing will be determined by the stream content or default)
-        let stream = connector.open_udp_forward(vec![]).await?;
-        Ok(stream)
+        let stream = connector.open_udp_forward(routes).await?;
+        Ok(UdpForwardHandler::Tunnel(stream))
     }
+
+    /// Open a direct UDP forwarding handler (bypasses tunnel).
+    async fn open_udp_forward_direct(&self) -> Result<UdpForwardHandler, InNodeError> {
+        use crate::udp_proxy::NatMappingTable;
+        use std::collections::HashMap;
+        use tokio::net::UdpSocket;
+        use tokio::sync::RwLock;
+
+        // Bind a UDP socket for direct forwarding
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| InNodeError::DirectConnect(format!("failed to bind UDP socket: {}", e)))?;
+
+        // Apply traffic mark if configured
+        if let Some(mark) = self.mark {
+            set_socket_mark(&socket, mark)
+                .map_err(|e| InNodeError::DirectConnect(format!("failed to set SO_MARK: {}", e)))?;
+        }
+
+        let local_addr = socket
+            .local_addr()
+            .map_err(|e| InNodeError::DirectConnect(format!("failed to get local addr: {}", e)))?;
+        tracing::info!("Direct UDP socket bound to {}", local_addr);
+
+        let socket = Arc::new(socket);
+        let mappings = NatMappingTable::default();
+        let reverse_index: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        Ok(UdpForwardHandler::Direct(DirectUdpHandler {
+            socket,
+            mappings,
+            reverse_index,
+        }))
+    }
+}
+
+/// Set SO_MARK on a socket (Linux-specific, for TPROXY).
+#[cfg(target_os = "linux")]
+fn set_socket_mark<T>(socket: &T, mark: u32) -> Result<(), std::io::Error>
+where
+    T: std::os::unix::io::AsRawFd,
+{
+    unsafe {
+        let ret = libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            &mark as *const u32 as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        );
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_socket_mark<T>(_socket: &T, _mark: u32) -> Result<(), std::io::Error>
+where
+    T: std::os::unix::io::AsRawFd,
+{
+    // SO_MARK is Linux-specific, no-op on other platforms
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

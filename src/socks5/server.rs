@@ -214,25 +214,42 @@ async fn handle_udp_associate(
     Ok(())
 }
 
-/// Run the UDP relay between SOCKS5 client and tunnel.
+/// Run the UDP relay between SOCKS5 client and tunnel/direct.
 async fn run_udp_relay(
     socket: AssociatedUdpSocket,
     in_node: Arc<InNode>,
 ) -> Result<(), Socks5Error> {
-    // Open tunnel stream for UDP forwarding
-    let tunnel_stream = match in_node.open_udp_forward().await {
-        Ok(stream) => Arc::new(stream),
+    use crate::node::UdpForwardHandler;
+
+    // Open UDP forwarding handler (tunnel or direct)
+    let udp_handler = match in_node.open_udp_forward().await {
+        Ok(handler) => handler,
         Err(e) => {
-            tracing::error!("failed to open UDP tunnel stream: {}", e);
+            tracing::error!("failed to open UDP forward handler: {}", e);
             return Err(Socks5Error::ConnectFailed(e.into()));
         }
     };
 
-    tracing::info!(
-        "UDP tunnel stream {} opened for forwarding",
-        tunnel_stream.id()
-    );
+    match udp_handler {
+        UdpForwardHandler::Tunnel(tunnel_stream) => {
+            tracing::info!(
+                "UDP tunnel stream {} opened for forwarding",
+                tunnel_stream.id()
+            );
+            run_udp_relay_tunnel(socket, Arc::new(tunnel_stream)).await
+        }
+        UdpForwardHandler::Direct(direct_handler) => {
+            tracing::info!("UDP direct handler opened for forwarding");
+            run_udp_relay_direct(socket, direct_handler).await
+        }
+    }
+}
 
+/// Run UDP relay through tunnel.
+async fn run_udp_relay_tunnel(
+    socket: AssociatedUdpSocket,
+    tunnel_stream: Arc<crate::tunnel::Stream>,
+) -> Result<(), Socks5Error> {
     let socket = Arc::new(socket);
 
     // Channel to signal tunnel data availability
@@ -387,6 +404,98 @@ async fn run_udp_relay(
     // Close tunnel stream with FIN to properly return stream credits
     let _ = tunnel_stream.close().await;
     tracing::debug!("UDP relay: tunnel stream closed");
+
+    Ok(())
+}
+
+/// Run UDP relay directly (bypasses tunnel).
+async fn run_udp_relay_direct(
+    socket: AssociatedUdpSocket,
+    direct_handler: crate::node::DirectUdpHandler,
+) -> Result<(), Socks5Error> {
+    use std::sync::Arc;
+
+    let socket = Arc::new(socket);
+    let direct_handler = Arc::new(direct_handler);
+
+    tracing::info!("UDP relay: starting direct main loop");
+
+    loop {
+        tokio::select! {
+            // Client -> Direct
+            result = socket.recv_from() => {
+                match result {
+                    Ok((data, header, client_addr)) => {
+                        let data: Bytes = data;
+                        let dest_addr = match header.address {
+                            Address::SocketAddress(addr) => addr,
+                            Address::DomainAddress(domain, port) => {
+                                let domain_str = String::from_utf8_lossy(&domain);
+                                tracing::warn!(
+                                    "UDP domain addresses not supported: {}:{}",
+                                    domain_str,
+                                    port
+                                );
+                                continue;
+                            }
+                        };
+
+                        tracing::info!(
+                            "📤 UDP SOCKS5 DIRECT: {} -> {} ({} bytes)",
+                            client_addr,
+                            dest_addr,
+                            data.len()
+                        );
+
+                        // Send directly via handler
+                        let datagram = Datagram::new(client_addr, dest_addr, data);
+                        if let Err(e) = direct_handler.send(datagram).await {
+                            tracing::error!("UDP direct send failed: {}", e);
+                            break;
+                        }
+                    }
+                    Err((e, _)) => {
+                        tracing::error!("UDP recv error: {:?}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Direct -> Client
+            result = direct_handler.recv() => {
+                match result {
+                    Ok(datagram) => {
+                        tracing::info!(
+                            "📥 UDP SOCKS5 DIRECT: {} <- {} ({} bytes)",
+                            datagram.dest,
+                            datagram.source,
+                            datagram.data.len()
+                        );
+
+                        let header = socks5_server::proto::UdpHeader {
+                            frag: 0,
+                            address: Address::SocketAddress(datagram.source),
+                        };
+
+                        if let Err(e) = socket
+                            .send_to(&datagram.data, &header, datagram.dest)
+                            .await
+                        {
+                            tracing::warn!(
+                                "failed to send UDP response to {}: {}",
+                                datagram.dest,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("UDP direct recv failed: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }

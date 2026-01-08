@@ -290,6 +290,7 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
             client_config.clone(),
             direct_filter.clone(),
             geolite2.clone(),
+            config.mark,
         );
 
         match in_node.connect_hub(hub_addr, connections).await {
