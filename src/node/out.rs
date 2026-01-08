@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::output::{OutputConfig, OutputMap};
+use crate::exit::{ExitConfig, ExitMap};
 use crate::tunnel::{QuicConfig, Stream, Tunnel, TunnelError};
 use crate::udp_proxy::Datagram;
 
@@ -26,8 +26,8 @@ pub struct DirectServerConfig {
 pub struct OutNode {
     /// Labels for level 1 routing.
     labels: Vec<String>,
-    /// Output map for level 2 routing.
-    output_map: Arc<OutputMap>,
+    /// Exit map for level 2 routing.
+    exit_map: Arc<ExitMap>,
     /// Client TLS configuration (for connecting to HUB).
     client_config: ClientConfig,
     /// Server configuration for direct IN connections.
@@ -39,15 +39,11 @@ pub struct OutNode {
 }
 
 impl OutNode {
-    pub fn new(
-        labels: Vec<String>,
-        outputs: Vec<OutputConfig>,
-        client_config: ClientConfig,
-    ) -> Self {
-        let output_map = Arc::new(OutputMap::from_configs(outputs));
+    pub fn new(labels: Vec<String>, exits: Vec<ExitConfig>, client_config: ClientConfig) -> Self {
+        let exit_map = Arc::new(ExitMap::from_configs(exits));
         Self {
             labels,
-            output_map,
+            exit_map,
             client_config,
             direct_server_config: None,
             direct_addr: None,
@@ -117,17 +113,17 @@ impl OutNode {
 
     /// Run the OUT node (accept forwarded streams from HUB and direct IN connections).
     pub async fn run(&self) -> Result<(), OutNodeError> {
-        let output_map = Arc::clone(&self.output_map);
+        let exit_map = Arc::clone(&self.exit_map);
 
         // Start direct listener if configured
         if let (Some(config), Some(addr)) = (&self.direct_server_config, self.direct_addr) {
-            let direct_output_map = Arc::clone(&output_map);
+            let direct_exit_map = Arc::clone(&exit_map);
             let pem_path = config.pem_path.clone();
             let ca_pem_path = config.ca_pem_path.clone();
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    Self::run_direct_listener(addr, pem_path, ca_pem_path, direct_output_map).await
+                    Self::run_direct_listener(addr, pem_path, ca_pem_path, direct_exit_map).await
                 {
                     tracing::error!("direct listener error: {}", e);
                 }
@@ -135,11 +131,11 @@ impl OutNode {
         }
 
         // Run HUB connection handler
-        self.run_hub_handler(output_map).await
+        self.run_hub_handler(exit_map).await
     }
 
     /// Handle forwarded streams from HUB.
-    async fn run_hub_handler(&self, output_map: Arc<OutputMap>) -> Result<(), OutNodeError> {
+    async fn run_hub_handler(&self, exit_map: Arc<ExitMap>) -> Result<(), OutNodeError> {
         use std::collections::HashSet;
 
         let conn = self.hub_conn.as_ref().ok_or(OutNodeError::NotConnected)?;
@@ -162,9 +158,9 @@ impl OutNode {
                     handled_streams.insert(stream_id);
                     tracing::debug!("accepting forward stream from HUB {}", stream_id);
 
-                    let output_map = Arc::clone(&output_map);
+                    let exit_map = Arc::clone(&exit_map);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_forward_stream(stream, output_map).await {
+                        if let Err(e) = Self::handle_forward_stream(stream, exit_map).await {
                             tracing::error!("forward stream {} error: {}", stream_id, e);
                         }
                     });
@@ -182,7 +178,7 @@ impl OutNode {
         listen_addr: SocketAddr,
         pem_path: String,
         ca_pem_path: Option<String>,
-        output_map: Arc<OutputMap>,
+        exit_map: Arc<ExitMap>,
     ) -> Result<(), OutNodeError> {
         use crate::tunnel::FrameCodec;
         use futures::StreamExt;
@@ -202,7 +198,7 @@ impl OutNode {
 
             let pem_path = pem_path.clone();
             let ca_pem_path = ca_pem_path.clone();
-            let output_map = Arc::clone(&output_map);
+            let exit_map = Arc::clone(&exit_map);
 
             tokio::spawn(async move {
                 // Read the first frame
@@ -226,7 +222,7 @@ impl OutNode {
                     first_frame,
                     &pem_path,
                     ca_pem_path.as_deref(),
-                    output_map,
+                    exit_map,
                 )
                 .await
                 {
@@ -242,7 +238,7 @@ impl OutNode {
         first_frame: bytes::Bytes,
         pem_path: &str,
         ca_pem_path: Option<&str>,
-        output_map: Arc<OutputMap>,
+        exit_map: Arc<ExitMap>,
     ) -> Result<(), OutNodeError> {
         use std::collections::HashSet;
 
@@ -286,9 +282,9 @@ impl OutNode {
                     handled_streams.insert(stream_id);
                     tracing::debug!("accepting direct stream {}", stream_id);
 
-                    let output_map = Arc::clone(&output_map);
+                    let exit_map = Arc::clone(&exit_map);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_forward_stream(stream, output_map).await {
+                        if let Err(e) = Self::handle_forward_stream(stream, exit_map).await {
                             tracing::error!("direct stream {} error: {}", stream_id, e);
                         }
                     });
@@ -305,7 +301,7 @@ impl OutNode {
 
     async fn handle_forward_stream(
         stream: Stream,
-        output_map: Arc<OutputMap>,
+        exit_map: Arc<ExitMap>,
     ) -> Result<(), OutNodeError> {
         use super::message::ForwardRequest;
 
@@ -314,7 +310,7 @@ impl OutNode {
 
         match request {
             ForwardRequest::Tcp(tcp_req) => {
-                Self::handle_tcp_forward(stream, output_map, tcp_req).await
+                Self::handle_tcp_forward(stream, exit_map, tcp_req).await
             }
             ForwardRequest::Udp(_udp_req) => {
                 tracing::info!(
@@ -328,7 +324,7 @@ impl OutNode {
 
     async fn handle_tcp_forward(
         stream: Stream,
-        output_map: Arc<OutputMap>,
+        exit_map: Arc<ExitMap>,
         request: super::message::TcpForwardRequest,
     ) -> Result<(), OutNodeError> {
         // Extract tag from the first route entry (second-level routing)
@@ -348,11 +344,11 @@ impl OutNode {
             tag.map(|t| format!(" [tag: {}]", t)).unwrap_or_default()
         );
 
-        // Get output based on tag (second-level routing)
-        let output = output_map.get(tag);
+        // Get exit based on tag (second-level routing)
+        let exit = exit_map.get(tag);
 
-        // Connect to the actual target through the selected output
-        let mut target_stream = output
+        // Connect to the actual target through the selected exit
+        let mut target_stream = exit
             .connect(connect_target)
             .await
             .map_err(|e| OutNodeError::Io(std::io::Error::other(e.to_string())))?;
@@ -360,7 +356,7 @@ impl OutNode {
         tracing::info!(
             "✅ OUT EXIT: Connected to {} from OUT node{}",
             connect_target,
-            tag.map(|t| format!(" via output '{}'", t))
+            tag.map(|t| format!(" via exit '{}'", t))
                 .unwrap_or_else(|| " (direct)".to_string())
         );
 

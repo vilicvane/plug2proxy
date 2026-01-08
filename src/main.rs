@@ -173,11 +173,7 @@ async fn run_out(config: OutConfig) -> anyhow::Result<()> {
 
     // Auto-reconnect loop
     loop {
-        let mut out = OutNode::new(
-            labels.clone(),
-            config.outputs.clone(),
-            client_config.clone(),
-        );
+        let mut out = OutNode::new(labels.clone(), config.exits.clone(), client_config.clone());
 
         // Configure direct listener if enabled
         if let (Some(server_config), Some(listen_addr)) =

@@ -10,8 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use plug2proxy::cert::{generate_ca, generate_node_cert};
+use plug2proxy::exit::{ExitConfig, LocalExitConfig};
 use plug2proxy::node::{ClientConfig, Hub, HubConfig, InNode, OutNode, RouteEntry};
-use plug2proxy::output::{LocalOutputConfig, OutputConfig};
 use plug2proxy::route::{
     BuiltInLabel, DomainPatternRuleConfig, DomainRuleConfig, FallbackRuleConfig, Label, OneOrMany,
     RuleConfig,
@@ -511,7 +511,7 @@ struct SecondLevelTestNetwork {
 
 impl SecondLevelTestNetwork {
     /// Create a test network with an OUT node that has custom outputs.
-    async fn new(routing_rules: Vec<RuleConfig>, outputs: Vec<OutputConfig>) -> Self {
+    async fn new(routing_rules: Vec<RuleConfig>, outputs: Vec<ExitConfig>) -> Self {
         let _ = tracing_subscriber::fmt::try_init();
         ensure_test_cert();
 
@@ -610,11 +610,11 @@ async fn test_second_level_routing_tags_passed_to_out() {
     // Define outputs for the OUT node (second-level routing)
     // In a real scenario, these would use different bind IPs or proxy chains
     let outputs = vec![
-        OutputConfig::Local(LocalOutputConfig {
+        ExitConfig::Local(LocalExitConfig {
             tag: "fast-exit".to_string(),
             bind: None, // Direct connection (could bind to specific interface)
         }),
-        OutputConfig::Local(LocalOutputConfig {
+        ExitConfig::Local(LocalExitConfig {
             tag: "slow-exit".to_string(),
             bind: None, // Direct connection (could bind to different interface)
         }),
@@ -660,7 +660,7 @@ async fn test_second_level_routing_tag_preserved_e2e() {
     })];
 
     // Create OUT with the matching output
-    let outputs = vec![OutputConfig::Local(LocalOutputConfig {
+    let outputs = vec![ExitConfig::Local(LocalExitConfig {
         tag: "special-output".to_string(),
         bind: None,
     })];
@@ -762,11 +762,11 @@ async fn test_second_level_routing_multiple_outputs() {
 
     // Multiple outputs at OUT node
     let outputs = vec![
-        OutputConfig::Local(LocalOutputConfig {
+        ExitConfig::Local(LocalExitConfig {
             tag: "output1".to_string(),
             bind: None,
         }),
-        OutputConfig::Local(LocalOutputConfig {
+        ExitConfig::Local(LocalExitConfig {
             tag: "output2".to_string(),
             bind: None,
         }),

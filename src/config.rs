@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 
-use crate::output::OutputConfig;
+use crate::exit::ExitConfig;
 use crate::route::{OneOrMany, RuleConfig};
 
 /// Top-level config structure.
@@ -74,10 +74,10 @@ pub struct OutConfig {
     /// Listen address for direct IN→OUT connections (bypassing HUB relay).
     /// If set, IN nodes can connect directly to this OUT.
     pub listen: Option<SocketAddr>,
-    /// Output configurations for level 2 routing.
-    /// Each output has a tag that can be selected by routing rules.
+    /// Exit configurations for level 2 routing.
+    /// Each exit has a tag that can be selected by routing rules.
     #[serde(default)]
-    pub outputs: Vec<OutputConfig>,
+    pub exits: Vec<ExitConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,7 +221,7 @@ impl Default for OutConfig {
             hub: HubConnectionConfig::Address("127.0.0.1:8765".parse().unwrap()),
             connections: Some(4),
             listen: None,
-            outputs: vec![],
+            exits: vec![],
         }
     }
 }

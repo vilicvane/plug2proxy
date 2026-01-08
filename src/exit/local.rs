@@ -1,4 +1,4 @@
-//! Local output - connects with a specific bind address or interface.
+//! Local exit - connects with a specific bind address or interface.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -6,15 +6,15 @@ use serde::{Deserialize, Serialize};
 use socket2::{Domain, Socket, Type};
 use tokio::net::TcpStream;
 
-use super::{Output, OutputError};
+use super::{Exit, ExitError};
 
-/// Local output that binds to a specific address or interface.
-pub struct LocalOutput {
+/// Local exit that binds to a specific address or interface.
+pub struct LocalExit {
     /// Bind address (IP or interface resolved to IP).
     bind_addr: Option<IpAddr>,
 }
 
-impl LocalOutput {
+impl LocalExit {
     pub fn new(bind: Option<LocalIpOrInterface>) -> Self {
         let bind_addr = bind.and_then(|b| b.resolve());
         Self { bind_addr }
@@ -22,8 +22,8 @@ impl LocalOutput {
 }
 
 #[async_trait::async_trait]
-impl Output for LocalOutput {
-    async fn connect(&self, target: &str) -> Result<TcpStream, OutputError> {
+impl Exit for LocalExit {
+    async fn connect(&self, target: &str) -> Result<TcpStream, ExitError> {
         // Parse target to determine if IPv4 or IPv6
         let target_addr: SocketAddr = resolve_target(target).await?;
 
@@ -142,7 +142,7 @@ fn resolve_interface_ip(iface: &str) -> Option<IpAddr> {
 }
 
 /// Resolve target string to SocketAddr (handles both IP:port and domain:port).
-async fn resolve_target(target: &str) -> Result<SocketAddr, OutputError> {
+async fn resolve_target(target: &str) -> Result<SocketAddr, ExitError> {
     // Try parsing as socket address first
     if let Ok(addr) = target.parse::<SocketAddr>() {
         return Ok(addr);
@@ -151,11 +151,11 @@ async fn resolve_target(target: &str) -> Result<SocketAddr, OutputError> {
     // Try DNS resolution
     let addrs: Vec<_> = tokio::net::lookup_host(target)
         .await
-        .map_err(|e| OutputError::InvalidTarget(format!("{}: {}", target, e)))?
+        .map_err(|e| ExitError::InvalidTarget(format!("{}: {}", target, e)))?
         .collect();
 
     addrs
         .into_iter()
         .next()
-        .ok_or_else(|| OutputError::InvalidTarget(format!("no addresses found for {}", target)))
+        .ok_or_else(|| ExitError::InvalidTarget(format!("no addresses found for {}", target)))
 }

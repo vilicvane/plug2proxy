@@ -1,9 +1,9 @@
 pub mod cert;
 pub mod config;
+pub mod exit;
 pub mod fake_ip;
 pub mod geoip_updater;
 pub mod node;
-pub mod output;
 pub mod route;
 pub mod socks5;
 pub mod tunnel;

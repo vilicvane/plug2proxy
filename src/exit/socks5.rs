@@ -1,21 +1,21 @@
-//! SOCKS5 output - routes traffic through a SOCKS5 proxy.
+//! SOCKS5 exit - routes traffic through a SOCKS5 proxy.
 
 use std::net::SocketAddr;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::{Output, OutputError};
+use super::{Exit, ExitError};
 
-/// SOCKS5 output that routes through another SOCKS5 proxy.
-pub struct Socks5Output {
+/// SOCKS5 exit that routes through another SOCKS5 proxy.
+pub struct Socks5Exit {
     /// SOCKS5 proxy address.
     proxy_addr: SocketAddr,
     /// Optional authentication.
     auth: Option<(String, String)>,
 }
 
-impl Socks5Output {
+impl Socks5Exit {
     pub fn new(proxy_addr: SocketAddr) -> Self {
         Self {
             proxy_addr,
@@ -30,8 +30,8 @@ impl Socks5Output {
 }
 
 #[async_trait::async_trait]
-impl Output for Socks5Output {
-    async fn connect(&self, target: &str) -> Result<TcpStream, OutputError> {
+impl Exit for Socks5Exit {
+    async fn connect(&self, target: &str) -> Result<TcpStream, ExitError> {
         // Connect to SOCKS5 proxy
         let mut stream = TcpStream::connect(self.proxy_addr).await?;
         stream.set_nodelay(true)?;
@@ -53,7 +53,7 @@ impl Output for Socks5Output {
         stream.read_exact(&mut buf).await?;
 
         if buf[0] != 0x05 {
-            return Err(OutputError::Socks5("invalid SOCKS version".to_string()));
+            return Err(ExitError::Socks5("invalid SOCKS version".to_string()));
         }
 
         match buf[1] {
@@ -65,7 +65,7 @@ impl Output for Socks5Output {
                 let (username, password) = self
                     .auth
                     .as_ref()
-                    .ok_or_else(|| OutputError::Socks5("auth required but not provided".to_string()))?;
+                    .ok_or_else(|| ExitError::Socks5("auth required but not provided".to_string()))?;
 
                 // Send auth request
                 let mut auth_req = vec![0x01]; // Version
@@ -80,14 +80,14 @@ impl Output for Socks5Output {
                 stream.read_exact(&mut auth_resp).await?;
 
                 if auth_resp[1] != 0x00 {
-                    return Err(OutputError::Socks5("authentication failed".to_string()));
+                    return Err(ExitError::Socks5("authentication failed".to_string()));
                 }
             }
             0xFF => {
-                return Err(OutputError::Socks5("no acceptable auth method".to_string()));
+                return Err(ExitError::Socks5("no acceptable auth method".to_string()));
             }
             _ => {
-                return Err(OutputError::Socks5(format!(
+                return Err(ExitError::Socks5(format!(
                     "unsupported auth method: {}",
                     buf[1]
                 )));
@@ -124,7 +124,9 @@ impl Output for Socks5Output {
         stream.read_exact(&mut resp_header).await?;
 
         if resp_header[0] != 0x05 {
-            return Err(OutputError::Socks5("invalid SOCKS version in response".to_string()));
+            return Err(ExitError::Socks5(
+                "invalid SOCKS version in response".to_string(),
+            ));
         }
 
         if resp_header[1] != 0x00 {
@@ -139,7 +141,7 @@ impl Output for Socks5Output {
                 0x08 => "address type not supported",
                 _ => "unknown error",
             };
-            return Err(OutputError::Socks5(error_msg.to_string()));
+            return Err(ExitError::Socks5(error_msg.to_string()));
         }
 
         // Read bound address (skip it)
@@ -162,7 +164,7 @@ impl Output for Socks5Output {
                 stream.read_exact(&mut domain).await?;
             }
             _ => {
-                return Err(OutputError::Socks5(format!(
+                return Err(ExitError::Socks5(format!(
                     "invalid address type: {}",
                     resp_header[3]
                 )));
@@ -174,7 +176,7 @@ impl Output for Socks5Output {
 }
 
 /// Parse target string into host and port.
-fn parse_target(target: &str) -> Result<(&str, u16), OutputError> {
+fn parse_target(target: &str) -> Result<(&str, u16), ExitError> {
     // Handle IPv6 addresses in brackets
     if target.starts_with('[') {
         if let Some(bracket_end) = target.find(']') {
@@ -183,11 +185,11 @@ fn parse_target(target: &str) -> Result<(&str, u16), OutputError> {
             if let Some(port_str) = rest.strip_prefix(':') {
                 let port = port_str
                     .parse()
-                    .map_err(|_| OutputError::InvalidTarget(format!("invalid port: {}", port_str)))?;
+                    .map_err(|_| ExitError::InvalidTarget(format!("invalid port: {}", port_str)))?;
                 return Ok((host, port));
             }
         }
-        return Err(OutputError::InvalidTarget(format!(
+        return Err(ExitError::InvalidTarget(format!(
             "invalid IPv6 address format: {}",
             target
         )));
@@ -199,10 +201,10 @@ fn parse_target(target: &str) -> Result<(&str, u16), OutputError> {
         let port_str = &target[colon_pos + 1..];
         let port = port_str
             .parse()
-            .map_err(|_| OutputError::InvalidTarget(format!("invalid port: {}", port_str)))?;
+            .map_err(|_| ExitError::InvalidTarget(format!("invalid port: {}", port_str)))?;
         Ok((host, port))
     } else {
-        Err(OutputError::InvalidTarget(format!(
+        Err(ExitError::InvalidTarget(format!(
             "missing port in target: {}",
             target
         )))
