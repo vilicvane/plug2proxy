@@ -165,11 +165,7 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
 
     // Auto-reconnect loop
     loop {
-        let mut out = OutNode::new(
-            config.id.clone(),
-            config.tags.clone(),
-            client_config.clone(),
-        );
+        let mut out = OutNode::new(config.tags.clone(), client_config.clone());
 
         match out.connect_hub(config.hub_addr, connection_count).await {
             Ok(()) => {
@@ -221,7 +217,7 @@ async fn run_in(config: InConfig, node_cert: Option<String>) -> anyhow::Result<(
 
     // Auto-reconnect loop
     loop {
-        let mut in_node = InNode::new(config.id.clone(), client_config.clone());
+        let mut in_node = InNode::new(client_config.clone());
 
         match in_node.connect_hub(config.hub_addr, connection_count).await {
             Ok(()) => {

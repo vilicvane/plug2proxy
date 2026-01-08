@@ -12,6 +12,11 @@ use crate::tunnel::{FrameCodec, QuicConfig, QuicError, Stream, Tunnel, TunnelErr
 use super::connection::{ConnectionError, NodeConnection};
 use super::message::{ConnectRequest, HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
 
+/// Generate a unique node ID using UUID v4.
+fn generate_node_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Configuration for HUB.
 pub struct HubConfig {
     /// Path to server PEM file (cert + key).
@@ -52,6 +57,7 @@ struct InConnection {
 
 struct OutConnection {
     id: String,
+    name: Option<String>,
     tags: Vec<String>,
     #[allow(dead_code)]
     conn: NodeConnection,
@@ -224,14 +230,25 @@ impl Hub {
         // Wait for QUIC handshake to complete
         tunnel.wait_established().await?;
 
+        // Extract the peer's Common Name from their TLS certificate
+        let peer_name = tunnel.peer_common_name().await;
+
         // Accept control connection
         let conn = NodeConnection::accept(Arc::clone(&tunnel)).await?;
 
         // Wait for registration
         let msg = conn.recv().await?;
         match msg {
-            NodeMessage::Register { role, id, tags } => {
-                tracing::info!("node registered: {} ({:?})", id, role);
+            NodeMessage::Register { role, tags } => {
+                // Generate a unique UUID for this node
+                let id = generate_node_id();
+
+                tracing::info!(
+                    "node registered: {} (name: {:?}, role: {:?})",
+                    id,
+                    peer_name,
+                    role
+                );
 
                 // Send registration ack
                 conn.send(&HubMessage::Registered).await?;
@@ -294,6 +311,7 @@ impl Hub {
                                 id.clone(),
                                 OutConnection {
                                     id: id.clone(),
+                                    name: peer_name,
                                     tags,
                                     conn,
                                     tunnel: Arc::clone(&tunnel),
@@ -867,6 +885,7 @@ impl Hub {
         outs.values()
             .map(|out| OutInfo {
                 id: out.id.clone(),
+                name: out.name.clone(),
                 tags: out.tags.clone(),
                 direct_addr: None, // TODO: populate if direct connection supported
             })

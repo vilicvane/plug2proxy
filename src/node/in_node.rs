@@ -14,7 +14,6 @@ use super::message::{HubMessage, NodeMessage, NodeRole, OutInfo, RouteRule};
 
 /// IN node - entry point for proxied traffic.
 pub struct InNode {
-    id: String,
     /// Client TLS configuration.
     client_config: ClientConfig,
     /// Routing rules (received from HUB).
@@ -26,18 +25,13 @@ pub struct InNode {
 }
 
 impl InNode {
-    pub fn new(id: String, client_config: ClientConfig) -> Self {
+    pub fn new(client_config: ClientConfig) -> Self {
         Self {
-            id,
             client_config,
             route_rules: Arc::new(RwLock::new(Vec::new())),
             outs: Arc::new(RwLock::new(HashMap::new())),
             hub_conn: None,
         }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
     }
 
     /// Connect to HUB.
@@ -60,10 +54,9 @@ impl InNode {
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;
 
-        // Register with HUB
+        // Register with HUB (HUB assigns UUID, name is from our cert's CN)
         conn.send(&NodeMessage::Register {
             role: NodeRole::In,
-            id: self.id.clone(),
             tags: vec![],
         })
         .await?;

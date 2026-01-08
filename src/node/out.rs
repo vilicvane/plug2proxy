@@ -14,7 +14,6 @@ use super::out_like::{OutLike, OutLikeError};
 
 /// OUT node - exit point for proxied traffic.
 pub struct OutNode {
-    id: String,
     tags: Vec<String>,
     /// Client TLS configuration.
     client_config: ClientConfig,
@@ -23,17 +22,12 @@ pub struct OutNode {
 }
 
 impl OutNode {
-    pub fn new(id: String, tags: Vec<String>, client_config: ClientConfig) -> Self {
+    pub fn new(tags: Vec<String>, client_config: ClientConfig) -> Self {
         Self {
-            id,
             tags,
             client_config,
             hub_conn: None,
         }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
     }
 
     pub fn tags(&self) -> &[String] {
@@ -60,10 +54,9 @@ impl OutNode {
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;
 
-        // Register with HUB
+        // Register with HUB (HUB assigns UUID, name is from our cert's CN)
         conn.send(&NodeMessage::Register {
             role: NodeRole::Out,
-            id: self.id.clone(),
             tags: self.tags.clone(),
         })
         .await?;

@@ -329,6 +329,13 @@ impl QuicConnection {
     pub fn recv_notify(&self) -> Arc<Notify> {
         Arc::clone(&self.recv_notify)
     }
+
+    /// Get the peer's certificate (DER-encoded).
+    /// Returns None if no peer certificate is available (e.g., no mTLS).
+    pub async fn peer_cert(&self) -> Option<Vec<u8>> {
+        let conn = self.inner.lock().await;
+        conn.peer_cert().map(|cert| cert.to_vec())
+    }
 }
 
 /// Generate a random connection ID.

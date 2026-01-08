@@ -11,7 +11,8 @@ use rcgen::{
     KeyUsagePurpose,
 };
 use thiserror::Error;
-use time::{Duration, OffsetDateTime};
+
+use x509_parser::prelude::*;
 
 /// Default validity period for CA certificates (99 years).
 const CA_VALIDITY_YEARS: i64 = 99;
@@ -96,9 +97,9 @@ pub fn generate_ca(common_name: &str) -> Result<GeneratedCert, CertError> {
         .push(DnType::OrganizationName, "plug2proxy");
 
     // Set validity period
-    let now = OffsetDateTime::now_utc();
+    let now = ::time::OffsetDateTime::now_utc();
     params.not_before = now;
-    params.not_after = now + Duration::days(CA_VALIDITY_YEARS * 365);
+    params.not_after = now + ::time::Duration::days(CA_VALIDITY_YEARS * 365);
 
     // Mark as CA certificate
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -151,9 +152,9 @@ pub fn generate_node_cert(
         .push(DnType::OrganizationName, "plug2proxy");
 
     // Set validity period
-    let now = OffsetDateTime::now_utc();
+    let now = ::time::OffsetDateTime::now_utc();
     params.not_before = now;
-    params.not_after = now + Duration::days(NODE_VALIDITY_YEARS * 365);
+    params.not_after = now + ::time::Duration::days(NODE_VALIDITY_YEARS * 365);
 
     // Not a CA
     params.is_ca = IsCa::NoCa;
@@ -232,6 +233,18 @@ fn split_pem(content: &str) -> Result<(String, String), CertError> {
     let key_pem = content[key_start..key_end].to_string() + "\n";
 
     Ok((cert_pem, key_pem))
+}
+
+/// Extract the Common Name (CN) from a DER-encoded X.509 certificate.
+///
+/// Returns the first CN found in the subject, or None if no CN is present.
+pub fn extract_common_name(cert_der: &[u8]) -> Option<String> {
+    let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
+    cert.subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]

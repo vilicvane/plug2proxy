@@ -610,6 +610,13 @@ impl Tunnel {
     pub async fn connection_id(&self) -> Vec<u8> {
         self.quic.source_id().await
     }
+
+    /// Get the peer's Common Name from their TLS certificate.
+    /// Returns None if no peer certificate is available (e.g., no mTLS) or if the CN cannot be extracted.
+    pub async fn peer_common_name(&self) -> Option<String> {
+        let cert_der = self.quic.peer_cert().await?;
+        crate::cert::extract_common_name(&cert_der)
+    }
 }
 
 impl Drop for Tunnel {
