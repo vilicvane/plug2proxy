@@ -102,7 +102,7 @@ fn generate_node_cert_for_distribution(node_name: &str) -> anyhow::Result<()> {
 }
 
 async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
-    tracing::info!("Starting HUB node: {}", config.id);
+    tracing::info!("Starting HUB node");
     tracing::info!("Listening on: {}", config.listen);
 
     // Ensure certs exist (generate if needed)
@@ -129,8 +129,7 @@ async fn run_hub(config: HubConfig) -> anyhow::Result<()> {
 }
 
 async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result<()> {
-    tracing::info!("Starting OUT node: {}", config.id);
-    tracing::info!("Tags: {:?}", config.tags);
+    tracing::info!("Starting OUT node with tags: {:?}", config.tags);
     tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
     let connection_count = config.connection_count.unwrap_or(1);
@@ -162,6 +161,7 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
             config.tags.clone(),
             config.routing.rules.clone(),
             config.routing.priority,
+            config.routing.outputs.clone(),
             client_config.clone(),
         );
 
@@ -187,7 +187,7 @@ async fn run_out(config: OutConfig, node_cert: Option<String>) -> anyhow::Result
 }
 
 async fn run_in(config: InConfig, node_cert: Option<String>) -> anyhow::Result<()> {
-    tracing::info!("Starting IN node: {}", config.id);
+    tracing::info!("Starting IN node");
     tracing::info!("Connecting to HUB: {}", config.hub_addr);
 
     let connection_count = config.connection_count.unwrap_or(1);

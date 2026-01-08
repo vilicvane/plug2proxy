@@ -331,13 +331,22 @@ impl Hub {
                         }
 
                         {
+                            // Build tags: configured tags + CN (if present) as automatic tag
+                            let mut all_tags = tags;
+                            if let Some(ref cn) = peer_name {
+                                // Add CN as automatic tag if not already present
+                                if !all_tags.contains(cn) {
+                                    all_tags.push(cn.clone());
+                                }
+                            }
+
                             let mut outs = self.outs.write().await;
                             outs.insert(
                                 id.clone(),
                                 OutConnection {
                                     id: id.clone(),
                                     name: peer_name,
-                                    tags,
+                                    tags: all_tags,
                                     conn,
                                     tunnel: Arc::clone(&tunnel),
                                 },
@@ -412,7 +421,11 @@ impl Hub {
                     tracing::debug!("accepting new data stream {}", stream_id);
 
                     let hub_outs = Arc::clone(&self.outs);
-                    let hub_tags = self.config.tags.clone();
+                    // HUB always has "hub" as a fixed tag, plus any configured tags
+                    let mut hub_tags = self.config.tags.clone();
+                    if !hub_tags.contains(&"hub".to_string()) {
+                        hub_tags.push("hub".to_string());
+                    }
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_data_stream(stream, hub_outs, hub_tags).await {
                             tracing::error!("data stream {} error: {}", stream_id, e);

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 
+use crate::output::OutputConfig;
 use crate::route::RuleConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,7 +23,8 @@ impl Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubConfig {
-    pub id: String,
+    /// Tags this HUB provides when acting as an OUT.
+    #[serde(default)]
     pub tags: Vec<String>,
     pub listen: SocketAddr,
     pub connection_count: Option<usize>,
@@ -33,7 +35,7 @@ pub struct HubConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutConfig {
-    pub id: String,
+    /// Tags this OUT node provides for routing.
     pub tags: Vec<String>,
     pub hub_addr: SocketAddr,
     pub hub_host: Option<String>,
@@ -45,7 +47,6 @@ pub struct OutConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InConfig {
-    pub id: String,
     pub hub_addr: SocketAddr,
     pub hub_host: Option<String>,
     pub connection_count: Option<usize>,
@@ -81,13 +82,16 @@ pub struct OutRoutingConfig {
     /// Routing rules this OUT provides.
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+    /// Output configurations for second-level routing.
+    /// Each output has a tag that can be selected by routing rules.
+    #[serde(default)]
+    pub outputs: Vec<OutputConfig>,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
-            id: "hub".to_string(),
-            tags: vec!["default".to_string()],
+            tags: vec![],
             listen: "127.0.0.1:8765".parse().unwrap(),
             connection_count: Some(4),
             routing: RoutingConfig::default(),
@@ -98,7 +102,6 @@ impl Default for HubConfig {
 impl Default for OutConfig {
     fn default() -> Self {
         Self {
-            id: "out".to_string(),
             tags: vec!["default".to_string()],
             hub_addr: "127.0.0.1:8765".parse().unwrap(),
             hub_host: Some("localhost".to_string()),
@@ -111,7 +114,6 @@ impl Default for OutConfig {
 impl Default for InConfig {
     fn default() -> Self {
         Self {
-            id: "in".to_string(),
             hub_addr: "127.0.0.1:8765".parse().unwrap(),
             hub_host: Some("localhost".to_string()),
             connection_count: Some(4),

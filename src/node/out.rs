@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
+use crate::output::{OutputConfig, OutputMap};
 use crate::route::RuleConfig;
 use crate::tunnel::{Stream, Tunnel, TunnelError};
 use crate::udp_proxy::Datagram;
@@ -20,6 +21,8 @@ pub struct OutNode {
     routing_rules: Vec<RuleConfig>,
     /// Priority for routing rules.
     routing_priority: i64,
+    /// Output map for second-level routing.
+    output_map: Arc<OutputMap>,
     /// Client TLS configuration.
     client_config: ClientConfig,
     /// Connection to HUB.
@@ -31,12 +34,15 @@ impl OutNode {
         tags: Vec<String>,
         routing_rules: Vec<RuleConfig>,
         routing_priority: i64,
+        outputs: Vec<OutputConfig>,
         client_config: ClientConfig,
     ) -> Self {
+        let output_map = Arc::new(OutputMap::from_configs(outputs));
         Self {
             tags,
             routing_rules,
             routing_priority,
+            output_map,
             client_config,
             hub_conn: None,
         }
@@ -94,6 +100,7 @@ impl OutNode {
 
         let conn = self.hub_conn.as_ref().ok_or(OutNodeError::NotConnected)?;
         let tunnel = conn.tunnel();
+        let output_map = Arc::clone(&self.output_map);
 
         // Track streams we've already accepted to avoid re-accepting
         let mut handled_streams: HashSet<u64> = HashSet::new();
@@ -112,8 +119,9 @@ impl OutNode {
                     handled_streams.insert(stream_id);
                     tracing::debug!("accepting forward stream {}", stream_id);
 
+                    let output_map = Arc::clone(&output_map);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_forward_stream(stream).await {
+                        if let Err(e) = Self::handle_forward_stream(stream, output_map).await {
                             tracing::error!("forward stream {} error: {}", stream_id, e);
                         }
                     });
@@ -126,7 +134,10 @@ impl OutNode {
         }
     }
 
-    async fn handle_forward_stream(stream: Stream) -> Result<(), OutNodeError> {
+    async fn handle_forward_stream(
+        stream: Stream,
+        output_map: Arc<OutputMap>,
+    ) -> Result<(), OutNodeError> {
         // Read the connect request from HUB
         let request = Self::read_connect_request(&stream).await?;
 
@@ -139,14 +150,30 @@ impl OutNode {
             return Self::handle_udp_forward(stream).await;
         }
 
+        // Extract tag from the first route entry (second-level routing)
+        let tag = request.routes.first().and_then(|r| r.tag.as_deref());
+
         tracing::info!(
-            "✅ OUT EXIT: Received TCP request for {} (forwarded from HUB)",
-            request.target
+            "✅ OUT EXIT: Received TCP request for {}{} (forwarded from HUB)",
+            request.target,
+            tag.map(|t| format!(" [tag: {}]", t)).unwrap_or_default()
         );
 
-        // Connect to the actual target (supports both IP:port and domain:port)
-        let mut target_stream = tokio::net::TcpStream::connect(&request.target).await?;
-        tracing::info!("✅ OUT EXIT: Connected to {} from OUT node", request.target);
+        // Get output based on tag (second-level routing)
+        let output = output_map.get(tag);
+
+        // Connect to the actual target through the selected output
+        let mut target_stream = output
+            .connect(&request.target)
+            .await
+            .map_err(|e| OutNodeError::Io(std::io::Error::other(e.to_string())))?;
+
+        tracing::info!(
+            "✅ OUT EXIT: Connected to {} from OUT node{}",
+            request.target,
+            tag.map(|t| format!(" via output '{}'", t))
+                .unwrap_or_else(|| " (direct)".to_string())
+        );
 
         // Relay data between tunnel stream and target
         Self::relay_to_target(stream, &mut target_stream).await?;

@@ -171,7 +171,13 @@ mod relay_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect OUT node first (it needs to register before IN sees it)
-        let mut out_node = OutNode::new(vec!["test".to_string()], vec![], 0, test_client_config());
+        let mut out_node = OutNode::new(
+            vec!["test".to_string()],
+            vec![],
+            0,
+            vec![],
+            test_client_config(),
+        );
         out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         // Run OUT node in background
@@ -1310,8 +1316,13 @@ mod udp_integration_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 3. Start OUT node
-        let mut out_node =
-            OutNode::new(vec!["default".to_string()], vec![], 0, test_client_config());
+        let mut out_node = OutNode::new(
+            vec!["default".to_string()],
+            vec![],
+            0,
+            vec![],
+            test_client_config(),
+        );
         out_node.connect_hub(hub_addr, 1).await?;
         tracing::info!("OUT node connected");
 
@@ -1464,7 +1475,13 @@ mod udp_e2e_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect OUT node (for UDP forwarding)
-        let mut out_node = OutNode::new(vec!["test".to_string()], vec![], 0, test_client_config());
+        let mut out_node = OutNode::new(
+            vec!["test".to_string()],
+            vec![],
+            0,
+            vec![],
+            test_client_config(),
+        );
         out_node.connect_hub(hub_addr, 1).await.unwrap();
 
         tokio::spawn(async move {
