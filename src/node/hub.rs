@@ -302,27 +302,7 @@ impl Hub {
 
                         // Handle data streams from this IN
                         let hub = Arc::clone(self);
-                        let tunnel_clone = Arc::clone(&tunnel);
                         tokio::spawn(async move {
-                            // Heartbeat task to prevent QUIC idle timeout
-                            tokio::spawn(async move {
-                                let heartbeat_stream_result = tunnel_clone.open_bi_stream().await;
-                                if let Ok(heartbeat_stream) = heartbeat_stream_result {
-                                    loop {
-                                        tokio::time::sleep(duration!("10 seconds"))
-                                            .await;
-                                        if tunnel_clone.is_closed().await {
-                                            break;
-                                        }
-                                        // Send a ping by writing empty data
-                                        if let Err(e) = heartbeat_stream.send(b"ping").await {
-                                            tracing::debug!("Heartbeat send error: {}", e);
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
-
                             hub.handle_in_data_streams(in_id, tunnel).await;
                         });
                     }
@@ -361,28 +341,8 @@ impl Hub {
                         // Notify all INs about new OUT
                         self.broadcast_out_update().await;
 
-                        // Monitor OUT connection with heartbeat to prevent QUIC idle timeout
-                        let tunnel_clone = Arc::clone(&tunnel);
+                        // Monitor OUT connection
                         tokio::spawn(async move {
-                            // Heartbeat task to prevent QUIC idle timeout
-                            tokio::spawn(async move {
-                                let heartbeat_stream_result = tunnel_clone.open_bi_stream().await;
-                                if let Ok(heartbeat_stream) = heartbeat_stream_result {
-                                    loop {
-                                        tokio::time::sleep(duration!("10 seconds"))
-                                            .await;
-                                        if tunnel_clone.is_closed().await {
-                                            break;
-                                        }
-                                        // Send a ping by writing empty data
-                                        if let Err(e) = heartbeat_stream.send(b"ping").await {
-                                            tracing::debug!("Heartbeat send error: {}", e);
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
-
                             loop {
                                 if tunnel.is_closed().await {
                                     tracing::info!("OUT {} disconnected", out_id);

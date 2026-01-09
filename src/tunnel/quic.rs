@@ -36,7 +36,7 @@ impl QuicConfig {
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
-        config.set_max_idle_timeout(60_000); // 60 seconds - allow some idle time but detect dead connections
+        config.set_max_idle_timeout(3_600_000); // 1 hour - TCP transport handles connection liveness
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -74,7 +74,7 @@ impl QuicConfig {
 
         // Enable all QUIC features
         config.set_application_protos(&[b"p2p"])?;
-        config.set_max_idle_timeout(60_000); // 60 seconds - allow some idle time but detect dead connections
+        config.set_max_idle_timeout(3_600_000); // 1 hour - TCP transport handles connection liveness
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -197,8 +197,7 @@ impl QuicConnection {
             // Calculate timeout for next event
             let timeout = {
                 let conn = self.inner.lock().await;
-                conn.timeout()
-                    .unwrap_or(duration!("100 ms"))
+                conn.timeout().unwrap_or(duration!("100 ms"))
             };
 
             // Wait for incoming data, send notification, or timeout
