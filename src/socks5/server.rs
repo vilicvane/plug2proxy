@@ -107,9 +107,13 @@ async fn handle_connection<A>(
     // Wait for command from client
     match conn.wait().await.map_err(|(e, _)| e)? {
         Command::Connect(connect, addr) => {
-            let target = resolve_target_from_socks5_address(&addr, fake_ip_resolver.as_deref());
-            tracing::debug!("SOCKS5 CONNECT to {}", target);
-            handle_connect(connect, &target, in_node).await
+            let resolved = resolve_target_from_socks5_address(&addr, fake_ip_resolver.as_deref());
+            tracing::debug!(
+                "SOCKS5 CONNECT to {} (resolved_ip: {:?})",
+                resolved.target,
+                resolved.resolved_ip
+            );
+            handle_connect(connect, &resolved.target, resolved.resolved_ip, in_node).await
         }
         Command::Bind(_bind, _addr) => {
             tracing::warn!("BIND command not supported");
@@ -126,10 +130,11 @@ async fn handle_connection<A>(
 async fn handle_connect(
     connect: socks5_server::Connect<socks5_server::connection::connect::state::NeedReply>,
     target: &str,
+    resolved_ip: Option<std::net::IpAddr>,
     in_node: Arc<InNode>,
 ) -> Result<(), Socks5Error> {
-    // Connect through InNode
-    let proxy_stream = match in_node.connect(target).await {
+    // Connect through InNode with resolved IP to avoid unmarked DNS lookup
+    let proxy_stream = match in_node.connect_with_resolved_ip(target, resolved_ip).await {
         Ok(stream) => stream,
         Err(e) => {
             tracing::error!("failed to connect to {}: {}", target, e);
@@ -143,14 +148,14 @@ async fn handle_connect(
     tracing::debug!("SOCKS5 TCP: connected to {} via {:?}", target, proxy_stream);
 
     // Send success reply
-    let client = connect
+    let mut client = connect
         .reply(Reply::Succeeded, Address::unspecified())
         .await
         .map_err(|(e, _)| e)?;
 
     // Relay data bidirectionally
     let result = proxy_stream
-        .relay_bidirectional(client)
+        .relay_bidirectional(&mut client)
         .await
         .map_err(|e| Socks5Error::IoError(std::io::Error::other(e)));
 

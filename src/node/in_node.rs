@@ -244,6 +244,17 @@ impl InNode {
     /// Resolve routes for a given target using the router.
     /// Returns RouteEntry pairs (label + tag) for routing decisions.
     pub async fn resolve_routes(&self, target: &str) -> Vec<RouteEntry> {
+        self.resolve_routes_with_ip(target, None).await
+    }
+
+    /// Resolve routes for a given target using the router, with an optional pre-resolved IP.
+    /// The `resolved_ip` is used for GeoIP lookup without doing DNS resolution,
+    /// which is important to avoid unmarked DNS traffic being caught by TPROXY.
+    pub async fn resolve_routes_with_ip(
+        &self,
+        target: &str,
+        resolved_ip: Option<IpAddr>,
+    ) -> Vec<RouteEntry> {
         let router = self.router.read().await;
 
         // Parse target to extract host and port
@@ -259,17 +270,10 @@ impl InNode {
         let is_ip = host.parse::<IpAddr>().is_ok();
         let domain = if is_ip { None } else { Some(host) };
 
-        // Try to parse as IP address, or resolve domain if GeoIP is needed
-        let ip: Option<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
-            Some(ip)
-        } else {
-            // Try DNS resolution for GeoIP lookup
-            tokio::net::lookup_host(format!("{}:{}", host, port))
-                .await
-                .ok()
-                .and_then(|mut addrs| addrs.next())
-                .map(|addr| addr.ip())
-        };
+        // Use pre-resolved IP if provided, otherwise try to parse host as IP.
+        // We deliberately skip DNS resolution here to avoid unmarked traffic.
+        // If no IP is available, GeoIP rules won't match, but fallback rules will handle it.
+        let ip: Option<IpAddr> = resolved_ip.or_else(|| host.parse::<IpAddr>().ok());
 
         let addr: SocketAddr = ip
             .map(|ip| SocketAddr::new(ip, port))
@@ -351,12 +355,29 @@ impl InNode {
     /// 2. Custom label with direct OUT - connect directly to OUT
     /// 3. Fallback - relay through HUB
     pub async fn connect(&self, target: &str) -> Result<ProxyStream, InNodeError> {
-        let routes = self.resolve_routes(target).await;
+        self.connect_with_resolved_ip(target, None).await
+    }
+
+    /// Create a proxied TCP connection to target with an optional pre-resolved IP.
+    ///
+    /// The `resolved_ip` is used for GeoIP lookup without doing DNS resolution,
+    /// which is important to avoid unmarked DNS traffic being caught by TPROXY.
+    ///
+    /// Resolves routing and handles:
+    /// 1. DIRECT - connect directly from IN to target
+    /// 2. Custom label with direct OUT - connect directly to OUT
+    /// 3. Fallback - relay through HUB
+    pub async fn connect_with_resolved_ip(
+        &self,
+        target: &str,
+        resolved_ip: Option<IpAddr>,
+    ) -> Result<ProxyStream, InNodeError> {
+        let routes = self.resolve_routes_with_ip(target, resolved_ip).await;
 
         // Check for DIRECT label first - exit directly from IN
         for route in &routes {
             if matches!(route.label, Label::BuiltIn(BuiltInLabel::Direct)) {
-                tracing::debug!("DIRECT exit from IN for {}", target);
+                tracing::info!("🔀 {} → DIRECT", target);
                 return self.connect_direct(target).await;
             }
         }
@@ -366,7 +387,7 @@ impl InNode {
             if let Label::Custom(label) = &route.label {
                 // Check if this OUT has direct connection
                 if let Some(stream) = self.try_direct_out_connect(label, target, &routes).await? {
-                    tracing::debug!("using direct OUT connection for {}", target);
+                    tracing::info!("🔀 {} → OUT [{}] (direct)", target, label);
                     return Ok(ProxyStream::from_quic(stream));
                 }
             }
@@ -378,6 +399,12 @@ impl InNode {
         }
 
         // Fall back to HUB relay
+        let route_info = routes
+            .first()
+            .map(|r| r.label.to_string())
+            .unwrap_or_else(|| "fallback".to_string());
+        tracing::info!("🔀 {} → HUB ({})", target, route_info);
+
         let connector = self.hub_connector().ok_or(InNodeError::NotConnected)?;
         let stream = connector.connect_tcp_with_routes(target, routes).await?;
 

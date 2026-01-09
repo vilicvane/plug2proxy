@@ -4,7 +4,7 @@
 //! between SOCKS5 and TPROXY is how they accept connections and extract the
 //! target - this is abstracted via the `TcpClientStream` trait.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -60,27 +60,28 @@ pub async fn relay_tcp<S: TcpClientStream>(
     let original_dst = client.original_dst();
     let source = client.source();
 
-    // Resolve fake IP to hostname if available
-    let target = resolve_target(fake_ip_resolver, original_dst);
+    // Resolve fake IP to hostname if available, preserving the resolved IP
+    let resolved = resolve_target(fake_ip_resolver, original_dst);
 
     tracing::debug!(
-        "{}: {} -> {} (target: {})",
+        "{}: {} -> {} (target: {}, resolved_ip: {:?})",
         log_config.prefix,
         source,
         original_dst,
-        target
+        resolved.target,
+        resolved.resolved_ip
     );
 
-    // Connect through InNode
+    // Connect through InNode, passing resolved IP to avoid unmarked DNS lookup
     let proxy_stream = in_node
-        .connect(&target)
+        .connect_with_resolved_ip(&resolved.target, resolved.resolved_ip)
         .await
         .map_err(|e| TcpRelayError::Connect(e.to_string()))?;
 
     tracing::debug!(
         "{}: connected to {} via {:?}",
         log_config.prefix,
-        target,
+        resolved.target,
         proxy_stream
     );
 
@@ -90,7 +91,11 @@ pub async fn relay_tcp<S: TcpClientStream>(
         .await
         .map_err(|e| TcpRelayError::Relay(e.to_string()))?;
 
-    tracing::debug!("{}: relay completed for {}", log_config.prefix, target);
+    tracing::debug!(
+        "{}: relay completed for {}",
+        log_config.prefix,
+        resolved.target
+    );
 
     Ok(())
 }
@@ -133,11 +138,21 @@ where
     Ok(())
 }
 
+/// Result of resolving a target address.
+pub struct ResolvedTarget {
+    /// The target string for connection (hostname:port or ip:port).
+    pub target: String,
+    /// The resolved IP address (for GeoIP lookup without DNS).
+    /// This avoids doing DNS lookup in routing, which would need traffic mark.
+    pub resolved_ip: Option<IpAddr>,
+}
+
 /// Resolve target address, translating fake IPs to hostnames if resolver is available.
+/// Returns both the target string (for connection) and the resolved IP (for GeoIP lookup).
 pub fn resolve_target(
     fake_ip_resolver: Option<&Arc<FakeIpResolver>>,
     original_dst: SocketAddr,
-) -> String {
+) -> ResolvedTarget {
     if let Some(resolver) = fake_ip_resolver {
         if let Some((real_ip, hostname)) = resolver.resolve(&original_dst.ip()) {
             if let Some(hostname) = hostname {
@@ -148,7 +163,10 @@ pub fn resolve_target(
                     hostname,
                     real_ip
                 );
-                return format!("{}:{}", hostname, original_dst.port());
+                return ResolvedTarget {
+                    target: format!("{}:{}", hostname, original_dst.port()),
+                    resolved_ip: Some(real_ip),
+                };
             }
             // No hostname stored, use real IP
             tracing::debug!(
@@ -156,18 +174,25 @@ pub fn resolve_target(
                 original_dst.ip(),
                 real_ip
             );
-            return format!("{}:{}", real_ip, original_dst.port());
+            return ResolvedTarget {
+                target: format!("{}:{}", real_ip, original_dst.port()),
+                resolved_ip: Some(real_ip),
+            };
         }
     }
     // Not a fake IP or no resolver, use as-is
-    original_dst.to_string()
+    ResolvedTarget {
+        target: original_dst.to_string(),
+        resolved_ip: Some(original_dst.ip()),
+    }
 }
 
 /// Resolve target from SOCKS5 Address, translating fake IPs to hostnames.
+/// Returns both target string and resolved IP for GeoIP lookup.
 pub fn resolve_target_from_socks5_address(
     addr: &socks5_server::proto::Address,
     fake_ip_resolver: Option<&FakeIpResolver>,
-) -> String {
+) -> ResolvedTarget {
     match addr {
         socks5_server::proto::Address::SocketAddress(socket_addr) => {
             if let Some(resolver) = fake_ip_resolver {
@@ -179,21 +204,34 @@ pub fn resolve_target_from_socks5_address(
                             hostname,
                             real_ip
                         );
-                        return format!("{}:{}", hostname, socket_addr.port());
+                        return ResolvedTarget {
+                            target: format!("{}:{}", hostname, socket_addr.port()),
+                            resolved_ip: Some(real_ip),
+                        };
                     }
                     tracing::debug!(
                         "fake IP {} resolved to real IP {} (no hostname)",
                         socket_addr.ip(),
                         real_ip
                     );
-                    return format!("{}:{}", real_ip, socket_addr.port());
+                    return ResolvedTarget {
+                        target: format!("{}:{}", real_ip, socket_addr.port()),
+                        resolved_ip: Some(real_ip),
+                    };
                 }
             }
-            socket_addr.to_string()
+            ResolvedTarget {
+                target: socket_addr.to_string(),
+                resolved_ip: Some(socket_addr.ip()),
+            }
         }
         socks5_server::proto::Address::DomainAddress(domain, port) => {
             let domain_str = String::from_utf8_lossy(domain);
-            format!("{}:{}", domain_str, port)
+            // Domain address from SOCKS5 - no resolved IP available
+            ResolvedTarget {
+                target: format!("{}:{}", domain_str, port),
+                resolved_ip: None,
+            }
         }
     }
 }
