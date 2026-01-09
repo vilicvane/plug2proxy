@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use lits::duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::route::{BuiltInLabel, Label, RuleConfig};
 use crate::tunnel::{FrameCodec, QuicConfig, QuicError, Stream, Tunnel, TunnelError};
+use crate::util::copy_bidirectional;
 
 use super::connection::{ConnectionError, NodeConnection};
 use super::message::{
@@ -624,7 +624,9 @@ impl Hub {
         out_stream.send(&json).await?;
 
         // Relay data bidirectionally between IN stream and OUT stream
-        Self::relay_streams(in_stream, out_stream).await?;
+        let (in_read, in_write) = in_stream.into_split();
+        let (out_read, out_write) = out_stream.into_split();
+        copy_bidirectional(in_read, in_write, out_read, out_write).await?;
 
         Ok(())
     }
@@ -638,12 +640,14 @@ impl Hub {
             format!("{}:80", target)
         };
 
-        let mut target_stream = TcpStream::connect(&target).await?;
-        target_stream.set_nodelay(true)?;
+        let mut tcp = TcpStream::connect(&target).await?;
+        tcp.set_nodelay(true)?;
         tracing::info!("✅ HUB EXIT: Connected to {} directly from HUB", target);
 
-        // Relay data between tunnel stream and target
-        Self::relay(stream, &mut target_stream).await?;
+        // Relay bidirectionally
+        let (tcp_read, tcp_write) = tcp.split();
+        let (stream_read, stream_write) = stream.into_split();
+        copy_bidirectional(stream_read, stream_write, tcp_read, tcp_write).await?;
 
         Ok(())
     }
@@ -693,7 +697,9 @@ impl Hub {
         out_stream.send(&json).await?;
 
         // Relay data bidirectionally between IN stream and OUT stream
-        Self::relay_streams(in_stream, out_stream).await?;
+        let (in_read, in_write) = in_stream.into_split();
+        let (out_read, out_write) = out_stream.into_split();
+        copy_bidirectional(in_read, in_write, out_read, out_write).await?;
 
         Ok(())
     }
@@ -910,66 +916,6 @@ impl Hub {
         Ok(())
     }
 
-    /// Relay data bidirectionally between two tunnel streams.
-    async fn relay_streams(stream1: Stream, stream2: Stream) -> Result<(), HubError> {
-        let stream1 = Arc::new(stream1);
-        let stream2 = Arc::new(stream2);
-
-        let s1_to_s2 = {
-            let stream1 = Arc::clone(&stream1);
-            let stream2 = Arc::clone(&stream2);
-            async move {
-                let mut buf = vec![0u8; 8192];
-                loop {
-                    let (n, fin) = stream1.recv_wait(&mut buf).await?;
-                    if n > 0 {
-                        tracing::trace!("relay: stream1->stream2 {} bytes", n);
-                        stream2.send(&buf[..n]).await?;
-                    }
-                    if fin {
-                        tracing::debug!("relay: stream1 fin");
-                        break;
-                    }
-                }
-                Ok::<_, HubError>(())
-            }
-        };
-
-        let s2_to_s1 = {
-            let stream1 = Arc::clone(&stream1);
-            let stream2 = Arc::clone(&stream2);
-            async move {
-                let mut buf = vec![0u8; 8192];
-                loop {
-                    let (n, fin) = stream2.recv_wait(&mut buf).await?;
-                    if n > 0 {
-                        tracing::trace!("relay: stream2->stream1 {} bytes", n);
-                        stream1.send(&buf[..n]).await?;
-                    }
-                    if fin {
-                        tracing::debug!("relay: stream2 fin");
-                        break;
-                    }
-                }
-                Ok::<_, HubError>(())
-            }
-        };
-
-        // Wait for either direction to finish
-        tokio::select! {
-            r = s1_to_s2 => { let _ = r; }
-            r = s2_to_s1 => { let _ = r; }
-        }
-
-        // Shutdown BOTH streams to immediately release stream credits
-        // Use shutdown (RESET) instead of close (FIN) since we don't need graceful close
-        let _ = stream1.shutdown().await;
-        let _ = stream2.shutdown().await;
-        tracing::debug!("relay_streams: both streams shutdown");
-
-        Ok(())
-    }
-
     async fn read_forward_request(stream: &Stream) -> Result<ForwardRequest, HubError> {
         // Read length-prefixed JSON
         let mut len_buf = [0u8; 4];
@@ -1003,58 +949,6 @@ impl Hub {
             .map_err(|e| HubError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
         Ok(request)
-    }
-
-    async fn relay(stream: Stream, target: &mut TcpStream) -> Result<(), HubError> {
-        let (mut target_read, mut target_write) = target.split();
-
-        // Use Arc to share stream between tasks
-        let stream = Arc::new(stream);
-        let stream_send = Arc::clone(&stream);
-        let stream_recv = Arc::clone(&stream);
-
-        let stream_to_target = async move {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                let (n, fin) = stream_recv.recv_wait(&mut buf).await?;
-                if n > 0 {
-                    tracing::debug!("relay: stream->target {} bytes", n);
-                    target_write.write_all(&buf[..n]).await?;
-                    target_write.flush().await?;
-                }
-                if fin {
-                    tracing::debug!("relay: stream fin");
-                    break;
-                }
-            }
-            Ok::<_, HubError>(())
-        };
-
-        let target_to_stream = async move {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                let n = target_read.read(&mut buf).await?;
-                if n == 0 {
-                    tracing::debug!("relay: target closed");
-                    break;
-                }
-                tracing::debug!("relay: target->stream {} bytes", n);
-                stream_send.send(&buf[..n]).await?;
-            }
-            Ok::<_, HubError>(())
-        };
-
-        // Wait for either direction to finish
-        tokio::select! {
-            r = stream_to_target => { let _ = r; }
-            r = target_to_stream => { let _ = r; }
-        }
-
-        // Shutdown stream to immediately release stream credits
-        let _ = stream.shutdown().await;
-        tracing::debug!("relay: stream shutdown");
-
-        Ok(())
     }
 
     /// Broadcast OUT update to all IN nodes.

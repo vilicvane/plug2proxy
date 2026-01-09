@@ -11,7 +11,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::fake_ip::FakeIpResolver;
 use crate::node::InNode;
-use crate::tunnel::ProxyStream;
 
 /// Abstraction over client-facing TCP connections.
 ///
@@ -53,7 +52,7 @@ impl TcpRelayLogConfig {
 /// 2. Connecting via InNode
 /// 3. Relaying data bidirectionally
 pub async fn relay_tcp<S: TcpClientStream>(
-    mut client: S,
+    client: S,
     in_node: &InNode,
     fake_ip_resolver: Option<&Arc<FakeIpResolver>>,
     log_config: TcpRelayLogConfig,
@@ -73,7 +72,7 @@ pub async fn relay_tcp<S: TcpClientStream>(
     );
 
     // Connect through InNode
-    let mut proxy_stream = in_node
+    let proxy_stream = in_node
         .connect(&target)
         .await
         .map_err(|e| TcpRelayError::Connect(e.to_string()))?;
@@ -87,7 +86,7 @@ pub async fn relay_tcp<S: TcpClientStream>(
 
     // Relay data between client and proxy
     proxy_stream
-        .relay_bidirectional(&mut client)
+        .relay_bidirectional(client)
         .await
         .map_err(|e| TcpRelayError::Relay(e.to_string()))?;
 
@@ -100,18 +99,18 @@ pub async fn relay_tcp<S: TcpClientStream>(
 ///
 /// Use this when the target is already known (e.g., from SOCKS5 CONNECT command).
 pub async fn relay_tcp_with_target<C>(
-    client: &mut C,
+    client: C,
     target: &str,
     in_node: &InNode,
     log_config: TcpRelayLogConfig,
-) -> Result<ProxyStream, TcpRelayError>
+) -> Result<(), TcpRelayError>
 where
     C: AsyncRead + AsyncWrite + Unpin,
 {
     tracing::debug!("{}: connecting to {}", log_config.prefix, target);
 
     // Connect through InNode
-    let mut proxy_stream = in_node
+    let proxy_stream = in_node
         .connect(target)
         .await
         .map_err(|e| TcpRelayError::Connect(e.to_string()))?;
@@ -131,7 +130,7 @@ where
 
     tracing::debug!("{}: relay completed for {}", log_config.prefix, target);
 
-    Ok(proxy_stream)
+    Ok(())
 }
 
 /// Resolve target address, translating fake IPs to hostnames if resolver is available.

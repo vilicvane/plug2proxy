@@ -906,6 +906,237 @@ impl Drop for Stream {
     }
 }
 
+impl Stream {
+    /// Split this stream into read and write halves that implement AsyncRead/AsyncWrite.
+    pub fn into_split(self) -> (StreamReadHalf, StreamWriteHalf) {
+        let inner = Arc::new(self);
+        (
+            StreamReadHalf {
+                inner: Arc::clone(&inner),
+                fin_received: false,
+            },
+            StreamWriteHalf {
+                inner,
+                shutdown_sent: false,
+            },
+        )
+    }
+}
+
+/// Read half of a split Stream, implementing AsyncRead.
+pub struct StreamReadHalf {
+    inner: Arc<Stream>,
+    fin_received: bool,
+}
+
+impl StreamReadHalf {
+    /// Get the stream ID.
+    pub fn id(&self) -> u64 {
+        self.inner.id()
+    }
+}
+
+impl Drop for StreamReadHalf {
+    fn drop(&mut self) {
+        // Shut down read side to signal we're done receiving
+        // This allows the remote to stop sending and release resources
+        if let Ok(mut conn) = self.inner.quic.try_lock() {
+            let _ = conn.stream_shutdown(self.inner.id, quiche::Shutdown::Read, 0);
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for StreamReadHalf {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+
+        if self.fin_received {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Register waker BEFORE trying to receive (avoid race condition)
+        let waker = cx.waker().clone();
+        let recv_notify = Arc::clone(&self.inner.recv_notify);
+        let stream_id = self.inner.id;
+
+        // Try to lock and receive - save result first to avoid borrow issues
+        let result = match self.inner.quic.try_lock() {
+            Ok(mut conn) => {
+                if conn.is_closed() {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "connection closed",
+                    )));
+                }
+
+                let unfilled = buf.initialize_unfilled();
+                Some(conn.stream_recv(stream_id, unfilled))
+            }
+            Err(_) => None,
+        };
+
+        match result {
+            Some(Ok((len, fin))) => {
+                buf.advance(len);
+                if fin {
+                    self.fin_received = true;
+                }
+                Poll::Ready(Ok(()))
+            }
+            Some(Err(quiche::Error::Done)) | None => {
+                // No data available or mutex locked, register waker and return Pending
+                tokio::spawn(async move {
+                    recv_notify.notified().await;
+                    waker.wake();
+                });
+                Poll::Pending
+            }
+            Some(Err(e)) => Poll::Ready(Err(std::io::Error::other(e.to_string()))),
+        }
+    }
+}
+
+/// Write half of a split Stream, implementing AsyncWrite.
+pub struct StreamWriteHalf {
+    inner: Arc<Stream>,
+    shutdown_sent: bool,
+}
+
+impl StreamWriteHalf {
+    /// Get the stream ID.
+    pub fn id(&self) -> u64 {
+        self.inner.id()
+    }
+}
+
+impl Drop for StreamWriteHalf {
+    fn drop(&mut self) {
+        // Send FIN if not already sent via shutdown()
+        if !self.shutdown_sent {
+            if let Ok(mut conn) = self.inner.quic.try_lock() {
+                let _ = conn.stream_send(self.inner.id, b"", true);
+            }
+            self.inner.send_notify.notify_one();
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for StreamWriteHalf {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        use std::task::Poll;
+
+        if self.shutdown_sent {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stream already shut down",
+            )));
+        }
+
+        // Register waker BEFORE trying to send
+        let waker = cx.waker().clone();
+        let recv_notify = Arc::clone(&self.inner.recv_notify);
+        let send_notify = Arc::clone(&self.inner.send_notify);
+
+        match self.inner.quic.try_lock() {
+            Ok(mut conn) => {
+                if conn.is_closed() {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "connection closed",
+                    )));
+                }
+
+                match conn.stream_send(self.inner.id, buf, false) {
+                    Ok(written) => {
+                        send_notify.notify_one();
+                        Poll::Ready(Ok(written))
+                    }
+                    Err(quiche::Error::Done) => {
+                        // Flow control blocked, wait for capacity
+                        send_notify.notify_one();
+                        tokio::spawn(async move {
+                            recv_notify.notified().await;
+                            waker.wake();
+                        });
+                        Poll::Pending
+                    }
+                    Err(e) => Poll::Ready(Err(std::io::Error::other(e.to_string()))),
+                }
+            }
+            Err(_) => {
+                // Mutex is locked, register waker and retry later
+                tokio::spawn(async move {
+                    recv_notify.notified().await;
+                    waker.wake();
+                });
+                Poll::Pending
+            }
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        // QUIC doesn't have explicit flush - data is sent when available
+        self.inner.send_notify.notify_one();
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+
+        if self.shutdown_sent {
+            return Poll::Ready(Ok(()));
+        }
+
+        let waker = cx.waker().clone();
+        let recv_notify = Arc::clone(&self.inner.recv_notify);
+        let send_notify = Arc::clone(&self.inner.send_notify);
+        let stream_id = self.inner.id;
+
+        // Save result first to avoid borrow issues
+        let result = match self.inner.quic.try_lock() {
+            Ok(mut conn) => {
+                if conn.is_closed() {
+                    Some(Ok(true)) // closed = success, mark shutdown
+                } else {
+                    Some(conn.stream_send(stream_id, b"", true).map(|_| true))
+                }
+            }
+            Err(_) => None,
+        };
+
+        match result {
+            Some(Ok(_)) => {
+                self.shutdown_sent = true;
+                send_notify.notify_one();
+                Poll::Ready(Ok(()))
+            }
+            Some(Err(quiche::Error::Done)) | None => {
+                send_notify.notify_one();
+                tokio::spawn(async move {
+                    recv_notify.notified().await;
+                    waker.wake();
+                });
+                Poll::Pending
+            }
+            Some(Err(e)) => Poll::Ready(Err(std::io::Error::other(e.to_string()))),
+        }
+    }
+}
+
 /// Spawn tasks to handle TCP IO for the QUIC connection.
 /// Returns a handle that can be used to add more TCP connections dynamically.
 fn spawn_tcp_io_tasks(

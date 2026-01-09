@@ -129,7 +129,7 @@ async fn handle_connect(
     in_node: Arc<InNode>,
 ) -> Result<(), Socks5Error> {
     // Connect through InNode
-    let mut proxy_stream = match in_node.connect(target).await {
+    let proxy_stream = match in_node.connect(target).await {
         Ok(stream) => stream,
         Err(e) => {
             tracing::error!("failed to connect to {}: {}", target, e);
@@ -143,14 +143,14 @@ async fn handle_connect(
     tracing::debug!("SOCKS5 TCP: connected to {} via {:?}", target, proxy_stream);
 
     // Send success reply
-    let mut client = connect
+    let client = connect
         .reply(Reply::Succeeded, Address::unspecified())
         .await
         .map_err(|(e, _)| e)?;
 
     // Relay data bidirectionally
     let result = proxy_stream
-        .relay_bidirectional(&mut client)
+        .relay_bidirectional(client)
         .await
         .map_err(|e| Socks5Error::IoError(std::io::Error::other(e)));
 

@@ -370,8 +370,10 @@ impl OutNode {
                 .unwrap_or_else(|| " (direct)".to_string())
         );
 
-        // Relay data between tunnel stream and target
-        Self::relay_to_target(stream, &mut target_stream).await?;
+        // Relay bidirectionally
+        let (tcp_read, tcp_write) = target_stream.split();
+        let (stream_read, stream_write) = stream.into_split();
+        crate::util::copy_bidirectional(stream_read, stream_write, tcp_read, tcp_write).await?;
 
         Ok(())
     }
@@ -648,70 +650,6 @@ impl OutNode {
         // Close stream with FIN to properly return stream credits
         let _ = stream.close().await;
         tracing::debug!("OUT UDP: stream closed");
-
-        Ok(())
-    }
-
-    /// Relay data between tunnel stream and TCP target.
-    async fn relay_to_target(
-        stream: Stream,
-        target: &mut tokio::net::TcpStream,
-    ) -> Result<(), OutNodeError> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let (mut target_read, mut target_write) = target.split();
-        let stream = Arc::new(stream);
-        let stream_send = Arc::clone(&stream);
-        let stream_recv = Arc::clone(&stream);
-
-        let stream_to_target = async move {
-            let mut buf = vec![0u8; 65536];
-            loop {
-                let (n, fin) = stream_recv.recv_wait(&mut buf).await?;
-                if n > 0 {
-                    tracing::trace!("OUT relay: stream->target {} bytes", n);
-                    target_write.write_all(&buf[..n]).await?;
-                }
-                if fin {
-                    tracing::debug!(
-                        "OUT relay: stream fin, flushing and shutting down target write"
-                    );
-                    target_write.flush().await?;
-                    target_write.shutdown().await?;
-                    break;
-                }
-            }
-            Ok::<_, OutNodeError>(())
-        };
-
-        let target_to_stream = async move {
-            let mut buf = vec![0u8; 65536];
-            loop {
-                let n = target_read.read(&mut buf).await?;
-                if n == 0 {
-                    tracing::debug!("OUT relay: target closed");
-                    // Send FIN to signal end of data
-                    let _ = stream_send.send_fin(&[]).await;
-                    break;
-                }
-                tracing::trace!("OUT relay: target->stream {} bytes", n);
-                stream_send.send(&buf[..n]).await?;
-            }
-            Ok::<_, OutNodeError>(())
-        };
-
-        // Wait for BOTH directions to complete for proper data delivery
-        let (r1, r2) = tokio::join!(stream_to_target, target_to_stream);
-        if let Err(e) = r1 {
-            tracing::debug!("OUT relay: stream_to_target error: {}", e);
-        }
-        if let Err(e) = r2 {
-            tracing::debug!("OUT relay: target_to_stream error: {}", e);
-        }
-
-        // Use graceful close (FIN) instead of shutdown (RESET)
-        let _ = stream.close().await;
-        tracing::debug!("OUT relay: stream closed gracefully");
 
         Ok(())
     }

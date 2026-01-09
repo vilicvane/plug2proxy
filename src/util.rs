@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Set SO_MARK socket option (Linux-specific, for TPROXY).
@@ -104,4 +105,49 @@ pub async fn tcp_connect_with_mark(
         // No mark needed, use simple connect
         TcpStream::connect(addr).await
     }
+}
+
+/// Relay data bidirectionally between two split streams.
+///
+/// Uses `tokio::io::copy` for robust bidirectional relay. Each direction
+/// copies until EOF, then shuts down the write side.
+///
+/// # Arguments
+/// * `read1` - Read half of stream 1
+/// * `write1` - Write half of stream 1
+/// * `read2` - Read half of stream 2
+/// * `write2` - Write half of stream 2
+///
+/// Data flows: read1 -> write2 and read2 -> write1
+///
+/// # Errors
+/// Returns the first error encountered from either direction.
+pub async fn copy_bidirectional<R1, W1, R2, W2>(
+    mut read1: R1,
+    mut write1: W1,
+    mut read2: R2,
+    mut write2: W2,
+) -> std::io::Result<()>
+where
+    R1: AsyncRead + Unpin,
+    W1: AsyncWrite + Unpin,
+    R2: AsyncRead + Unpin,
+    W2: AsyncWrite + Unpin,
+{
+    let s1_to_s2 = async {
+        let result = tokio::io::copy(&mut read1, &mut write2).await;
+        let _ = write2.shutdown().await;
+        result
+    };
+
+    let s2_to_s1 = async {
+        let result = tokio::io::copy(&mut read2, &mut write1).await;
+        let _ = write1.shutdown().await;
+        result
+    };
+
+    let (r1, r2) = tokio::join!(s1_to_s2, s2_to_s1);
+    r1?;
+    r2?;
+    Ok(())
 }

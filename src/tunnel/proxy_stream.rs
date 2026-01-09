@@ -3,6 +3,7 @@ use tokio::net::TcpStream;
 
 use super::TunnelError;
 use super::tunnel::Stream as QuicStream;
+use crate::util::copy_bidirectional;
 
 /// A unified stream type that can be either a QUIC stream (through tunnel)
 /// or a direct TCP stream (for DIRECT routing).
@@ -25,14 +26,25 @@ impl ProxyStream {
     }
 
     /// Relay data bidirectionally between this stream and a client.
-    pub async fn relay_bidirectional<C>(&mut self, client: &mut C) -> Result<(), TunnelError>
+    /// Consumes self since the stream is split for the relay.
+    pub async fn relay_bidirectional<C>(self, client: C) -> Result<(), TunnelError>
     where
         C: AsyncRead + AsyncWrite + Unpin,
     {
         match self {
-            ProxyStream::Quic(stream) => relay_quic_client(stream, client).await,
-            ProxyStream::Tcp(tcp) => relay_tcp_client(tcp, client).await,
-        }
+            ProxyStream::Quic(stream) => {
+                let (stream_read, stream_write) = stream.into_split();
+                let (client_read, client_write) = tokio::io::split(client);
+                copy_bidirectional(stream_read, stream_write, client_read, client_write).await?;
+            }
+            ProxyStream::Tcp(tcp) => {
+                let (tcp_read, tcp_write) = tcp.into_split();
+                let (client_read, client_write) = tokio::io::split(client);
+                copy_bidirectional(tcp_read, tcp_write, client_read, client_write).await?;
+            }
+        };
+
+        Ok(())
     }
 
     /// Get the stream ID (only meaningful for QUIC streams).
@@ -107,94 +119,6 @@ impl ProxyStream {
     /// Check if this is a QUIC stream.
     pub fn is_quic(&self) -> bool {
         matches!(self, ProxyStream::Quic(_))
-    }
-}
-
-/// Relay between QUIC stream and client.
-async fn relay_quic_client<C>(stream: &QuicStream, client: &mut C) -> Result<(), TunnelError>
-where
-    C: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut client_buf = vec![0u8; 16384];
-    let mut stream_buf = vec![0u8; 16384];
-
-    let mut client_closed = false;
-    let mut stream_closed = false;
-
-    loop {
-        tokio::select! {
-            // Client -> Stream
-            result = client.read(&mut client_buf), if !client_closed => {
-                match result {
-                    Ok(0) => {
-                        client_closed = true;
-                        let _ = stream.send_fin(&[]).await;
-                    }
-                    Ok(n) => {
-                        stream.send(&client_buf[..n]).await?;
-                    }
-                    Err(e) => {
-                        tracing::debug!("client read error: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            // Stream -> Client
-            result = stream.recv_wait(&mut stream_buf), if !stream_closed => {
-                match result {
-                    Ok((0, true)) => {
-                        stream_closed = true;
-                        let _ = client.shutdown().await;
-                    }
-                    Ok((0, false)) => {
-                        // No data yet, continue
-                    }
-                    Ok((n, fin)) => {
-                        if client.write_all(&stream_buf[..n]).await.is_err() {
-                            break;
-                        }
-                        if fin {
-                            stream_closed = true;
-                            let _ = client.shutdown().await;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("stream recv error: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            else => {
-                // Both sides closed
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Relay between TCP stream and client.
-async fn relay_tcp_client<C>(tcp: &mut TcpStream, client: &mut C) -> Result<(), TunnelError>
-where
-    C: AsyncRead + AsyncWrite + Unpin,
-{
-    match tokio::io::copy_bidirectional(client, tcp).await {
-        Ok((client_to_server, server_to_client)) => {
-            tracing::debug!(
-                "DIRECT relay completed: client→server {} bytes, server→client {} bytes",
-                client_to_server,
-                server_to_client
-            );
-            Ok(())
-        }
-        Err(e) => {
-            tracing::debug!("DIRECT relay error: {}", e);
-            // Connection closed is normal
-            Ok(())
-        }
     }
 }
 
