@@ -663,3 +663,368 @@ mod tcp_refuel_tests {
         const { assert!(ROUTING_MAGIC < 0x80) }; // Not a QUIC long header
     }
 }
+
+/// Tests for mTLS certificate authentication
+#[cfg(test)]
+mod mtls_auth_tests {
+    use std::net::SocketAddr;
+
+    use lits::duration;
+    use tokio::net::TcpListener;
+
+    use crate::cert::{generate_ca, generate_node_cert};
+    use crate::tunnel::{QuicConfig, Tunnel};
+
+    /// Test that a client with a certificate signed by the SAME CA can connect.
+    /// This is the baseline - should always work.
+    #[tokio::test]
+    async fn test_mtls_same_ca_succeeds() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Create CA and certs
+        let ca = generate_ca("test-ca").unwrap();
+        let server_cert =
+            generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+        let client_cert =
+            generate_node_cert("test-client", &ca.cert_pem, &ca.key_pem, false).unwrap();
+
+        // Write certs to temp files
+        let server_pem_path = std::env::temp_dir().join("mtls_test_server_same.pem");
+        let client_pem_path = std::env::temp_dir().join("mtls_test_client_same.pem");
+        let ca_cert_path = std::env::temp_dir().join("mtls_test_ca_same.pem");
+
+        server_cert.write_to_file(&server_pem_path).unwrap();
+        // Client cert needs CA cert appended for server verification
+        client_cert
+            .write_to_file_with_ca(&client_pem_path, &ca.cert_pem)
+            .unwrap();
+        // CA cert only (no private key) for verification
+        std::fs::write(&ca_cert_path, &ca.cert_pem).unwrap();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_pem = server_pem_path.clone();
+        let ca_cert = ca_cert_path.clone();
+
+        // Server with mTLS enabled
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(
+                server_pem.to_str().unwrap(),
+                Some(ca_cert.to_str().unwrap()),
+            )
+            .unwrap()
+            .into_inner();
+
+            Tunnel::from_tcp_streams_server(vec![stream], &mut config, None).await
+        });
+
+        tokio::time::sleep(duration!("50 ms")).await;
+
+        // Client with mTLS
+        let client_result = Tunnel::connect_with_cert(
+            addr,
+            Some("localhost"),
+            1,
+            Some(client_pem_path.to_str().unwrap()),
+            Some(ca_cert_path.to_str().unwrap()),
+            None,
+        )
+        .await;
+
+        // Should succeed - same CA
+        assert!(
+            client_result.is_ok(),
+            "Connection with same CA should succeed: {:?}",
+            client_result.err()
+        );
+
+        let server_result = server_task.await.unwrap();
+        assert!(
+            server_result.is_ok(),
+            "Server should accept valid client cert: {:?}",
+            server_result.err()
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&server_pem_path);
+        let _ = std::fs::remove_file(&client_pem_path);
+        let _ = std::fs::remove_file(&ca_cert_path);
+    }
+
+    /// Test that a client with a certificate signed by a DIFFERENT CA is REJECTED.
+    /// This is the critical security test - old certs should NOT work with new hub.
+    #[tokio::test]
+    async fn test_mtls_different_ca_rejected() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Create TWO different CAs
+        let hub_ca = generate_ca("hub-ca").unwrap();
+        let old_ca = generate_ca("old-ca").unwrap();
+
+        // Hub uses hub_ca
+        let server_cert =
+            generate_node_cert("test-server", &hub_ca.cert_pem, &hub_ca.key_pem, true).unwrap();
+
+        // Client has cert signed by OLD CA (different!)
+        let client_cert =
+            generate_node_cert("test-client", &old_ca.cert_pem, &old_ca.key_pem, false).unwrap();
+
+        // Write certs to temp files
+        let server_pem_path = std::env::temp_dir().join("mtls_test_server_diff.pem");
+        let client_pem_path = std::env::temp_dir().join("mtls_test_client_diff.pem");
+        let hub_ca_cert_path = std::env::temp_dir().join("mtls_test_hub_ca.pem");
+        let old_ca_cert_path = std::env::temp_dir().join("mtls_test_old_ca.pem");
+
+        server_cert.write_to_file(&server_pem_path).unwrap();
+        // Client cert has OLD CA cert appended (for server verification - but wrong CA!)
+        client_cert
+            .write_to_file_with_ca(&client_pem_path, &old_ca.cert_pem)
+            .unwrap();
+        // Hub's CA cert (what the hub trusts)
+        std::fs::write(&hub_ca_cert_path, &hub_ca.cert_pem).unwrap();
+        // Old CA cert (what the client uses for server verification)
+        std::fs::write(&old_ca_cert_path, &old_ca.cert_pem).unwrap();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_pem = server_pem_path.clone();
+        let hub_ca_cert = hub_ca_cert_path.clone();
+
+        // Server with mTLS enabled - trusts ONLY hub_ca
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(
+                server_pem.to_str().unwrap(),
+                Some(hub_ca_cert.to_str().unwrap()),
+            )
+            .unwrap()
+            .into_inner();
+
+            Tunnel::from_tcp_streams_server(vec![stream], &mut config, None).await
+        });
+
+        tokio::time::sleep(duration!("50 ms")).await;
+
+        // Client with cert signed by DIFFERENT CA
+        // Note: Client uses old_ca for server verification (which will fail since server uses hub_ca)
+        // But even if we used hub_ca for server verification, the CLIENT cert should be rejected
+        let client_result = Tunnel::connect_with_cert(
+            addr,
+            Some("localhost"),
+            1,
+            Some(client_pem_path.to_str().unwrap()),
+            None, // Skip server verification for this test to focus on client cert validation
+            None,
+        )
+        .await;
+
+        // Give server time to process
+        tokio::time::sleep(duration!("200 ms")).await;
+
+        let server_result = server_task.await.unwrap();
+
+        // The connection should FAIL because the client cert is signed by a different CA
+        // Either the client or server side (or both) should report an error
+        let connection_rejected = client_result.is_err() || server_result.is_err();
+
+        if !connection_rejected {
+            tracing::error!(
+                "SECURITY BUG: Connection succeeded with certificate from different CA!"
+            );
+            tracing::error!("Client result ok: {}", client_result.is_ok());
+            tracing::error!("Server result ok: {}", server_result.is_ok());
+        }
+
+        assert!(
+            connection_rejected,
+            "Connection with certificate from DIFFERENT CA should be REJECTED!"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&server_pem_path);
+        let _ = std::fs::remove_file(&client_pem_path);
+        let _ = std::fs::remove_file(&hub_ca_cert_path);
+        let _ = std::fs::remove_file(&old_ca_cert_path);
+    }
+
+    /// Test mTLS with CA file containing BOTH cert AND private key (production format).
+    /// This mimics how ca.pem is used in production - it contains cert+key.
+    #[tokio::test]
+    async fn test_mtls_ca_file_with_private_key() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Create TWO different CAs
+        let hub_ca = generate_ca("hub-ca-combined").unwrap();
+        let old_ca = generate_ca("old-ca-combined").unwrap();
+
+        // Hub uses hub_ca
+        let server_cert =
+            generate_node_cert("test-server", &hub_ca.cert_pem, &hub_ca.key_pem, true).unwrap();
+
+        // Client has cert signed by OLD CA (different!)
+        let client_cert =
+            generate_node_cert("test-client", &old_ca.cert_pem, &old_ca.key_pem, false).unwrap();
+
+        // Write certs to temp files
+        let server_pem_path = std::env::temp_dir().join("mtls_test_server_combined.pem");
+        let client_pem_path = std::env::temp_dir().join("mtls_test_client_combined.pem");
+        // IMPORTANT: This file contains cert + key (like production ca.pem)
+        let hub_ca_combined_path = std::env::temp_dir().join("mtls_test_hub_ca_combined.pem");
+
+        server_cert.write_to_file(&server_pem_path).unwrap();
+        client_cert
+            .write_to_file_with_ca(&client_pem_path, &old_ca.cert_pem)
+            .unwrap();
+        // Write CA as combined cert+key (production format)
+        hub_ca.write_to_file(&hub_ca_combined_path).unwrap();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_pem = server_pem_path.clone();
+        let hub_ca_combined = hub_ca_combined_path.clone();
+
+        // Server with mTLS enabled - using COMBINED cert+key CA file
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(
+                server_pem.to_str().unwrap(),
+                Some(hub_ca_combined.to_str().unwrap()),
+            )
+            .unwrap()
+            .into_inner();
+
+            Tunnel::from_tcp_streams_server(vec![stream], &mut config, None).await
+        });
+
+        tokio::time::sleep(duration!("50 ms")).await;
+
+        // Client with cert signed by DIFFERENT CA
+        let client_result = Tunnel::connect_with_cert(
+            addr,
+            Some("localhost"),
+            1,
+            Some(client_pem_path.to_str().unwrap()),
+            None, // Skip server verification to focus on client cert validation
+            None,
+        )
+        .await;
+
+        // Give server time to process
+        tokio::time::sleep(duration!("200 ms")).await;
+
+        let server_result = server_task.await.unwrap();
+
+        // The connection should FAIL
+        let connection_rejected = client_result.is_err() || server_result.is_err();
+
+        if !connection_rejected {
+            tracing::error!(
+                "SECURITY BUG: Connection succeeded with cert+key CA file and wrong client cert!"
+            );
+        }
+
+        assert!(
+            connection_rejected,
+            "Connection with DIFFERENT CA should be REJECTED even with combined cert+key CA file!"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&server_pem_path);
+        let _ = std::fs::remove_file(&client_pem_path);
+        let _ = std::fs::remove_file(&hub_ca_combined_path);
+    }
+
+    /// Test that anonymous clients (no certificate) are allowed at TLS level.
+    /// With verify_peer(true), quiche ALLOWS anonymous clients by default.
+    /// The application layer (Hub) must explicitly reject them.
+    #[tokio::test]
+    async fn test_mtls_anonymous_client_allowed_at_tls_level() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Create CA and server cert
+        let ca = generate_ca("test-ca-anon").unwrap();
+        let server_cert =
+            generate_node_cert("test-server", &ca.cert_pem, &ca.key_pem, true).unwrap();
+
+        let server_pem_path = std::env::temp_dir().join("mtls_test_server_anon.pem");
+        let ca_cert_path = std::env::temp_dir().join("mtls_test_ca_anon.pem");
+
+        server_cert.write_to_file(&server_pem_path).unwrap();
+        std::fs::write(&ca_cert_path, &ca.cert_pem).unwrap();
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_pem = server_pem_path.clone();
+        let ca_cert = ca_cert_path.clone();
+
+        // Server with mTLS enabled
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+
+            let mut config = QuicConfig::new_server(
+                server_pem.to_str().unwrap(),
+                Some(ca_cert.to_str().unwrap()),
+            )
+            .unwrap()
+            .into_inner();
+
+            let result = Tunnel::from_tcp_streams_server(vec![stream], &mut config, None).await;
+
+            // Check if peer cert is present (it should NOT be for anonymous client)
+            if let Ok(ref tunnel) = result {
+                let has_peer_cert = tunnel.quic().peer_cert().await.is_some();
+                tracing::info!("Server: peer_cert present = {}", has_peer_cert);
+                assert!(!has_peer_cert, "Anonymous client should not have peer cert");
+            }
+
+            result
+        });
+
+        tokio::time::sleep(duration!("50 ms")).await;
+
+        // Client WITHOUT any certificate (anonymous)
+        let client_result = Tunnel::connect_with_cert(
+            addr,
+            Some("localhost"),
+            1,
+            None, // NO client certificate!
+            None, // Skip server verification
+            None,
+        )
+        .await;
+
+        tokio::time::sleep(duration!("200 ms")).await;
+
+        let server_result = server_task.await.unwrap();
+
+        // At TLS level, anonymous clients ARE allowed by quiche
+        // The Hub must check for peer_cert and reject if missing
+        assert!(client_result.is_ok(), "TLS allows anonymous clients");
+        assert!(server_result.is_ok(), "TLS allows anonymous clients");
+
+        tracing::info!(
+            "Confirmed: quiche allows anonymous clients at TLS level. \
+             Application layer (Hub) must reject them explicitly."
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&server_pem_path);
+        let _ = std::fs::remove_file(&ca_cert_path);
+    }
+}

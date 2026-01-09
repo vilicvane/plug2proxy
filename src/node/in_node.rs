@@ -140,17 +140,25 @@ impl InNode {
         addr: SocketAddr,
         connection_count: usize,
     ) -> Result<(), InNodeError> {
-        let tunnel = Arc::new(
-            Tunnel::connect_with_cert(
-                addr,
-                None,
-                connection_count,
-                self.client_config.pem_path.as_deref(),
-                self.client_config.ca_pem_path.as_deref(),
-                self.mark,
-            )
-            .await?,
-        );
+        let tunnel = match Tunnel::connect_with_cert(
+            addr,
+            None,
+            connection_count,
+            self.client_config.pem_path.as_deref(),
+            self.client_config.ca_pem_path.as_deref(),
+            self.mark,
+        )
+        .await
+        {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to establish TLS connection to HUB (check certificate validity): {}",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
 
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;

@@ -26,7 +26,8 @@ pub struct TcpConnectionWithData {
 /// Handle for adding new TCP connections to an existing tunnel.
 #[derive(Clone)]
 pub struct TcpConnectionHandle {
-    add_connection_tx: mpsc::Sender<TcpConnectionWithData>,
+    /// Channel to add new connections (wrapped in Option to allow closing)
+    add_connection_tx: Arc<Mutex<Option<mpsc::Sender<TcpConnectionWithData>>>>,
     /// QUIC connection ID (for routing additional connections)
     connection_id: Arc<Mutex<Option<Vec<u8>>>>,
     /// Server address for reconnection (client-side only)
@@ -34,7 +35,7 @@ pub struct TcpConnectionHandle {
     /// Desired number of TCP connections
     desired_count: Arc<Mutex<usize>>,
     /// Channel to request refueling
-    refuel_tx: mpsc::Sender<()>,
+    refuel_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     /// Flag indicating all TCP connections have died
     transport_dead: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -59,14 +60,25 @@ impl TcpConnectionHandle {
     }
 
     /// Request a refuel (add more connections if needed).
-    pub fn request_refuel(&self) {
-        let _ = self.refuel_tx.try_send(());
+    pub async fn request_refuel(&self) {
+        if let Some(ref tx) = *self.refuel_tx.lock().await {
+            let _ = tx.try_send(());
+        }
     }
 
-    /// Check if the transport layer (all TCP connections) is dead.
-    pub fn is_transport_dead(&self) -> bool {
+    /// Check if the TCP transport is closed.
+    pub fn is_closed(&self) -> bool {
         self.transport_dead
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Close the TCP transport, causing all TCP tasks to stop immediately.
+    pub async fn close(&self) {
+        self.transport_dead
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Close channels to immediately wake up waiting tasks
+        let _ = self.add_connection_tx.lock().await.take();
+        let _ = self.refuel_tx.lock().await.take();
     }
 
     /// Add a new TCP connection to the tunnel.
@@ -115,22 +127,30 @@ impl TcpConnectionHandle {
 
             // Get the stream back and add to the pool
             let stream = conn.into_inner();
-            self.add_connection_tx
-                .send(TcpConnectionWithData {
+            let tx = self.add_connection_tx.lock().await;
+            if let Some(ref tx) = *tx {
+                tx.send(TcpConnectionWithData {
                     stream,
                     initial_data: None,
                 })
                 .await
                 .map_err(|_| TunnelError::ConnectionFailed)?;
+            } else {
+                return Err(TunnelError::ConnectionFailed);
+            }
         } else {
             // No connection ID (shouldn't happen for additional connections)
-            self.add_connection_tx
-                .send(TcpConnectionWithData {
+            let tx = self.add_connection_tx.lock().await;
+            if let Some(ref tx) = *tx {
+                tx.send(TcpConnectionWithData {
                     stream,
                     initial_data: None,
                 })
                 .await
                 .map_err(|_| TunnelError::ConnectionFailed)?;
+            } else {
+                return Err(TunnelError::ConnectionFailed);
+            }
         }
         Ok(())
     }
@@ -141,13 +161,17 @@ impl TcpConnectionHandle {
         stream: TcpStream,
         initial_data: Bytes,
     ) -> Result<(), TunnelError> {
-        self.add_connection_tx
-            .send(TcpConnectionWithData {
+        let tx = self.add_connection_tx.lock().await;
+        if let Some(ref tx) = *tx {
+            tx.send(TcpConnectionWithData {
                 stream,
                 initial_data: Some(initial_data),
             })
             .await
             .map_err(|_| TunnelError::ConnectionFailed)?;
+        } else {
+            return Err(TunnelError::ConnectionFailed);
+        }
         Ok(())
     }
 }
@@ -641,11 +665,14 @@ impl Tunnel {
 
     /// Check if the tunnel is closed (either QUIC closed or all TCP connections died).
     pub async fn is_closed(&self) -> bool {
-        self.quic.is_closed().await || self.tcp_handle.is_transport_dead()
+        self.quic.is_closed().await || self.tcp_handle.is_closed()
     }
 
-    /// Close the tunnel.
+    /// Close the tunnel and all underlying TCP connections.
     pub async fn close(&self) -> Result<(), TunnelError> {
+        // Close TCP transport to stop tasks immediately
+        self.tcp_handle.close().await;
+        // Close the QUIC connection (sends CONNECTION_CLOSE frame)
         self.quic.close(true, 0, b"done").await?;
         Ok(())
     }
@@ -912,6 +939,12 @@ fn spawn_tcp_io_tasks(
     tokio::spawn(async move {
         let mut index = 0;
         loop {
+            // Check if transport was marked as dead (e.g., by close())
+            if transport_dead_for_send.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::debug!("TCP send task exiting: transport marked as dead");
+                break;
+            }
+
             tokio::select! {
                 biased;
 
@@ -1069,9 +1102,7 @@ fn spawn_tcp_io_tasks(
                         }
 
                         // Wait for ACK from server
-                        let ack =
-                            tokio::time::timeout(duration!("5 seconds"), conn.recv())
-                                .await;
+                        let ack = tokio::time::timeout(duration!("5 seconds"), conn.recv()).await;
 
                         match ack {
                             Ok(Ok(Some(data))) if !data.is_empty() && data[0] == ROUTING_ACK => {
@@ -1161,11 +1192,11 @@ fn spawn_tcp_io_tasks(
     });
 
     TcpConnectionHandle {
-        add_connection_tx,
+        add_connection_tx: Arc::new(Mutex::new(Some(add_connection_tx))),
         connection_id,
         server_addr,
         desired_count,
-        refuel_tx,
+        refuel_tx: Arc::new(Mutex::new(Some(refuel_tx))),
         transport_dead,
     }
 }

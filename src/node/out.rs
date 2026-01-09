@@ -76,17 +76,25 @@ impl OutNode {
         addr: SocketAddr,
         connection_count: usize,
     ) -> Result<(), OutNodeError> {
-        let tunnel = Arc::new(
-            Tunnel::connect_with_cert(
-                addr,
-                None,
-                connection_count,
-                self.client_config.pem_path.as_deref(),
-                self.client_config.ca_pem_path.as_deref(),
-                None, // OUT doesn't mark traffic
-            )
-            .await?,
-        );
+        let tunnel = match Tunnel::connect_with_cert(
+            addr,
+            None,
+            connection_count,
+            self.client_config.pem_path.as_deref(),
+            self.client_config.ca_pem_path.as_deref(),
+            None, // OUT doesn't mark traffic
+        )
+        .await
+        {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to establish TLS connection to HUB (check certificate validity): {}",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
 
         // Create control connection
         let conn = HubConnection::new(Arc::clone(&tunnel)).await?;

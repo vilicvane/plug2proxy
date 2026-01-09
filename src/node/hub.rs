@@ -248,10 +248,38 @@ impl Hub {
         tunnel: Arc<Tunnel>,
     ) -> Result<(), HubError> {
         // Wait for QUIC handshake to complete
-        tunnel.wait_established().await?;
+        // Note: If the client's certificate is signed by a different CA, the handshake
+        // will fail here with TunnelError::ConnectionFailed (TLS verification failure)
+        if let Err(e) = tunnel.wait_established().await {
+            tracing::warn!(
+                "TLS handshake failed (possibly invalid/untrusted client certificate): {}",
+                e
+            );
+            return Err(e.into());
+        }
+
+        // If mTLS is enabled (CA configured), require a valid peer certificate
+        // quiche's verify_peer(true) allows anonymous clients, so we must check explicitly
+        if self.config.ca_pem_path.is_some() {
+            let has_peer_cert = tunnel.quic().peer_cert().await.is_some();
+            if !has_peer_cert {
+                tracing::warn!("🔒 AUTH REJECTED: anonymous client (no certificate provided)");
+                // Close the tunnel so the client doesn't hang waiting for a response
+                let _ = tunnel.close().await;
+                return Err(HubError::AuthenticationFailed);
+            }
+        }
 
         // Extract the peer's Common Name from their TLS certificate
         let peer_name = tunnel.peer_common_name().await;
+
+        // Log successful authentication
+        if self.config.ca_pem_path.is_some() {
+            tracing::info!(
+                "🔒 AUTH OK: client certificate verified (CN: {:?})",
+                peer_name
+            );
+        }
 
         // Accept control connection
         let conn = NodeConnection::accept(Arc::clone(&tunnel)).await?;
@@ -1067,4 +1095,6 @@ pub enum HubError {
     Connection(#[from] ConnectionError),
     #[error("quic error: {0}")]
     Quic(#[from] QuicError),
+    #[error("authentication failed")]
+    AuthenticationFailed,
 }
