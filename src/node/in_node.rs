@@ -108,6 +108,11 @@ impl DirectUdpHandler {
             Bytes::copy_from_slice(&buf[..len]),
         ))
     }
+
+    /// Get the underlying socket for advanced use cases.
+    pub fn socket(&self) -> &Arc<UdpSocket> {
+        &self.socket
+    }
 }
 
 impl InNode {

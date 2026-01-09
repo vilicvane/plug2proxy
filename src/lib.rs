@@ -4,6 +4,7 @@ pub mod exit;
 pub mod fake_ip;
 pub mod geoip_updater;
 pub mod node;
+pub mod relay;
 pub mod route;
 pub mod socks5;
 pub mod tproxy;

@@ -261,8 +261,7 @@ fn parse_original_dst(msg: &libc::msghdr, is_ipv6: bool) -> Option<SocketAddr> {
         let cmsg_ref = unsafe { &*cmsg };
 
         if is_ipv6 {
-            if cmsg_ref.cmsg_level == libc::SOL_IPV6
-                && cmsg_ref.cmsg_type == libc::IPV6_ORIGDSTADDR
+            if cmsg_ref.cmsg_level == libc::SOL_IPV6 && cmsg_ref.cmsg_type == libc::IPV6_ORIGDSTADDR
             {
                 let addr: &libc::sockaddr_in6 =
                     unsafe { &*(libc::CMSG_DATA(cmsg) as *const libc::sockaddr_in6) };
@@ -288,7 +287,10 @@ fn parse_original_dst(msg: &libc::msghdr, is_ipv6: bool) -> Option<SocketAddr> {
 
 /// Create a transparent UDP socket for sending responses.
 #[cfg(target_os = "linux")]
-fn create_transparent_response_socket(bind_addr: SocketAddr, is_ipv6: bool) -> io::Result<UdpSocket> {
+fn create_transparent_response_socket(
+    bind_addr: SocketAddr,
+    is_ipv6: bool,
+) -> io::Result<UdpSocket> {
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
     let domain = if is_ipv6 {

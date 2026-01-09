@@ -425,7 +425,7 @@ impl OutNode {
             // Bind a UDP socket for forwarding
             let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
                 Ok(s) => {
-                    tracing::info!("UDP outbound socket bound to {}", s.local_addr().unwrap());
+                    tracing::debug!("OUT UDP: socket bound to {}", s.local_addr().unwrap());
                     Arc::new(s)
                 }
                 Err(e) => {
@@ -542,7 +542,7 @@ impl OutNode {
                 while offset < 4 {
                     match stream_recv.recv_wait(&mut len_buf[offset..]).await {
                         Ok((0, true)) => {
-                            tracing::info!("UDP tunnel stream closed");
+                            tracing::debug!("OUT UDP: tunnel stream closed");
                             return;
                         }
                         Ok((n, _)) => {
@@ -583,8 +583,8 @@ impl OutNode {
                 // Deserialize and forward to UDP proxy
                 match Datagram::deserialize(Bytes::from(datagram_buf)) {
                     Ok(datagram) => {
-                        tracing::info!(
-                            "📤 OUT UDP: Received from tunnel {} -> {} ({} bytes)",
+                        tracing::trace!(
+                            "OUT UDP recv: {} -> {} ({} bytes)",
                             datagram.source,
                             datagram.dest,
                             datagram.data.len()
@@ -600,14 +600,14 @@ impl OutNode {
                     }
                 }
             }
-            tracing::info!("OUT UDP recv task ended");
+            tracing::debug!("OUT UDP recv task ended");
         });
 
         // Task 2: Read responses from UDP proxy and send back through tunnel
         let send_task = tokio::spawn(async move {
             while let Some(response) = outbound_rx.recv().await {
-                tracing::info!(
-                    "📥 OUT UDP: Sending response {} <- {} ({} bytes)",
+                tracing::trace!(
+                    "OUT UDP send: {} <- {} ({} bytes)",
                     response.dest,
                     response.source,
                     response.data.len()
@@ -630,10 +630,10 @@ impl OutNode {
 
         tokio::select! {
             _ = recv_task => {
-                tracing::info!("UDP recv task completed");
+                tracing::debug!("OUT UDP recv task completed");
             },
             _ = send_task => {
-                tracing::info!("UDP send task completed");
+                tracing::debug!("OUT UDP send task completed");
             },
         }
 
