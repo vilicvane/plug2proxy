@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 use crate::exit::ExitConfig;
@@ -205,7 +205,7 @@ pub struct TProxyFullConfig {
 /// Fake-IP DNS configuration.
 /// Can be deserialized from either:
 /// - A string: `fake_ip: "127.0.0.1:53"`
-/// - A struct: `fake_ip: { listen: "127.0.0.1:53" }`
+/// - A struct: `fake_ip: { listen: "127.0.0.1:53", server: "1.1.1.1" }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FakeIpConfig {
@@ -215,6 +215,9 @@ pub enum FakeIpConfig {
     Full(FakeIpFullConfig),
 }
 
+/// Default upstream DNS server (Cloudflare).
+const DEFAULT_DNS_SERVER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1));
+
 impl FakeIpConfig {
     pub fn listen(&self) -> SocketAddr {
         match self {
@@ -222,11 +225,26 @@ impl FakeIpConfig {
             FakeIpConfig::Full(config) => config.listen,
         }
     }
+
+    /// Get upstream DNS servers.
+    pub fn servers(&self) -> Vec<IpAddr> {
+        match self {
+            FakeIpConfig::Address(_) => vec![DEFAULT_DNS_SERVER],
+            FakeIpConfig::Full(config) => config
+                .server
+                .clone()
+                .map(|s| s.into_vec())
+                .unwrap_or_else(|| vec![DEFAULT_DNS_SERVER]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FakeIpFullConfig {
     pub listen: SocketAddr,
+    /// Upstream DNS servers. Can be a single IP or array of IPs.
+    /// Defaults to 1.1.1.1 (Cloudflare).
+    pub server: Option<OneOrMany<IpAddr>>,
 }
 
 /// Routing configuration for Hub (sent to IN nodes).

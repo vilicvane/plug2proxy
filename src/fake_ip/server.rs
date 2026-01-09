@@ -1,22 +1,42 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+use hickory_resolver::{
+    Resolver,
+    config::{NameServerConfigGroup, ResolverConfig},
+    name_server::GenericConnector,
+};
 use hickory_server::authority::AuthorityObject;
+use std::net::IpAddr;
 
-use super::FakeAuthority;
+use super::{FakeAuthority, MarkedRuntimeProvider};
 
 pub struct FakeIpDnsOptions<'a> {
     pub listen_address: SocketAddr,
     pub db_path: &'a PathBuf,
+    /// Upstream DNS servers.
+    pub servers: &'a [IpAddr],
+    /// Traffic mark (SO_MARK) for upstream DNS queries.
+    pub mark: Option<u32>,
 }
 
 pub async fn run_fake_ip_dns(
-    resolver: Arc<hickory_resolver::TokioResolver>,
     FakeIpDnsOptions {
         listen_address,
         db_path,
+        servers,
+        mark,
     }: FakeIpDnsOptions<'_>,
 ) -> anyhow::Result<()> {
     tracing::info!("starting fake-ip DNS server...");
+
+    // Create resolver with marked sockets for upstream DNS queries
+    let name_servers = NameServerConfigGroup::from_ips_clear(servers, 53, true);
+    let resolver_config = ResolverConfig::from_parts(None, Vec::new(), name_servers);
+    let runtime_provider = MarkedRuntimeProvider::new(mark);
+    let resolver = Arc::new(
+        Resolver::builder_with_config(resolver_config, GenericConnector::new(runtime_provider))
+            .build(),
+    );
 
     let mut catalog = hickory_server::authority::Catalog::new();
 

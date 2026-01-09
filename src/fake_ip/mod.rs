@@ -1,8 +1,10 @@
 mod authority;
+mod marked_runtime;
 mod resolver;
 mod server;
 
 pub use authority::*;
+pub use marked_runtime::*;
 pub use resolver::*;
 pub use server::*;
 

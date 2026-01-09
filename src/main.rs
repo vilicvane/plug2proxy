@@ -236,18 +236,27 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
     // Start fake-ip DNS server and create resolver if configured
     let fake_ip_resolver = if let Some(ref fake_ip_config) = config.fake_ip {
         let listen_addr = fake_ip_config.listen();
+        let servers = fake_ip_config.servers();
+        let mark = config.mark;
         tracing::info!("Starting fake-ip DNS server on: {}", listen_addr);
+        tracing::info!(
+            "Using upstream DNS servers: {:?}",
+            servers.iter().map(|ip| ip.to_string()).collect::<Vec<_>>()
+        );
+        if let Some(m) = mark {
+            tracing::info!("Fake-IP DNS upstream queries will use mark: {}", m);
+        }
 
-        // Create resolver for upstream DNS queries
-        let dns_resolver = Arc::new(hickory_resolver::TokioResolver::builder_tokio()?.build());
         let db_path = std::path::PathBuf::from(FAKE_IP_DB_PATH);
 
         tokio::spawn(async move {
             let options = plug2proxy::fake_ip::FakeIpDnsOptions {
                 listen_address: listen_addr,
                 db_path: &db_path,
+                servers: &servers,
+                mark,
             };
-            if let Err(e) = plug2proxy::fake_ip::run_fake_ip_dns(dns_resolver, options).await {
+            if let Err(e) = plug2proxy::fake_ip::run_fake_ip_dns(options).await {
                 tracing::error!("Fake-IP DNS server error: {}", e);
             }
         });

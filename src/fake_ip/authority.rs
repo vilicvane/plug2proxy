@@ -6,7 +6,7 @@ use std::{
     time::SystemTime,
 };
 
-use hickory_resolver::{TokioResolver, lookup::Lookup};
+use hickory_resolver::{Resolver, lookup::Lookup, name_server::ConnectionProvider};
 use hickory_server::{
     authority::{
         Authority, LookupControlFlow, LookupError, LookupOptions, MessageRequest, UpdateResult,
@@ -37,16 +37,16 @@ fn ms_since_epoch() -> i64 {
         .as_millis() as i64
 }
 
-pub struct FakeAuthority {
+pub struct FakeAuthority<P: ConnectionProvider> {
     origin: LowerName,
     fake_ip_v4_start: u32,
     fake_ip_v6_start: u128,
-    resolver: Arc<TokioResolver>,
+    resolver: Arc<Resolver<P>>,
     sqlite_connection: Mutex<rusqlite::Connection>,
 }
 
-impl FakeAuthority {
-    pub fn new(resolver: Arc<TokioResolver>, db_path: &PathBuf) -> Self {
+impl<P: ConnectionProvider> FakeAuthority<P> {
+    pub fn new(resolver: Arc<Resolver<P>>, db_path: &PathBuf) -> Self {
         let sqlite_connection = rusqlite::Connection::open(db_path).unwrap();
 
         sqlite_connection
@@ -299,7 +299,7 @@ impl FakeAuthority {
 }
 
 #[async_trait::async_trait]
-impl Authority for FakeAuthority {
+impl<P: ConnectionProvider> Authority for FakeAuthority<P> {
     type Lookup = ForwardLookup;
 
     fn zone_type(&self) -> ZoneType {
