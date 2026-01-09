@@ -46,6 +46,8 @@ impl QuicConfig {
         config.set_initial_max_streams_bidi(10_000);
         config.set_initial_max_streams_uni(10_000);
         config.set_disable_active_migration(true);
+        // Use BBR congestion control since we're running over TCP
+        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR);
 
         // Configure server certificate verification
         if let Some(ca_path) = ca_pem_path {
@@ -82,6 +84,8 @@ impl QuicConfig {
         config.set_initial_max_streams_bidi(10_000);
         config.set_initial_max_streams_uni(10_000);
         config.set_disable_active_migration(true);
+        // Use BBR congestion control since we're running over TCP
+        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR);
 
         // Configure client certificate verification (mTLS)
         if let Some(ca_path) = ca_pem_path {
