@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use crate::route::{BuiltInLabel, GeoLite2, Label, MatchContext, Router, RuleConfig};
 use crate::tunnel::{ProxyStream, Stream, Tunnel, TunnelError};
 use crate::udp_proxy::{Datagram, NatMappingTable};
-use crate::util::set_socket_mark;
+use crate::util::{set_socket_mark, tcp_connect_with_mark};
 
 use super::connection::{ConnectionError, HubConnection};
 use super::connector::HubConnector;
@@ -373,17 +373,16 @@ impl InNode {
 
     /// Connect directly to target without proxy (for DIRECT routing).
     async fn connect_direct(&self, target: &str) -> Result<ProxyStream, InNodeError> {
-        use tokio::net::TcpStream;
+        // Resolve DNS first, then connect with mark set before SYN
+        let addr = tokio::net::lookup_host(target)
+            .await
+            .map_err(|e| InNodeError::DirectConnect(format!("DNS lookup failed: {}", e)))?
+            .next()
+            .ok_or_else(|| InNodeError::DirectConnect("no addresses found".to_string()))?;
 
-        let tcp_stream = TcpStream::connect(target)
+        let tcp_stream = tcp_connect_with_mark(addr, self.mark)
             .await
             .map_err(|e| InNodeError::DirectConnect(e.to_string()))?;
-
-        // Apply traffic mark if configured
-        if let Some(mark) = self.mark {
-            set_socket_mark(&tcp_stream, mark)
-                .map_err(|e| InNodeError::DirectConnect(format!("failed to set SO_MARK: {}", e)))?;
-        }
 
         tcp_stream
             .set_nodelay(true)

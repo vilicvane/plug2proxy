@@ -1,0 +1,8 @@
+# plug2proxy HUB node configuration
+#
+# The HUB node coordinates IN and OUT nodes, manages routing rules,
+# and handles certificate authentication.
+
+hub:
+  # Address to listen for node connections (required)
+  listen: "0.0.0.0:443"

@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 use super::{FramedConnection, QuicConfig, QuicConnection, QuicError};
-use crate::util::set_socket_mark;
+use crate::util::tcp_connect_with_mark;
 
 /// Magic byte for routing header (distinguishes from QUIC packets which start with 0x80-0xFF or 0x00-0x3F).
 /// We use 0x50 ('P' for plug2proxy) which is in the reserved range.
@@ -214,14 +214,8 @@ impl Tunnel {
         mut config: quiche::Config,
         mark: Option<u32>,
     ) -> Result<Self, TunnelError> {
-        // Establish the first TCP connection
-        let first_stream = TcpStream::connect(addr).await?;
-
-        // Apply traffic mark if configured
-        if let Some(mark) = mark {
-            set_socket_mark(&first_stream, mark)?;
-        }
-
+        // Establish the first TCP connection (mark set before SYN for TPROXY)
+        let first_stream = tcp_connect_with_mark(addr, mark).await?;
         first_stream.set_nodelay(true)?;
 
         tracing::info!("established initial TCP connection to {}", addr);
@@ -243,19 +237,8 @@ impl Tunnel {
             let mark_clone = mark;
             tokio::spawn(async move {
                 for i in 0..additional_count {
-                    match TcpStream::connect(addr).await {
+                    match tcp_connect_with_mark(addr, mark_clone).await {
                         Ok(stream) => {
-                            // Apply traffic mark if configured
-                            if let Some(mark) = mark_clone {
-                                if let Err(e) = set_socket_mark(&stream, mark) {
-                                    tracing::warn!(
-                                        "failed to set SO_MARK on connection {}: {}",
-                                        i + 2,
-                                        e
-                                    );
-                                }
-                            }
-
                             if let Err(e) = stream.set_nodelay(true) {
                                 tracing::warn!(
                                     "failed to set nodelay on connection {}: {}",
@@ -1063,19 +1046,8 @@ fn spawn_tcp_io_tasks(
             let mut rejected_count = 0;
 
             for i in 0..needed {
-                match TcpStream::connect(addr).await {
+                match tcp_connect_with_mark(addr, mark_for_refuel).await {
                     Ok(stream) => {
-                        // Apply traffic mark if configured
-                        if let Some(mark) = mark_for_refuel {
-                            if let Err(e) = set_socket_mark(&stream, mark) {
-                                tracing::warn!(
-                                    "failed to set SO_MARK on refuel connection {}: {}",
-                                    i,
-                                    e
-                                );
-                            }
-                        }
-
                         if let Err(e) = stream.set_nodelay(true) {
                             tracing::warn!(
                                 "failed to set nodelay on refuel connection {}: {}",

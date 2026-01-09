@@ -8,6 +8,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
 use super::{ChannelReceiver, ChannelSender, Datagram, NatMappingTable};
+use crate::util::set_socket_mark;
 
 /// Default cleanup interval for expired NAT mappings.
 const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -360,36 +361,6 @@ impl OutboundResponder {
         let mut index = self.reverse_index.write().await;
         index.insert(remote_addr, internal_addr);
     }
-}
-
-/// Set SO_MARK on a socket (Linux-specific, for TPROXY).
-#[cfg(target_os = "linux")]
-fn set_socket_mark<T>(socket: &T, mark: u32) -> Result<(), std::io::Error>
-where
-    T: std::os::unix::io::AsRawFd,
-{
-    unsafe {
-        let ret = libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_MARK,
-            &mark as *const u32 as *const libc::c_void,
-            std::mem::size_of::<u32>() as libc::socklen_t,
-        );
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_socket_mark<T>(_socket: &T, _mark: u32) -> Result<(), std::io::Error>
-where
-    T: std::os::unix::io::AsRawFd,
-{
-    // SO_MARK is Linux-specific, no-op on other platforms
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -1,0 +1,14 @@
+[Unit]
+Description=Plug2Proxy HUB Node
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/etc/plug2proxy
+ExecStart=/usr/sbin/plug2proxy
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

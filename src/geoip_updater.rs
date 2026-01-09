@@ -7,7 +7,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::node::InNode;
-use crate::util::set_socket_mark;
+use crate::util::tcp_connect_with_mark;
 
 /// Default GeoLite2 database URL (GitHub mirror).
 pub const DEFAULT_GEOIP_URL: &str =
@@ -138,21 +138,19 @@ impl GeoIpUpdater {
                 let tls_stream = wrap_tls(io, host).await?;
                 https_get(tls_stream, &url, host).await
             } else {
-                let tcp = tokio::net::TcpStream::connect(&target)
+                // Get mark if configured
+                let mark = in_node.as_ref().and_then(|n| n.mark());
+
+                // Resolve DNS first, then connect with mark
+                let addr = tokio::net::lookup_host(&target)
+                    .await
+                    .map_err(|e| GeoIpUpdateError::Io(format!("DNS lookup failed: {}", e)))?
+                    .next()
+                    .ok_or_else(|| GeoIpUpdateError::Io("no addresses found".to_string()))?;
+
+                let tcp = tcp_connect_with_mark(addr, mark)
                     .await
                     .map_err(|e| GeoIpUpdateError::Io(e.to_string()))?;
-
-                // Apply traffic mark if configured
-                if let Some(ref in_node) = in_node {
-                    if let Some(mark) = in_node.mark() {
-                        if let Err(e) = set_socket_mark(&tcp, mark) {
-                            tracing::warn!(
-                                "failed to set SO_MARK on GeoIP updater connection: {}",
-                                e
-                            );
-                        }
-                    }
-                }
 
                 let tls_stream = wrap_tls(tcp, host).await?;
                 https_get(tls_stream, &url, host).await

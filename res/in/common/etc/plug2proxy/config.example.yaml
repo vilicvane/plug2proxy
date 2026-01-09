@@ -1,0 +1,36 @@
+# plug2proxy IN node configuration
+#
+# The IN node is the entry point for proxied traffic. It connects to HUB
+# and routes traffic through OUT nodes based on routing rules.
+
+in:
+  # HUB server address (required)
+  # Can be a simple address string or a full config object
+  hub: "hub.example.com:443"
+  # Or full config:
+  # hub:
+  #   address: "hub.example.com:443"
+
+  # Number of TCP connections underlying QUIC (optional, default: 4)
+  connections: 4
+
+  # Direct OUT labels - connect directly to these OUTs bypassing HUB relay
+  # direct: ["fast-out"]
+
+  # Traffic mark for outgoing packets (required for TPROXY)
+  # This mark is used to bypass TPROXY re-interception
+  # IMPORTANT: Must match proxied_mark in nftables.conf!
+  mark: 255
+
+  # Fake IP configuration for DNS (optional)
+  # fake_ip:
+  #   ipv4_prefix: "198.18.0.0/15"
+  #   ipv6_prefix: "2001:db8::/32"
+
+  # SOCKS5 proxy settings (optional)
+  socks5:
+    listen: "127.0.0.1:1080"
+
+  # TPROXY settings (optional, Linux only)
+  # tproxy:
+  #   listen: "127.0.0.1:12345"

@@ -6,6 +6,7 @@ pub mod geoip_updater;
 pub mod node;
 pub mod route;
 pub mod socks5;
+pub mod tproxy;
 pub mod tunnel;
 pub mod udp_proxy;
 pub mod util;

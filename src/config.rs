@@ -102,6 +102,9 @@ pub struct InConfig {
     /// SOCKS5 server configuration.
     /// Can be just an address string or a struct.
     pub socks5: Option<Socks5Config>,
+    /// TPROXY (transparent proxy) configuration (Linux only).
+    /// Can be just an address string or a struct.
+    pub tproxy: Option<TProxyConfig>,
 }
 
 /// HUB connection configuration.
@@ -172,6 +175,33 @@ pub struct AuthConfig {
     pub password: String,
 }
 
+/// TPROXY (transparent proxy) configuration.
+/// Can be deserialized from either:
+/// - A string: `tproxy: "127.0.0.1:12345"`
+/// - A struct: `tproxy: { listen: "127.0.0.1:12345" }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TProxyConfig {
+    /// Just the listen address string.
+    Address(SocketAddr),
+    /// Full config with listen address.
+    Full(TProxyFullConfig),
+}
+
+impl TProxyConfig {
+    pub fn listen(&self) -> SocketAddr {
+        match self {
+            TProxyConfig::Address(addr) => *addr,
+            TProxyConfig::Full(config) => config.listen,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TProxyFullConfig {
+    pub listen: SocketAddr,
+}
+
 /// Fake-IP DNS configuration.
 /// Can be deserialized from either:
 /// - A string: `fake_ip: "127.0.0.1:53"`
@@ -239,6 +269,7 @@ impl Default for InConfig {
             mark: None,
             fake_ip: None,
             socks5: Some(Socks5Config::default()),
+            tproxy: None,
         }
     }
 }

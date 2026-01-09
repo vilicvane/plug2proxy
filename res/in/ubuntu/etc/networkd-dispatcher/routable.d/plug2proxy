@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# plug2proxy routing setup - called by networkd-dispatcher when interface becomes routable
+#
+# This script sets up policy routing required for TPROXY to work.
+# The routing table redirects marked packets back to local for TPROXY processing.
+#
+
+TABLE=100
+MARK=1
+
+# IPv4 routing
+if [ -z "$(ip route list table $TABLE 2>/dev/null)" ]; then
+    ip route add local default dev lo table $TABLE
+fi
+
+if [ -z "$(ip rule list table $TABLE 2>/dev/null | grep fwmark)" ]; then
+    ip rule add fwmark $MARK table $TABLE
+fi
+
+# IPv6 routing
+if [ -z "$(ip -6 route list table $TABLE 2>/dev/null)" ]; then
+    ip -6 route add local default dev lo table $TABLE
+fi
+
+if [ -z "$(ip -6 rule list table $TABLE 2>/dev/null | grep fwmark)" ]; then
+    ip -6 rule add fwmark $MARK table $TABLE
+fi

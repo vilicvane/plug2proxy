@@ -7,6 +7,7 @@ use plug2proxy::cert::{generate_ca, generate_node_cert, load_ca_from_pem};
 use plug2proxy::config::{Config, HubConfig, InConfig, OutConfig};
 use plug2proxy::node::{Hub, InNode, OutNode};
 use plug2proxy::socks5::Socks5Server;
+use plug2proxy::tproxy::TProxyServer;
 
 /// Conventional paths for certificates
 const CA_PEM_PATH: &str = "ca.pem";
@@ -298,6 +299,43 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
                 let in_node = Arc::new(in_node);
                 tracing::info!("✅ IN node connected and registered with HUB");
 
+                // Channel to detect when message loop exits (HUB disconnect)
+                let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
+
+                // Spawn message loop to receive updates from HUB
+                let in_node_clone = Arc::clone(&in_node);
+                spawned_tasks.push(tokio::spawn(async move {
+                    if let Err(e) = in_node_clone.run().await {
+                        tracing::error!("IN node message loop error: {}", e);
+                    }
+                    // Signal disconnect
+                    let _ = disconnect_tx.send(());
+                }));
+
+                // Spawn GeoIP updater task (uses convention path geolite2.mmdb)
+                let in_node_clone = Arc::clone(&in_node);
+                spawned_tasks.push(tokio::spawn(async move {
+                    run_geoip_updater(in_node_clone, GEOIP_DB_PATH.to_string()).await;
+                }));
+
+                // Start TPROXY server if configured (Linux only)
+                #[cfg(target_os = "linux")]
+                if let Some(ref tproxy_config) = config.tproxy {
+                    tracing::info!("Starting TPROXY server on: {}", tproxy_config.listen());
+
+                    let mut tproxy =
+                        TProxyServer::new(Arc::clone(&in_node), tproxy_config.listen());
+                    if let Some(ref resolver) = fake_ip_resolver {
+                        tproxy = tproxy.with_fake_ip_resolver(Arc::clone(resolver));
+                    }
+
+                    spawned_tasks.push(tokio::spawn(async move {
+                        if let Err(e) = tproxy.run().await {
+                            tracing::error!("TPROXY server error: {}", e);
+                        }
+                    }));
+                }
+
                 // Start SOCKS5 server if configured
                 if let Some(ref socks5_config) = config.socks5 {
                     tracing::info!("Starting SOCKS5 server on: {}", socks5_config.listen());
@@ -308,36 +346,22 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
                         socks5 = socks5.with_fake_ip_resolver(Arc::clone(resolver));
                     }
 
-                    // Spawn message loop to receive updates from HUB
-                    let in_node_clone = Arc::clone(&in_node);
-                    spawned_tasks.push(tokio::spawn(async move {
-                        if let Err(e) = in_node_clone.run().await {
-                            tracing::error!("IN node message loop error: {}", e);
-                        }
-                    }));
-
-                    // Spawn GeoIP updater task (uses convention path geolite2.mmdb)
-                    let in_node_clone = Arc::clone(&in_node);
-                    spawned_tasks.push(tokio::spawn(async move {
-                        run_geoip_updater(in_node_clone, GEOIP_DB_PATH.to_string()).await;
-                    }));
-
-                    // Run SOCKS5 server (blocks until HUB disconnects)
+                    // Run SOCKS5 server (blocks until error/disconnect)
                     if let Err(e) = socks5.run().await {
                         tracing::error!("SOCKS5 server error: {}", e);
                     }
-
-                    tracing::warn!("IN node disconnected, reconnecting in 5 seconds...");
+                } else if config.tproxy.is_some() {
+                    // TPROXY only mode - wait for HUB disconnect
+                    let _ = disconnect_rx.await;
                 } else {
                     tracing::warn!(
-                        "No SOCKS5 config provided, IN node will only handle tunnel connections"
+                        "No SOCKS5 or TPROXY config provided, IN node will only handle tunnel connections"
                     );
-                    if let Err(e) = in_node.run().await {
-                        tracing::error!("IN node error: {}", e);
-                    }
-
-                    tracing::warn!("IN node disconnected, reconnecting in 5 seconds...");
+                    // Wait for HUB disconnect
+                    let _ = disconnect_rx.await;
                 }
+
+                tracing::warn!("IN node disconnected, reconnecting in 5 seconds...");
             }
             Err(e) => {
                 tracing::error!("Failed to connect to HUB: {}", e);

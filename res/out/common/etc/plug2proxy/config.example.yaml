@@ -1,0 +1,23 @@
+# plug2proxy OUT node configuration
+#
+# The OUT node is the exit point for proxied traffic. It connects to HUB
+# and receives routed connections from IN nodes.
+
+out:
+  # HUB server address (required)
+  hub: "hub.example.com:443"
+
+  # Number of TCP connections underlying QUIC (optional, default: 4)
+  connections: 4
+
+  # Listen address for direct IN→OUT connections (optional)
+  # If set, IN nodes with matching 'direct' labels can connect directly
+  # listen: "0.0.0.0:8443"
+
+  # Exit configurations for level 2 routing (optional)
+  # exits:
+  #   - tag: "default"
+  #     # Direct exit (no further routing)
+  #   - tag: "upstream"
+  #     socks5:
+  #       server: "127.0.0.1:1081"
