@@ -4,6 +4,8 @@ mod socks5_integration_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
+    use lits::duration;
+
     use crate::cert::{generate_ca, generate_node_cert};
     use crate::node::{ClientConfig, Hub, HubConfig, InNode};
     use crate::socks5::Socks5Server;
@@ -62,7 +64,7 @@ mod socks5_integration_tests {
             let _ = hub_clone.serve(hub_addr).await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect IN node
         let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -82,6 +84,7 @@ mod relay_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use lits::duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -89,7 +92,7 @@ mod relay_tests {
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::route::{DomainPatternRuleConfig, Label, OneOrMany, RuleConfig};
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const TEST_TIMEOUT: Duration = duration!("10 seconds");
     const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
@@ -136,7 +139,7 @@ mod relay_tests {
             let _ = hub_clone.serve(hub_addr).await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect IN
         let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -168,7 +171,7 @@ mod relay_tests {
             let _ = hub_clone.serve(hub_addr).await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect OUT node first (it needs to register before IN sees it)
         let mut out_node = OutNode::new(vec!["test".to_string()], vec![], test_client_config());
@@ -179,7 +182,7 @@ mod relay_tests {
             let _ = out_node.run().await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect IN
         let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -212,7 +215,7 @@ mod relay_tests {
                     let mut buf = [0u8; 4096];
                     // Keep-alive: read multiple requests on same connection
                     loop {
-                        match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+                        match tokio::time::timeout(duration!("5 seconds"), stream.read(&mut buf))
                             .await
                         {
                             Ok(Ok(0)) => break, // Client closed
@@ -239,10 +242,10 @@ mod relay_tests {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Send request
             let test_data = b"Hello, proxy!";
@@ -251,7 +254,7 @@ mod relay_tests {
             // Receive response with timeout
             let mut buf = vec![0u8; 1024];
             let mut total = 0;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + duration!("5 seconds");
 
             while total < test_data.len() && tokio::time::Instant::now() < deadline {
                 match stream.recv_wait(&mut buf[total..]).await {
@@ -275,10 +278,10 @@ mod relay_tests {
             let (_, in_node) = setup_test_env_with_out().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Send request
             let test_data = b"Hello via OUT!";
@@ -287,7 +290,7 @@ mod relay_tests {
             // Receive response with timeout
             let mut buf = vec![0u8; 1024];
             let mut total = 0;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + duration!("5 seconds");
 
             while total < test_data.len() && tokio::time::Instant::now() < deadline {
                 match stream.recv_wait(&mut buf[total..]).await {
@@ -310,10 +313,10 @@ mod relay_tests {
             let (_, in_node) = setup_test_env_with_out().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Send multiple requests on same stream (like HTTP keep-alive)
             for i in 0..5 {
@@ -325,7 +328,7 @@ mod relay_tests {
                 // Receive with timeout
                 let mut buf = vec![0u8; 1024];
                 let mut total = 0;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                let deadline = tokio::time::Instant::now() + duration!("5 seconds");
 
                 while total < test_data.len() && tokio::time::Instant::now() < deadline {
                     match stream.recv_wait(&mut buf[total..]).await {
@@ -345,17 +348,17 @@ mod relay_tests {
     /// This tests opening MORE streams than the configured limit (100) through OUT
     #[tokio::test]
     async fn test_stream_limit_via_out() {
-        tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::time::timeout(duration!("120 seconds"), async {
             let (_, in_node) = setup_test_env_with_out().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Open 150 streams sequentially via OUT - more than the 100 stream limit
             // This will fail if streams aren't being released properly
             for i in 0..150 {
                 let mut stream = match tokio::time::timeout(
-                    Duration::from_secs(5),
+                    duration!("5 seconds"),
                     in_node.connect(&echo_addr.to_string()),
                 )
                 .await
@@ -370,7 +373,7 @@ mod relay_tests {
 
                 let mut buf = [0u8; 64];
                 let mut total = 0;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                let deadline = tokio::time::Instant::now() + duration!("2 seconds");
 
                 while total < test_data.len() && tokio::time::Instant::now() < deadline {
                     match stream.recv_wait(&mut buf[total..]).await {
@@ -380,7 +383,7 @@ mod relay_tests {
                 }
 
                 // Stream is dropped here - Drop impl should release it
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(duration!("10 ms")).await;
 
                 if (i + 1) % 25 == 0 {
                     tracing::info!("Stream limit via OUT test: completed {} streams", i + 1);
@@ -399,10 +402,10 @@ mod relay_tests {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Send multiple requests on same stream (like HTTP keep-alive)
             for i in 0..5 {
@@ -414,7 +417,7 @@ mod relay_tests {
                 // Receive with timeout
                 let mut buf = vec![0u8; 1024];
                 let mut total = 0;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                let deadline = tokio::time::Instant::now() + duration!("5 seconds");
 
                 while total < test_data.len() && tokio::time::Instant::now() < deadline {
                     match stream.recv_wait(&mut buf[total..]).await {
@@ -439,11 +442,11 @@ mod relay_tests {
     /// Test: Multiple concurrent streams (simulates browser opening many connections)
     #[tokio::test]
     async fn test_concurrent_streams() {
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(duration!("30 seconds"), async {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut handles = Vec::new();
 
@@ -454,7 +457,7 @@ mod relay_tests {
 
                 let handle = tokio::spawn(async move {
                     let mut stream = in_node.connect(&echo_addr).await.unwrap();
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(duration!("50 ms")).await;
 
                     let test_data = format!("Stream {} data", i);
 
@@ -464,7 +467,7 @@ mod relay_tests {
                     // Receive with timeout
                     let mut buf = vec![0u8; 1024];
                     let mut total = 0;
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                    let deadline = tokio::time::Instant::now() + duration!("5 seconds");
 
                     while total < test_data.len() && tokio::time::Instant::now() < deadline {
                         match stream.recv_wait(&mut buf[total..]).await {
@@ -501,17 +504,17 @@ mod relay_tests {
     /// This tests opening MORE streams than the configured limit (100) sequentially
     #[tokio::test]
     async fn test_stream_limit_release() {
-        tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::time::timeout(duration!("120 seconds"), async {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Open 150 streams sequentially - more than the 100 stream limit
             // This will fail if streams aren't being released properly
             for i in 0..150 {
                 let mut stream = match tokio::time::timeout(
-                    Duration::from_secs(5),
+                    duration!("5 seconds"),
                     in_node.connect(&echo_addr.to_string()),
                 )
                 .await
@@ -526,7 +529,7 @@ mod relay_tests {
 
                 let mut buf = [0u8; 64];
                 let mut total = 0;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                let deadline = tokio::time::Instant::now() + duration!("2 seconds");
 
                 while total < test_data.len() && tokio::time::Instant::now() < deadline {
                     match stream.recv_wait(&mut buf[total..]).await {
@@ -537,7 +540,7 @@ mod relay_tests {
 
                 // Stream is dropped here - Drop impl should release it
                 // Small delay to allow QUIC frames to be sent
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(duration!("10 ms")).await;
 
                 if (i + 1) % 25 == 0 {
                     tracing::info!("Stream limit test: completed {} streams", i + 1);
@@ -552,16 +555,16 @@ mod relay_tests {
     /// Test: Rapid open/close of streams
     #[tokio::test]
     async fn test_rapid_stream_lifecycle() {
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(duration!("60 seconds"), async {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Rapidly open and close streams
             for i in 0..20 {
                 let mut stream = match tokio::time::timeout(
-                    Duration::from_secs(5),
+                    duration!("5 seconds"),
                     in_node.connect(&echo_addr.to_string()),
                 )
                 .await
@@ -578,7 +581,7 @@ mod relay_tests {
 
                 let mut buf = [0u8; 64];
                 let mut total = 0;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                let deadline = tokio::time::Instant::now() + duration!("2 seconds");
 
                 while total < test_data.len() && tokio::time::Instant::now() < deadline {
                     match stream.recv_wait(&mut buf[total..]).await {
@@ -600,14 +603,14 @@ mod relay_tests {
     /// Test: Large data transfer
     #[tokio::test]
     async fn test_large_data_transfer() {
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(duration!("60 seconds"), async {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut stream = in_node.connect(&echo_addr.to_string()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Send 100KB
             let test_data = vec![0xABu8; 100 * 1024];
@@ -616,7 +619,7 @@ mod relay_tests {
             // Receive with timeout
             let mut buf = vec![0u8; test_data.len()];
             let mut total = 0;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let deadline = tokio::time::Instant::now() + duration!("30 seconds");
 
             while total < test_data.len() && tokio::time::Instant::now() < deadline {
                 match stream.recv_wait(&mut buf[total..]).await {
@@ -637,16 +640,16 @@ mod relay_tests {
     /// Test: Interleaved send/recv (more realistic HTTP pattern)
     #[tokio::test]
     async fn test_interleaved_communication() {
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(duration!("20 seconds"), async {
             let (_, in_node) = setup_test_env().await;
             let echo_addr = start_http_echo_server().await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let stream = Arc::new(tokio::sync::Mutex::new(
                 in_node.connect(&echo_addr.to_string()).await.unwrap(),
             ));
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let stream_send = Arc::clone(&stream);
             let stream_recv = stream;
@@ -664,7 +667,7 @@ mod relay_tests {
                     {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    tokio::time::sleep(duration!("20 ms")).await;
                 }
             });
 
@@ -672,14 +675,14 @@ mod relay_tests {
             let receiver = tokio::spawn(async move {
                 let mut buf = vec![0u8; 4096];
                 let mut total = 0;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let deadline = tokio::time::Instant::now() + duration!("10 seconds");
 
                 // Expected total bytes: "Chunk0" to "Chunk9" = 6*10 = 60 bytes
                 let expected_len = 60;
 
                 while total < expected_len && tokio::time::Instant::now() < deadline {
                     match tokio::time::timeout(
-                        Duration::from_secs(1),
+                        duration!("1 second"),
                         stream_recv.lock().await.recv_wait(&mut buf[total..]),
                     )
                     .await
@@ -714,6 +717,7 @@ mod socks5_server_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use lits::duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -721,7 +725,7 @@ mod socks5_server_tests {
     use crate::node::{ClientConfig, Hub, HubConfig, InNode};
     use crate::socks5::Socks5Server;
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+    const TEST_TIMEOUT: Duration = duration!("15 seconds");
     const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
@@ -768,7 +772,7 @@ mod socks5_server_tests {
             let _ = hub_clone.serve(hub_addr).await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect IN
         let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -786,7 +790,7 @@ mod socks5_server_tests {
             let _ = socks5_server.run().await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         (hub_addr, socks5_addr)
     }
@@ -883,7 +887,7 @@ mod socks5_server_tests {
 
             // Read response
             let mut buf = vec![0u8; 1024];
-            let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+            let n = tokio::time::timeout(duration!("5 seconds"), stream.read(&mut buf))
                 .await
                 .expect("Read timed out")
                 .expect("Read failed");
@@ -913,7 +917,7 @@ mod socks5_server_tests {
                 stream.write_all(test_data.as_bytes()).await.unwrap();
 
                 let mut buf = vec![0u8; 1024];
-                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+                let n = tokio::time::timeout(duration!("5 seconds"), stream.read(&mut buf))
                     .await
                     .unwrap_or_else(|_| panic!("Request {} read timed out", i))
                     .unwrap_or_else(|e| panic!("Request {} read failed: {}", i, e));
@@ -928,7 +932,7 @@ mod socks5_server_tests {
     /// Test: Multiple concurrent SOCKS5 connections
     #[tokio::test]
     async fn test_socks5_concurrent_connections() {
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(duration!("30 seconds"), async {
             let (_, socks5_addr) = setup_socks5_env().await;
             let echo_addr = start_echo_server().await;
 
@@ -949,7 +953,7 @@ mod socks5_server_tests {
                     stream.write_all(test_data.as_bytes()).await.unwrap();
 
                     let mut buf = vec![0u8; 1024];
-                    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+                    let n = tokio::time::timeout(duration!("5 seconds"), stream.read(&mut buf))
                         .await
                         .unwrap_or_else(|_| panic!("Connection {} read timed out", i))
                         .unwrap_or_else(|e| panic!("Connection {} read failed: {}", i, e));
@@ -973,14 +977,14 @@ mod socks5_server_tests {
     /// Test: Rapid SOCKS5 connection lifecycle
     #[tokio::test]
     async fn test_socks5_rapid_lifecycle() {
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(duration!("60 seconds"), async {
             let (_, socks5_addr) = setup_socks5_env().await;
             let echo_addr = start_echo_server().await;
 
             // Rapidly open and close SOCKS5 connections
             for i in 0..20 {
                 let mut stream = match tokio::time::timeout(
-                    Duration::from_secs(5),
+                    duration!("5 seconds"),
                     socks5_connect(socks5_addr, &echo_addr.to_string()),
                 )
                 .await
@@ -994,7 +998,7 @@ mod socks5_server_tests {
                 stream.write_all(test_data).await.unwrap();
 
                 let mut buf = vec![0u8; 64];
-                let _ = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+                let _ = tokio::time::timeout(duration!("2 seconds"), stream.read(&mut buf)).await;
 
                 // Connection drops when stream goes out of scope
             }
@@ -1228,8 +1232,8 @@ mod udp_tests {
 mod udp_integration_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::Duration;
 
+    use lits::duration;
     use tokio::net::UdpSocket;
 
     use crate::cert::{generate_ca, generate_node_cert};
@@ -1294,7 +1298,7 @@ mod udp_integration_tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         // 2. Start HUB
         let hub_addr: SocketAddr = "127.0.0.1:0".parse()?;
@@ -1315,7 +1319,7 @@ mod udp_integration_tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // 3. Start OUT node
         let mut out_node = OutNode::new(vec!["default".to_string()], vec![], test_client_config());
@@ -1328,7 +1332,7 @@ mod udp_integration_tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // 4. Start IN node
         let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -1350,7 +1354,7 @@ mod udp_integration_tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
         tracing::info!("All nodes started");
 
         // 6. Simulate SOCKS5 client sending UDP through the proxy
@@ -1414,6 +1418,7 @@ mod udp_e2e_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use lits::duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -1421,7 +1426,7 @@ mod udp_e2e_tests {
     use crate::node::{ClientConfig, Hub, HubConfig, InNode, OutNode};
     use crate::socks5::{Socks5Server, Socks5UdpPacket};
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_TIMEOUT: Duration = duration!("30 seconds");
     const TEST_CERT_PATH: &str = "tmp/certs/cert.pem";
 
     fn ensure_test_cert() {
@@ -1468,7 +1473,7 @@ mod udp_e2e_tests {
             let _ = hub_clone.serve(hub_addr).await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect OUT node (for UDP forwarding)
         let mut out_node = OutNode::new(vec!["test".to_string()], vec![], test_client_config());
@@ -1478,7 +1483,7 @@ mod udp_e2e_tests {
             let _ = out_node.run().await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Connect IN node
         let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -1496,7 +1501,7 @@ mod udp_e2e_tests {
             let _ = socks5_server.run().await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         (hub_addr, socks5_addr)
     }
@@ -1621,7 +1626,7 @@ mod udp_e2e_tests {
                 let _ = hub_clone.serve(hub_addr).await;
             });
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Connect IN node
             let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -1639,11 +1644,11 @@ mod udp_e2e_tests {
                 let _ = socks5_server.run().await;
             });
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             // Start UDP echo server
             let echo_addr = start_udp_echo_server().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(duration!("50 ms")).await;
 
             // Perform SOCKS5 UDP ASSOCIATE
             let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
@@ -1667,7 +1672,7 @@ mod udp_e2e_tests {
             // Wait for response
             let mut buf = vec![0u8; 65535];
             let result =
-                tokio::time::timeout(Duration::from_secs(5), client_socket.recv_from(&mut buf))
+                tokio::time::timeout(duration!("5 seconds"), client_socket.recv_from(&mut buf))
                     .await;
 
             match result {
@@ -1693,7 +1698,7 @@ mod udp_e2e_tests {
 
             // Start UDP echo server
             let echo_addr = start_udp_echo_server().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(duration!("50 ms")).await;
 
             // Perform SOCKS5 UDP ASSOCIATE
             let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
@@ -1721,7 +1726,7 @@ mod udp_e2e_tests {
             // Wait for response
             let mut buf = vec![0u8; 65535];
             let result =
-                tokio::time::timeout(Duration::from_secs(5), client_socket.recv_from(&mut buf))
+                tokio::time::timeout(duration!("5 seconds"), client_socket.recv_from(&mut buf))
                     .await;
 
             match result {
@@ -1747,7 +1752,7 @@ mod udp_e2e_tests {
 
             // Start UDP echo server
             let echo_addr = start_udp_echo_server().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(duration!("50 ms")).await;
 
             // Perform SOCKS5 UDP ASSOCIATE
             let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
@@ -1768,7 +1773,7 @@ mod udp_e2e_tests {
                 // Wait for response
                 let mut buf = vec![0u8; 65535];
                 let result =
-                    tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                    tokio::time::timeout(duration!("3 seconds"), client_socket.recv_from(&mut buf))
                         .await;
 
                 match result {
@@ -1800,7 +1805,7 @@ mod udp_e2e_tests {
 
             // Start UDP echo server
             let echo_addr = start_udp_echo_server().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(duration!("50 ms")).await;
 
             // Perform SOCKS5 UDP ASSOCIATE
             let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
@@ -1823,7 +1828,7 @@ mod udp_e2e_tests {
 
                 let mut buf = vec![0u8; 65535];
                 let result =
-                    tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                    tokio::time::timeout(duration!("3 seconds"), client_socket.recv_from(&mut buf))
                         .await;
 
                 match result {
@@ -1858,7 +1863,7 @@ mod udp_e2e_tests {
             let echo_addr1 = start_udp_echo_server().await;
             let echo_addr2 = start_udp_echo_server().await;
             let echo_addr3 = start_udp_echo_server().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(duration!("50 ms")).await;
 
             // Perform SOCKS5 UDP ASSOCIATE
             let (_tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
@@ -1881,7 +1886,7 @@ mod udp_e2e_tests {
 
                 let mut buf = vec![0u8; 65535];
                 let result =
-                    tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                    tokio::time::timeout(duration!("3 seconds"), client_socket.recv_from(&mut buf))
                         .await;
 
                 match result {
@@ -1917,7 +1922,7 @@ mod udp_e2e_tests {
 
             // Start UDP echo server
             let echo_addr = start_udp_echo_server().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(duration!("50 ms")).await;
 
             // Perform SOCKS5 UDP ASSOCIATE
             let (tcp_stream, relay_addr) = socks5_udp_associate(socks5_addr).await.unwrap();
@@ -1934,13 +1939,13 @@ mod udp_e2e_tests {
 
             let mut buf = vec![0u8; 65535];
             let result =
-                tokio::time::timeout(Duration::from_secs(3), client_socket.recv_from(&mut buf))
+                tokio::time::timeout(duration!("3 seconds"), client_socket.recv_from(&mut buf))
                     .await;
             assert!(result.is_ok(), "Should receive response before TCP close");
 
             // Close TCP connection (this should terminate UDP relay)
             drop(tcp_stream);
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(duration!("200 ms")).await;
 
             // Send another packet - UDP relay might still work briefly (cleanup is async)
             // But this test verifies the basic lifecycle

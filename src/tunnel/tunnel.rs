@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use lits::duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -86,7 +87,7 @@ impl TcpConnectionHandle {
                 .map_err(|e| TunnelError::Io(std::io::Error::other(e.to_string())))?;
 
             // Wait for ACK from server
-            let ack = tokio::time::timeout(std::time::Duration::from_secs(5), conn.recv()).await;
+            let ack = tokio::time::timeout(duration!("5 seconds"), conn.recv()).await;
             match ack {
                 Ok(Ok(Some(data))) if !data.is_empty() && data[0] == ROUTING_ACK => {
                     // ACK received, connection accepted
@@ -312,7 +313,7 @@ impl Tunnel {
             if quic.is_closed().await {
                 return Err(TunnelError::ConnectionFailed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(duration!("10 ms")).await;
             attempts += 1;
             if attempts > 500 {
                 return Err(TunnelError::ConnectionTimeout);
@@ -398,7 +399,7 @@ impl Tunnel {
             if quic.is_closed().await {
                 return Err(TunnelError::ConnectionFailed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(duration!("10 ms")).await;
             attempts += 1;
             if attempts > 500 {
                 return Err(TunnelError::ConnectionTimeout);
@@ -470,7 +471,7 @@ impl Tunnel {
             if quic.is_closed().await {
                 return Err(TunnelError::ConnectionFailed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(duration!("10 ms")).await;
             attempts += 1;
             if attempts > 500 {
                 return Err(TunnelError::ConnectionTimeout);
@@ -552,7 +553,7 @@ impl Tunnel {
             if self.quic.is_closed().await {
                 return Err(TunnelError::ConnectionFailed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(duration!("10 ms")).await;
             attempts += 1;
             if attempts > 500 {
                 return Err(TunnelError::ConnectionTimeout);
@@ -628,7 +629,7 @@ impl Tunnel {
             // Timeout allows periodic re-check of connection status
             tokio::select! {
                 _ = notified => {}
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = tokio::time::sleep(duration!("1 second")) => {}
             }
         }
     }
@@ -1003,7 +1004,7 @@ fn spawn_tcp_io_tasks(
             }
 
             // Debounce: wait a bit and drain any additional requests
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(duration!("1 second")).await;
             while refuel_rx.try_recv().is_ok() {}
 
             // Check if we need to refuel
@@ -1069,7 +1070,7 @@ fn spawn_tcp_io_tasks(
 
                         // Wait for ACK from server
                         let ack =
-                            tokio::time::timeout(std::time::Duration::from_secs(5), conn.recv())
+                            tokio::time::timeout(duration!("5 seconds"), conn.recv())
                                 .await;
 
                         match ack {

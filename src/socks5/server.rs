@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use lits::duration;
 use socks5_server::{
     AssociatedUdpSocket, Command, IncomingConnection, Server,
     proto::{Address, Reply},
@@ -53,7 +54,7 @@ impl Socks5Server {
 
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(duration!("1 second")).await;
                 if !in_node_health.is_hub_connected().await {
                     tracing::warn!("HUB connection lost, shutting down SOCKS5 server");
                     let _ = shutdown_tx.send(());

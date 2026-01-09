@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use lits::duration;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
@@ -11,7 +12,7 @@ use super::{ChannelReceiver, ChannelSender, Datagram, NatMappingTable};
 use crate::util::set_socket_mark;
 
 /// Default cleanup interval for expired NAT mappings.
-const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_CLEANUP_INTERVAL: Duration = duration!("60 seconds");
 
 /// The outbound side of the full-cone UDP transparent proxy.
 ///

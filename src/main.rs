@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
+use lits::duration;
 
 use plug2proxy::cert::{generate_ca, generate_node_cert, load_ca_from_pem};
 use plug2proxy::config::{Config, HubConfig, InConfig, OutConfig};
@@ -200,7 +201,7 @@ async fn run_out(config: OutConfig) -> anyhow::Result<()> {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(duration!("5 seconds")).await;
     }
 }
 
@@ -369,19 +370,18 @@ async fn run_in(config: InConfig) -> anyhow::Result<()> {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(duration!("5 seconds")).await;
     }
 }
 
 /// Run GeoIP database updater periodically.
 async fn run_geoip_updater(in_node: Arc<InNode>, db_path: String) {
+    use lits::duration;
     use plug2proxy::geoip_updater::GeoIpUpdater;
 
-    // Update interval: 24 hours
-    const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-    // Initial delay: wait for network to stabilize
-    const INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
-    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+    const UPDATE_INTERVAL: std::time::Duration = duration!("24 hours");
+    const INITIAL_DELAY: std::time::Duration = duration!("10 seconds");
+    const RETRY_DELAY: std::time::Duration = duration!("10 seconds");
 
     tokio::time::sleep(INITIAL_DELAY).await;
 

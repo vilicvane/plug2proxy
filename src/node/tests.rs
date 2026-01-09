@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
+use lits::duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -58,7 +58,7 @@ async fn test_in_out_connect_to_hub() {
     });
 
     // Give HUB time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
 
     // Connect OUT first (so IN receives it in the initial update)
     let mut out = OutNode::new(vec!["direct".to_string()], vec![], test_client_config());
@@ -66,7 +66,7 @@ async fn test_in_out_connect_to_hub() {
     tracing::info!("OUT connected");
 
     // Give HUB time to process OUT registration
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
 
     // Connect IN
     let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -125,7 +125,7 @@ async fn test_full_proxy_flow() {
         hub_clone.serve(hub_addr).await.unwrap();
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
 
     // Connect IN
     let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -137,7 +137,7 @@ async fn test_full_proxy_flow() {
     tracing::info!("proxied connection established");
 
     // Wait for relay to be set up on HUB side
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(duration!("200 ms")).await;
 
     // Send data through the tunnel
     let test_data = b"Hello, proxy!";
@@ -153,7 +153,7 @@ async fn test_full_proxy_flow() {
         if total_received >= test_data.len() || fin {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(duration!("10 ms")).await;
     }
     tracing::info!("received {} bytes", total_received);
 
@@ -242,7 +242,7 @@ async fn test_multi_out_with_routing() {
         hub_clone.serve(hub_addr).await.unwrap();
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
 
     // Connect OUT nodes with different labels
     let mut out1 = OutNode::new(vec!["out1".to_string()], vec![], test_client_config());
@@ -262,7 +262,7 @@ async fn test_multi_out_with_routing() {
         let _ = out2.run().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
 
     // Connect IN
     let mut in_node = InNode::new(test_client_config(), vec![], None, None);
@@ -277,7 +277,7 @@ async fn test_multi_out_with_routing() {
     // Test 1: Connect to echo1 (no matching rule, should go through HUB)
     tracing::info!("\n=== Test 1: No matching rule (HUB handles) ===");
     let mut stream1 = in_node.connect(&echo1_addr.to_string()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(duration!("200 ms")).await;
 
     let test_msg1 = b"test-hub";
     stream1.send(test_msg1).await.unwrap();
@@ -290,7 +290,7 @@ async fn test_multi_out_with_routing() {
         if received1 > 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(duration!("20 ms")).await;
     }
 
     let response1 = String::from_utf8_lossy(&buf1[..received1]);
@@ -312,7 +312,7 @@ async fn test_multi_out_with_routing() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(duration!("200 ms")).await;
 
     let test_msg2 = b"test-out1";
     stream2.send(test_msg2).await.unwrap();
@@ -325,7 +325,7 @@ async fn test_multi_out_with_routing() {
         if received2 > 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(duration!("20 ms")).await;
     }
 
     let response2 = String::from_utf8_lossy(&buf2[..received2]);
@@ -348,7 +348,7 @@ async fn test_multi_out_with_routing() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(duration!("200 ms")).await;
 
     let test_msg3 = b"test-out2";
     stream3.send(test_msg3).await.unwrap();
@@ -361,7 +361,7 @@ async fn test_multi_out_with_routing() {
         if received3 > 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(duration!("20 ms")).await;
     }
 
     let response3 = String::from_utf8_lossy(&buf3[..received3]);

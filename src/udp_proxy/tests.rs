@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use lits::duration;
 
 use super::*;
 
@@ -112,7 +112,7 @@ async fn test_nat_mapping_different_clients() {
 
 #[tokio::test]
 async fn test_nat_mapping_expiry() {
-    let mappings = NatMappingTable::new((50000, 50010)).with_ttl(Duration::from_millis(50));
+    let mappings = NatMappingTable::new((50000, 50010)).with_ttl(duration!("50 ms"));
 
     let client = localhost(12345);
     let server = localhost(53);
@@ -123,7 +123,7 @@ async fn test_nat_mapping_expiry() {
     assert!(mappings.lookup_by_port(port).await.is_some());
 
     // Wait for expiry
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
 
     // Mapping should be expired
     assert!(mappings.lookup_by_port(port).await.is_none());
@@ -131,7 +131,7 @@ async fn test_nat_mapping_expiry() {
 
 #[tokio::test]
 async fn test_nat_mapping_cleanup() {
-    let mappings = NatMappingTable::new((50000, 50010)).with_ttl(Duration::from_millis(50));
+    let mappings = NatMappingTable::new((50000, 50010)).with_ttl(duration!("50 ms"));
 
     let client = localhost(12345);
     let server = localhost(53);
@@ -141,7 +141,7 @@ async fn test_nat_mapping_cleanup() {
     assert_eq!(mappings.len().await, 1);
 
     // Wait and cleanup
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(duration!("100 ms")).await;
     mappings.cleanup_expired().await;
 
     assert_eq!(mappings.len().await, 0);
@@ -149,7 +149,7 @@ async fn test_nat_mapping_cleanup() {
 
 #[tokio::test]
 async fn test_nat_mapping_touch_refresh() {
-    let mappings = NatMappingTable::new((50000, 50010)).with_ttl(Duration::from_millis(100));
+    let mappings = NatMappingTable::new((50000, 50010)).with_ttl(duration!("100 ms"));
 
     let client = localhost(12345);
     let server = localhost(53);
@@ -157,13 +157,13 @@ async fn test_nat_mapping_touch_refresh() {
     let port = mappings.get_or_create(client, server).await.unwrap();
 
     // Wait half the TTL
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(duration!("60 ms")).await;
 
     // Touch to refresh
     mappings.touch(port).await;
 
     // Wait another 60ms (would be expired without touch)
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(duration!("60 ms")).await;
 
     // Should still be valid because we touched it
     assert!(mappings.lookup_by_port(port).await.is_some());
@@ -325,7 +325,7 @@ async fn test_inbound_outbound_direct_integration() {
         .unwrap();
 
     // Wait for all components
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(duration!("5 seconds"), async {
         server_handle.await.unwrap();
         inbound_recv_handle.await.unwrap();
         let _ = outbound_fwd_handle.await.unwrap();
@@ -572,7 +572,7 @@ async fn test_remote_inbound_outbound_via_simulated_tunnel() {
         .unwrap();
 
     let mut response_buf = vec![0u8; 1024];
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    let result = tokio::time::timeout(duration!("5 seconds"), async {
         server_handle.await.unwrap();
         machine_b_handle.await.unwrap();
         let response = machine_a_handle.await.unwrap();

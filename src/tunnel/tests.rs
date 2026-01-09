@@ -191,6 +191,7 @@ mod connection_tests {
 mod tunnel_tests {
     use std::net::SocketAddr;
 
+    use lits::duration;
     use tokio::net::TcpListener;
 
     use crate::cert::{generate_ca, generate_node_cert};
@@ -252,7 +253,7 @@ mod tunnel_tests {
         });
 
         // Give server time to start listening
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         let client_tunnel = setup_client(addr).await;
         assert!(client_tunnel.is_established().await);
@@ -287,7 +288,7 @@ mod tunnel_tests {
             // Wait for readable stream
             let mut received = false;
             for _ in 0..100 {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::time::sleep(duration!("20 ms")).await;
                 let readable = tunnel.quic().readable_streams().await;
                 if !readable.is_empty() {
                     let stream_id = readable[0];
@@ -316,7 +317,7 @@ mod tunnel_tests {
             tunnel
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         let client_tunnel = setup_client(addr).await;
 
@@ -325,7 +326,7 @@ mod tunnel_tests {
         stream.send(b"Hello from client!").await.unwrap();
 
         // Wait for response
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(duration!("200 ms")).await;
 
         let mut buf = vec![0u8; 1024];
         let (len, _) = stream.recv(&mut buf).await.unwrap();
@@ -362,7 +363,7 @@ mod tunnel_tests {
             // Echo all incoming data
             let mut processed = 0;
             for _ in 0..200 {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::time::sleep(duration!("20 ms")).await;
                 let readable = tunnel.quic().readable_streams().await;
                 for stream_id in readable {
                     let mut buf = vec![0u8; 1024];
@@ -384,7 +385,7 @@ mod tunnel_tests {
             assert!(processed >= 5, "Server processed {} streams", processed);
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         let client_tunnel = setup_client(addr).await;
 
@@ -394,7 +395,7 @@ mod tunnel_tests {
             let msg = format!("Stream {} data", i);
             stream.send(msg.as_bytes()).await.unwrap();
 
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(duration!("100 ms")).await;
 
             let mut buf = vec![0u8; 1024];
             let (len, _) = stream.recv(&mut buf).await.unwrap();
@@ -454,6 +455,7 @@ mod quic_config_tests {
 mod tcp_refuel_tests {
     use std::net::SocketAddr;
 
+    use lits::duration;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
@@ -499,11 +501,11 @@ mod tcp_refuel_tests {
                 .unwrap();
 
             // Keep tunnel alive briefly
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(duration!("300 ms")).await;
             tunnel
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         // Client connects with 1 connection (no additional)
         let tunnel = Tunnel::connect(addr, Some("localhost"), 1, None)
@@ -511,7 +513,7 @@ mod tcp_refuel_tests {
             .unwrap();
 
         // After handshake, connection ID should be set
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Get the connection ID
         let conn_id = tunnel.connection_id().await;
@@ -589,11 +591,11 @@ mod tcp_refuel_tests {
                 .unwrap();
 
             // Server tunnel should work but won't refuel (no server_addr)
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(duration!("200 ms")).await;
             tunnel
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         let client = Tunnel::connect(addr, Some("localhost"), 1, None)
             .await
@@ -625,11 +627,11 @@ mod tcp_refuel_tests {
                 .await
                 .unwrap();
 
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(duration!("300 ms")).await;
             tunnel
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(duration!("50 ms")).await;
 
         // Connect with desired_count = 2
         let tunnel = Tunnel::connect(addr, Some("localhost"), 2, None)
@@ -637,7 +639,7 @@ mod tcp_refuel_tests {
             .unwrap();
 
         // Wait for handshake
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(duration!("100 ms")).await;
 
         // Verify tunnel is established
         assert!(tunnel.is_established().await);

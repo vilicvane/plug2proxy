@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
 use thiserror::Error;
@@ -135,10 +135,9 @@ pub fn generate_node_cert(
     ca_key_pem: &str,
     is_server: bool,
 ) -> Result<GeneratedCert, CertError> {
-    // Parse CA certificate and key
+    // Parse CA certificate and key into an Issuer
     let ca_key_pair = KeyPair::from_pem(ca_key_pem)?;
-    let ca_cert_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)?;
-    let ca_cert = ca_cert_params.self_signed(&ca_key_pair)?;
+    let issuer = Issuer::from_ca_cert_pem(ca_cert_pem, ca_key_pair)?;
 
     // Create node certificate parameters
     let mut params = CertificateParams::default();
@@ -185,7 +184,7 @@ pub fn generate_node_cert(
     let key_pair = KeyPair::generate()?;
 
     // Sign with CA
-    let cert = params.signed_by(&key_pair, &ca_cert, &ca_key_pair)?;
+    let cert = params.signed_by(&key_pair, &issuer)?;
 
     Ok(GeneratedCert {
         cert_pem: cert.pem(),

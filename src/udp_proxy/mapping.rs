@@ -3,10 +3,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lits::duration;
 use tokio::sync::RwLock;
 
 /// Default TTL for NAT mappings (5 minutes).
-const DEFAULT_MAPPING_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_MAPPING_TTL: Duration = duration!("5 minutes");
 
 /// A NAT mapping entry for full-cone semantics.
 ///

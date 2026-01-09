@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use lits::duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, mpsc};
@@ -228,7 +229,7 @@ impl Hub {
                 if tunnel_for_cleanup.is_closed().await {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(duration!("5 seconds")).await;
             }
 
             // Cleanup: remove from registry
@@ -308,7 +309,7 @@ impl Hub {
                                 let heartbeat_stream_result = tunnel_clone.open_bi_stream().await;
                                 if let Ok(heartbeat_stream) = heartbeat_stream_result {
                                     loop {
-                                        tokio::time::sleep(std::time::Duration::from_secs(10))
+                                        tokio::time::sleep(duration!("10 seconds"))
                                             .await;
                                         if tunnel_clone.is_closed().await {
                                             break;
@@ -368,7 +369,7 @@ impl Hub {
                                 let heartbeat_stream_result = tunnel_clone.open_bi_stream().await;
                                 if let Ok(heartbeat_stream) = heartbeat_stream_result {
                                     loop {
-                                        tokio::time::sleep(std::time::Duration::from_secs(10))
+                                        tokio::time::sleep(duration!("10 seconds"))
                                             .await;
                                         if tunnel_clone.is_closed().await {
                                             break;
@@ -387,7 +388,7 @@ impl Hub {
                                     tracing::info!("OUT {} disconnected", out_id);
                                     break;
                                 }
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                tokio::time::sleep(duration!("1 second")).await;
                             }
                         });
                     }

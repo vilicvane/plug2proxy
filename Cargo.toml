@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+lits = "0.3"
 async-trait = "0.1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
@@ -12,11 +13,11 @@ serde_json = "1"
 futures = "0.3"
 ipnet = "2"
 libc = "0.2"
-quiche = "0.23"
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+quiche = "0.24"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 regex = "1"
 ring = "0.17"
-socket2 = "0.5"
+socket2 = "0.6"
 thiserror = "2"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
@@ -27,9 +28,9 @@ socks5-server = "0.10"
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
-x509-parser = "0.16"
-maxminddb = "0.24"
-rusqlite = { version = "0.32", features = ["bundled"] }
+x509-parser = "0.18"
+maxminddb = "0.27"
+rusqlite = { version = "0.38", features = ["bundled"] }
 hickory-client = "0.25"
 hickory-resolver = { version = "0.25", features = ["system-config"] }
 hickory-server = { version = "0.25", features = ["resolver"] }
@@ -42,7 +43,7 @@ rustls = { version = "0.23", default-features = false, features = [
   "std",
   "tls12",
 ] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

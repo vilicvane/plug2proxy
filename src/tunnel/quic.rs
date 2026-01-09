@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use lits::duration;
 use ring::rand::SecureRandom;
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, Notify};
@@ -193,7 +194,7 @@ impl QuicConnection {
             let timeout = {
                 let conn = self.inner.lock().await;
                 conn.timeout()
-                    .unwrap_or(std::time::Duration::from_millis(100))
+                    .unwrap_or(duration!("100 ms"))
             };
 
             // Wait for incoming data, send notification, or timeout

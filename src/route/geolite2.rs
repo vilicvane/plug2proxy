@@ -14,7 +14,7 @@ pub struct GeoLite2 {
 
 impl GeoLite2 {
     /// Open a GeoLite2 database from file.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, maxminddb::MaxMindDBError> {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, maxminddb::MaxMindDbError> {
         let path = path.into();
         let reader = Reader::open_readfile(&path)?;
         Ok(Self {
@@ -25,7 +25,7 @@ impl GeoLite2 {
 
     /// Reload the database from disk.
     /// This allows picking up updates without restarting the application.
-    pub fn reload(&self) -> Result<(), maxminddb::MaxMindDBError> {
+    pub fn reload(&self) -> Result<(), maxminddb::MaxMindDbError> {
         let new_reader = Reader::open_readfile(&self.path)?;
         let mut writer = self.reader.write().unwrap();
         *writer = new_reader;
@@ -39,22 +39,21 @@ impl GeoLite2 {
     /// Returns None if the IP is not found in the database.
     pub fn lookup(&self, ip: IpAddr) -> Option<Vec<String>> {
         let reader = self.reader.read().unwrap();
-        let record: maxminddb::geoip2::Country = reader.lookup(ip).ok()?;
+        let lookup_result = reader.lookup(ip).ok()?;
+
+        // Decode the record - returns Result<Option<T>, Error>
+        let record: maxminddb::geoip2::Country = lookup_result.decode().ok()?.flatten()?;
 
         let mut codes = Vec::new();
 
         // Add country ISO code (e.g., "CN", "US")
-        if let Some(country) = record.country {
-            if let Some(iso_code) = country.iso_code {
-                codes.push(iso_code.to_owned());
-            }
+        if let Some(iso_code) = record.country.iso_code {
+            codes.push(iso_code.to_string());
         }
 
         // Add continent code (e.g., "AS", "EU", "NA")
-        if let Some(continent) = record.continent {
-            if let Some(code) = continent.code {
-                codes.push(code.to_owned());
-            }
+        if let Some(code) = record.continent.code {
+            codes.push(code.to_string());
         }
 
         if codes.is_empty() { None } else { Some(codes) }

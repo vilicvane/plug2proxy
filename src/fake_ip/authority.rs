@@ -27,14 +27,14 @@ use hickory_server::{
 };
 use rusqlite::OptionalExtension;
 
-const DAY_IN_MS: u64 = 86_400_000;
-const FAKE_IP_EXPIRATION_TIME_IN_MS: u64 = DAY_IN_MS * 7;
+const DAY_IN_MS: i64 = 86_400_000;
+const FAKE_IP_EXPIRATION_TIME_IN_MS: i64 = DAY_IN_MS * 7;
 
-fn ms_since_epoch() -> u64 {
+fn ms_since_epoch() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64
+        .as_millis() as i64
 }
 
 pub struct FakeAuthority {
