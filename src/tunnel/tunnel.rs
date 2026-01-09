@@ -663,9 +663,11 @@ impl Tunnel {
         self.quic.is_established().await
     }
 
-    /// Check if the tunnel is closed (either QUIC closed or all TCP connections died).
+    /// Check if the tunnel is closed (either QUIC closed, driver exited, or all TCP connections died).
     pub async fn is_closed(&self) -> bool {
-        self.quic.is_closed().await || self.tcp_handle.is_closed()
+        self.quic.is_closed().await
+            || self.tcp_handle.is_closed()
+            || self.driver_handle.is_finished()
     }
 
     /// Close the tunnel and all underlying TCP connections.
@@ -746,6 +748,10 @@ impl Stream {
 
             let result = {
                 let mut conn = self.quic.lock().await;
+                // Check if connection is closed to avoid hanging
+                if conn.is_closed() {
+                    return Err(TunnelError::ConnectionFailed);
+                }
                 conn.stream_send(self.id, &data[total_written..], false)
             };
 
@@ -778,6 +784,10 @@ impl Stream {
 
             let result = {
                 let mut conn = self.quic.lock().await;
+                // Check if connection is closed to avoid hanging
+                if conn.is_closed() {
+                    return Err(TunnelError::ConnectionFailed);
+                }
                 conn.stream_send(self.id, b"", true)
             };
 
@@ -817,6 +827,10 @@ impl Stream {
             // Now try to receive
             let result = {
                 let mut conn = self.quic.lock().await;
+                // Check if connection is closed to avoid hanging
+                if conn.is_closed() {
+                    return Err(TunnelError::ConnectionFailed);
+                }
                 conn.stream_recv(self.id, buf)
             };
 
@@ -839,6 +853,10 @@ impl Stream {
 
             let result = {
                 let mut conn = self.quic.lock().await;
+                // Check if connection is closed to avoid hanging
+                if conn.is_closed() {
+                    return Err(TunnelError::ConnectionFailed);
+                }
                 conn.stream_send(self.id, b"", true)
             };
 
@@ -938,10 +956,26 @@ fn spawn_tcp_io_tasks(
     // This task also handles adding new connections dynamically
     tokio::spawn(async move {
         let mut index = 0;
+        // Track if we've ever had connections (to distinguish initial state from all-dead state)
+        let mut had_connections = !senders.is_empty();
+
         loop {
             // Check if transport was marked as dead (e.g., by close())
             if transport_dead_for_send.load(std::sync::atomic::Ordering::Relaxed) {
                 tracing::debug!("TCP send task exiting: transport marked as dead");
+                break;
+            }
+
+            // Check if all recv connections have died (current_count tracks recv side)
+            // This ensures the incoming channel closes when all TCP connections are gone
+            if had_connections
+                && current_count_for_send.load(std::sync::atomic::Ordering::Relaxed) == 0
+            {
+                tracing::debug!(
+                    "TCP send task exiting: all recv connections gone (senders: {})",
+                    senders.len()
+                );
+                transport_dead_for_send.store(true, std::sync::atomic::Ordering::Relaxed);
                 break;
             }
 
@@ -957,6 +991,7 @@ fn spawn_tcp_io_tasks(
                     let (sender, receiver) = conn.split();
                     senders.push(sender);
                     current_count_for_send.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    had_connections = true;
 
                     // If there's initial data, inject it into the incoming channel first
                     if let Some(data) = initial_data {
@@ -1009,6 +1044,11 @@ fn spawn_tcp_io_tasks(
                         // Request refuel
                         let _ = refuel_tx_for_send.try_send(());
                     }
+                }
+
+                // Periodic check for dead connections (in case no outgoing traffic)
+                _ = tokio::time::sleep(duration!("1 second")) => {
+                    // Just loop back to check the connection count
                 }
             }
         }

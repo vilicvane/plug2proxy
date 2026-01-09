@@ -169,6 +169,14 @@ impl QuicConnection {
     /// Process incoming datagrams and drive the QUIC state machine.
     /// Returns when the connection is closed.
     pub async fn drive(&self) -> Result<(), QuicError> {
+        let result = self.drive_inner().await;
+        // Notify all waiters so streams can detect the closed state
+        self.recv_notify.notify_waiters();
+        self.send_notify.notify_waiters();
+        result
+    }
+
+    async fn drive_inner(&self) -> Result<(), QuicError> {
         let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
         let mut out = vec![0u8; MAX_DATAGRAM_SIZE];
 
@@ -201,7 +209,8 @@ impl QuicConnection {
             };
 
             // Wait for incoming data, send notification, or timeout
-            let recv_result = {
+            // Use Option<Option<Bytes>> to distinguish: Some(Some(data))=data, Some(None)=channel closed, None=timeout
+            let recv_result: Option<Option<Bytes>> = {
                 let mut rx = self.incoming_rx.lock().await;
                 tokio::select! {
                     biased;
@@ -212,14 +221,14 @@ impl QuicConnection {
                         continue;
                     }
 
-                    result = rx.recv() => result,
+                    result = rx.recv() => Some(result),
 
                     _ = tokio::time::sleep(timeout) => None,
                 }
             };
 
             match recv_result {
-                Some(data) => {
+                Some(Some(data)) => {
                     let mut conn = self.inner.lock().await;
                     let recv_info = quiche::RecvInfo {
                         from: "0.0.0.0:0".parse().unwrap(),
@@ -237,6 +246,11 @@ impl QuicConnection {
                             tracing::warn!("QUIC recv error: {}", e);
                         }
                     }
+                }
+                Some(None) => {
+                    // Channel closed - all TCP connections are gone
+                    tracing::debug!("incoming channel closed, all TCP connections gone");
+                    return Err(QuicError::TransportClosed);
                 }
                 None => {
                     // Timeout - process any pending events

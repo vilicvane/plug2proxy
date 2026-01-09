@@ -409,7 +409,7 @@ impl InNode {
     pub async fn connect_with_label(
         &self,
         target: &str,
-        label: &str,
+        label: Label,
     ) -> Result<ProxyStream, InNodeError> {
         use super::message::RouteEntry;
 
@@ -419,13 +419,18 @@ impl InNode {
         }
 
         let routes = vec![RouteEntry {
-            label: Label::Custom(label.to_string()),
+            label: label.clone(),
             tag: None,
         }];
 
-        // Try direct OUT connection first
-        if let Some(stream) = self.try_direct_out_connect(label, target, &routes).await? {
-            return Ok(ProxyStream::from_quic(stream));
+        // Try direct OUT connection first (only for custom labels)
+        if let Label::Custom(ref label_str) = label {
+            if let Some(stream) = self
+                .try_direct_out_connect(label_str, target, &routes)
+                .await?
+            {
+                return Ok(ProxyStream::from_quic(stream));
+            }
         }
 
         // Fall back to HUB relay

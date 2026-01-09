@@ -1,0 +1,12 @@
+---
+name: multipass-debugging
+description: Testing with Multipass Virtual Machine
+---
+
+# Overview
+
+To test TPROXY, we need to use Multipass Virtual Machines to avoid messing up the development environment.
+
+But the development environment is WSL2, you need to use `multipass.exe` in WSL2 to interact with the Multipass Virtual Machines in the Windows host.
+
+You can use `multipass.exe transfer` to transfer files to the Multipass Virtual Machines.

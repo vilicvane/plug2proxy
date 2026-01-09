@@ -665,16 +665,19 @@ impl OutNode {
         let stream_recv = Arc::clone(&stream);
 
         let stream_to_target = async move {
-            let mut buf = vec![0u8; 8192];
+            let mut buf = vec![0u8; 65536];
             loop {
                 let (n, fin) = stream_recv.recv_wait(&mut buf).await?;
                 if n > 0 {
                     tracing::trace!("OUT relay: stream->target {} bytes", n);
                     target_write.write_all(&buf[..n]).await?;
-                    target_write.flush().await?;
                 }
                 if fin {
-                    tracing::debug!("OUT relay: stream fin");
+                    tracing::debug!(
+                        "OUT relay: stream fin, flushing and shutting down target write"
+                    );
+                    target_write.flush().await?;
+                    target_write.shutdown().await?;
                     break;
                 }
             }
@@ -682,11 +685,13 @@ impl OutNode {
         };
 
         let target_to_stream = async move {
-            let mut buf = vec![0u8; 8192];
+            let mut buf = vec![0u8; 65536];
             loop {
                 let n = target_read.read(&mut buf).await?;
                 if n == 0 {
                     tracing::debug!("OUT relay: target closed");
+                    // Send FIN to signal end of data
+                    let _ = stream_send.send_fin(&[]).await;
                     break;
                 }
                 tracing::trace!("OUT relay: target->stream {} bytes", n);
@@ -695,15 +700,18 @@ impl OutNode {
             Ok::<_, OutNodeError>(())
         };
 
-        // Wait for either direction to finish
-        tokio::select! {
-            r = stream_to_target => { let _ = r; }
-            r = target_to_stream => { let _ = r; }
+        // Wait for BOTH directions to complete for proper data delivery
+        let (r1, r2) = tokio::join!(stream_to_target, target_to_stream);
+        if let Err(e) = r1 {
+            tracing::debug!("OUT relay: stream_to_target error: {}", e);
+        }
+        if let Err(e) = r2 {
+            tracing::debug!("OUT relay: target_to_stream error: {}", e);
         }
 
-        // Shutdown stream to immediately release stream credits
-        let _ = stream.shutdown().await;
-        tracing::debug!("OUT relay: stream shutdown");
+        // Use graceful close (FIN) instead of shutdown (RESET)
+        let _ = stream.close().await;
+        tracing::debug!("OUT relay: stream closed gracefully");
 
         Ok(())
     }
