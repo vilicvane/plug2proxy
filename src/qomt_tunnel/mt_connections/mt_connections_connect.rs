@@ -1,0 +1,131 @@
+use std::net::SocketAddr;
+
+use lits::duration;
+use tokio::{io::AsyncWriteExt, net::TcpStream, sync::oneshot, time::sleep};
+
+use crate::{
+  qomt_tunnel::{
+    MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsMagic,
+    MtConnectionsRequestHead, MtConnectionsRequestHeadData, MtConnectionsResponseHead,
+    MtConnectionsResponseHeadData,
+  },
+  utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
+};
+
+pub async fn mt_connections_connect(
+  address: SocketAddr,
+  target_connections: usize,
+) -> Result<(MtConnections, oneshot::Sender<()>), MtConnectionsConnectError> {
+  let mut tcp_stream = TcpStream::connect(address).await?;
+
+  send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create).await?;
+
+  let id = {
+    let response_head =
+      read_postcard_from_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
+
+    match response_head.data {
+      MtConnectionsResponseHeadData::Created(id) => id,
+      _ => return Err(MtConnectionsConnectError::InvalidResponseHead),
+    }
+  };
+
+  let (mut mt_connections, tcp_stream_sender, mut tcp_stream_close_receiver) =
+    MtConnections::new(tcp_stream);
+
+  let (extend_signal_sender, extend_signal_receiver) = oneshot::channel();
+
+  mt_connections.spawn(async move {
+    let add_tcp_stream = || async {
+      let tcp_stream = loop {
+        if let Ok(tcp_stream) = async {
+          let mut tcp_stream = TcpStream::connect(address).await?;
+
+          send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Extend(id)).await?;
+
+          let response_head =
+            read_postcard_from_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
+
+          match response_head.data {
+            MtConnectionsResponseHeadData::Extended => Ok(tcp_stream),
+            _ => Err(MtConnectionsConnectError::InvalidResponseHead),
+          }
+        }
+        .await
+        .inspect_err(|error| {
+          log::warn!("error connecting to address {}: {}", address, error);
+        }) {
+          break tcp_stream;
+        }
+
+        sleep(duration!("5s")).await;
+      };
+
+      tcp_stream_sender
+        .send(tcp_stream)
+        .inspect_err(|error| {
+          log::warn!("error adding tcp stream to mt connections: {}", error);
+        })
+        .is_ok()
+    };
+
+    if extend_signal_receiver
+      .await
+      .inspect_err(|error| {
+        log::warn!("error receiving extend signal: {}", error);
+      })
+      .is_ok()
+    {
+      for _ in 1..target_connections {
+        add_tcp_stream().await;
+      }
+    }
+
+    while tcp_stream_close_receiver.recv().await.is_some() {
+      let tcp_stream = loop {
+        if let Ok(tcp_stream) = TcpStream::connect(address).await.inspect_err(|error| {
+          log::warn!("error connecting to address {}: {}", address, error);
+        }) {
+          break tcp_stream;
+        }
+
+        sleep(duration!("5s")).await;
+      };
+
+      tcp_stream_sender
+        .send(tcp_stream)
+        .inspect_err(|error| {
+          log::warn!("error adding tcp stream to mt connections: {}", error);
+        })
+        .ok();
+    }
+  });
+
+  Ok((mt_connections, extend_signal_sender))
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum MtConnectionsConnectError {
+  #[error("I/O error: {0}")]
+  Io(#[from] std::io::Error),
+  #[error("Read postcard from stream error: {0}")]
+  ReadPostcardFromStream(#[from] ReadPostcardFromStreamError),
+  #[error("Invalid response head")]
+  InvalidResponseHead,
+}
+
+async fn send_request_head(
+  stream: &mut TcpStream,
+  data: MtConnectionsRequestHeadData,
+) -> Result<(), MtConnectionsConnectError> {
+  let bytes =
+    postcard::to_vec::<_, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE>(&MtConnectionsRequestHead {
+      magic: MtConnectionsMagic,
+      data,
+    })
+    .unwrap();
+
+  stream.write_all(&bytes).await?;
+
+  Ok(())
+}
