@@ -5,9 +5,9 @@ use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
 
 use crate::{
   qomt_tunnel::{
-    MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE,
-    MtConnections, MtConnectionsId, MtConnectionsMagic, MtConnectionsRequestHead,
-    MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
+    MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsId, MtConnectionsMagic,
+    MtConnectionsRequestHead, MtConnectionsRequestHeadData, MtConnectionsResponseHead,
+    MtConnectionsResponseHeadData,
   },
   utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
 };
@@ -66,8 +66,17 @@ impl MtConnectionsListener {
 pub enum MtConnectionsListenerError {
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
-  #[error("Read postcard from stream error: {0}")]
-  ReadPostcardFromStream(#[from] ReadPostcardFromStreamError),
+  #[error("Postcard deserialization error: {0}")]
+  PostcardDeserialization(postcard::Error),
+}
+
+impl From<ReadPostcardFromStreamError> for MtConnectionsListenerError {
+  fn from(error: ReadPostcardFromStreamError) -> Self {
+    match error {
+      ReadPostcardFromStreamError::Io(error) => Self::Io(error),
+      ReadPostcardFromStreamError::Deserialization(error) => Self::PostcardDeserialization(error),
+    }
+  }
 }
 
 async fn send_response_head(

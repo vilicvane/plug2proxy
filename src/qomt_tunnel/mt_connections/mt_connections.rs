@@ -213,8 +213,6 @@ mod tests {
   fn test_postcard_serialization() {
     let id = MtConnectionsId::new();
 
-    println!("id: {:?}", id);
-
     let request_head_bytes =
       postcard::to_vec::<_, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE>(&MtConnectionsRequestHead {
         magic: MtConnectionsMagic,
@@ -228,9 +226,6 @@ mod tests {
         data: MtConnectionsResponseHeadData::Created(id),
       })
       .unwrap();
-
-    println!("request head bytes: {:?}", request_head_bytes);
-    println!("response head bytes: {:?}", response_head_bytes);
 
     let request_head =
       postcard::from_bytes::<MtConnectionsRequestHead>(&request_head_bytes).unwrap();

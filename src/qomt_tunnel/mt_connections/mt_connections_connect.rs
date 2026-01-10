@@ -108,10 +108,19 @@ pub async fn mt_connections_connect(
 pub enum MtConnectionsConnectError {
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
-  #[error("Read postcard from stream error: {0}")]
-  ReadPostcardFromStream(#[from] ReadPostcardFromStreamError),
+  #[error("Postcard deserialization error: {0}")]
+  PostcardDeserialization(postcard::Error),
   #[error("Invalid response head")]
   InvalidResponseHead,
+}
+
+impl From<ReadPostcardFromStreamError> for MtConnectionsConnectError {
+  fn from(error: ReadPostcardFromStreamError) -> Self {
+    match error {
+      ReadPostcardFromStreamError::Io(error) => Self::Io(error),
+      ReadPostcardFromStreamError::Deserialization(error) => Self::PostcardDeserialization(error),
+    }
+  }
 }
 
 async fn send_request_head(

@@ -1,6 +1,3 @@
-use std::pin::Pin;
-
-use postcard::accumulator::{CobsAccumulator, FeedResult};
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -33,6 +30,4 @@ pub enum ReadPostcardFromStreamError {
   Io(#[from] std::io::Error),
   #[error("Postcard deserialization error")]
   Deserialization(#[from] postcard::Error),
-  #[error("Accumulator buffer overflow")]
-  OverFull,
 }
