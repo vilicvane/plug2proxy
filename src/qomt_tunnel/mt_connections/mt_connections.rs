@@ -11,7 +11,7 @@ use futures::{Sink, Stream};
 use lowkit::SelfWrapExt;
 use serde::{Deserialize, Serialize};
 use tokio::{
-  io::AsyncWriteExt,
+  io::{AsyncRead, AsyncWrite, AsyncWriteExt},
   net::{
     TcpStream,
     tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -173,10 +173,10 @@ impl<TPacket> Sink<TPacket> for MtConnections<TPacket> {
 
 pub trait MtConnectionsPacket: Sized + Send + Sync + 'static {
   fn read_next_packet(
-    stream: &mut OwnedReadHalf,
+    stream: &mut (dyn AsyncRead + Unpin + Send),
   ) -> impl Future<Output = Result<Option<Self>, std::io::Error>> + Send;
   fn write_packet(
-    stream: &mut OwnedWriteHalf,
+    stream: &mut (dyn AsyncWrite + Unpin + Send),
     packet: Self,
   ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 }
