@@ -1,25 +1,23 @@
 use std::{
   pin::Pin,
-  sync::Arc,
   task::{Context, Poll},
 };
 
-use lowkit::{AutoAbortHandle, AutoAbortHandleExt, SelfWrapExt};
+use futures::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use tokio::{
-  io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, copy_bidirectional, duplex},
+  io::{AsyncReadExt, AsyncWriteExt},
   net::TcpStream,
-  spawn,
   sync::mpsc,
-  task::{JoinHandle, JoinSet},
+  task::JoinSet,
 };
 use uuid::{Uuid, serde::compact};
 
-use crate::utils::{MpmcStream, postcard::read_postcard_from_stream};
+const PACKET_CHANNEL_CAPACITY: usize = 1024;
 
 pub struct MtConnections {
-  read_stream: MpmcStream,
-  write_stream: MpmcStream,
+  packet_sink: flume::r#async::SendSink<'static, Vec<u8>>,
+  packet_stream: flume::r#async::RecvStream<'static, Vec<u8>>,
   task_set: JoinSet<()>,
 }
 
@@ -32,28 +30,48 @@ impl MtConnections {
     mpsc::UnboundedReceiver<()>,
   ) {
     let (tcp_stream_sender, mut tcp_stream_receiver) = mpsc::unbounded_channel();
-    let (tcp_stream_close_sender, mut tcp_stream_close_receiver) = mpsc::unbounded_channel();
+    let (tcp_stream_close_sender, tcp_stream_close_receiver) = mpsc::unbounded_channel();
 
-    let external_read_stream = MpmcStream::default();
-    let external_write_stream = MpmcStream::default();
-
-    let write_stream = external_read_stream.clone();
-    let read_stream = external_write_stream.clone();
+    let (external_packet_sender, packet_receiver) =
+      flume::bounded::<Vec<u8>>(PACKET_CHANNEL_CAPACITY);
+    let (packet_sender, external_packet_receiver) =
+      flume::bounded::<Vec<u8>>(PACKET_CHANNEL_CAPACITY);
 
     let mut task_set = JoinSet::new();
 
     task_set.spawn(async move {
-      let copy_tcp_stream = |mut tcp_stream: TcpStream| {
-        let mut stream = tokio::io::join(read_stream.clone(), write_stream.clone());
+      let pipe_bidirectional = |tcp_stream: TcpStream| {
         let tcp_stream_close_sender = tcp_stream_close_sender.clone();
 
+        let packet_sender = packet_sender.clone();
+        let packet_receiver = packet_receiver.clone();
+
+        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
         async move {
-          tokio::io::copy_bidirectional(&mut stream, &mut tcp_stream)
-            .await
-            .inspect_err(|error| {
-              log::warn!("error copying bidirectional stream: {}", error);
-            })
-            .ok();
+          tokio::try_join!(
+            async move {
+              while let Ok(packet) = packet_receiver.recv_async().await {
+                tcp_write.write_u32(packet.len() as u32).await?;
+                tcp_write.write_all(&packet).await?;
+              }
+
+              anyhow::Ok(())
+            },
+            async move {
+              while let Ok(length) = tcp_read.read_u32().await {
+                let mut packet = vec![0; length as usize];
+                tcp_read.read_exact(&mut packet).await?;
+                packet_sender.send_async(packet).await?;
+              }
+
+              anyhow::Ok(())
+            },
+          )
+          .inspect_err(|error| {
+            log::warn!("error copying bidirectional stream: {}", error);
+          })
+          .ok();
 
           tcp_stream_close_sender.send(()).ok();
         }
@@ -61,17 +79,17 @@ impl MtConnections {
 
       let mut join_set = JoinSet::new();
 
-      join_set.spawn(copy_tcp_stream(initial_tcp_stream));
+      join_set.spawn(pipe_bidirectional(initial_tcp_stream));
 
       while let Some(tcp_stream) = tcp_stream_receiver.recv().await {
-        join_set.spawn(copy_tcp_stream(tcp_stream));
+        join_set.spawn(pipe_bidirectional(tcp_stream));
       }
     });
 
     (
       Self {
-        read_stream: external_read_stream,
-        write_stream: external_write_stream,
+        packet_sink: external_packet_sender.into_sink(),
+        packet_stream: external_packet_receiver.into_stream(),
         task_set,
       },
       tcp_stream_sender,
@@ -84,31 +102,31 @@ impl MtConnections {
   }
 }
 
-impl AsyncRead for MtConnections {
-  fn poll_read(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut ReadBuf<'_>,
-  ) -> Poll<Result<(), std::io::Error>> {
-    MpmcStream::poll_read(Pin::new(&mut self.read_stream), cx, buf)
+impl Stream for MtConnections {
+  type Item = Vec<u8>;
+
+  fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    Pin::new(&mut self.packet_stream).poll_next(cx)
   }
 }
 
-impl AsyncWrite for MtConnections {
-  fn poll_write(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-  ) -> Poll<Result<usize, std::io::Error>> {
-    MpmcStream::poll_write(Pin::new(&mut self.write_stream), cx, buf)
+impl Sink<Vec<u8>> for MtConnections {
+  type Error = flume::SendError<Vec<u8>>;
+
+  fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    Pin::new(&mut self.packet_sink).poll_ready(cx)
   }
 
-  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    MpmcStream::poll_flush(Pin::new(&mut self.write_stream), cx)
+  fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
+    Pin::new(&mut self.packet_sink).start_send(item)
   }
 
-  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    MpmcStream::poll_shutdown(Pin::new(&mut self.write_stream), cx)
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    Pin::new(&mut self.packet_sink).poll_flush(cx)
+  }
+
+  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    Pin::new(&mut self.packet_sink).poll_close(cx)
   }
 }
 

@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+  use futures::{SinkExt, StreamExt};
   use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -24,13 +25,13 @@ mod tests {
 
         let mut mt_connections = listener.accept().await?;
 
-        mt_connections.write_all(b"hello from listener").await?;
+        mt_connections.send(b"hello from listener".to_vec()).await?;
 
-        let mut buffer = [0u8; 18];
+        let packet = mt_connections.next().await.unwrap();
 
-        mt_connections.read_exact(&mut buffer).await?;
+        println!("listener packet: {:?}", packet);
 
-        assert_eq!(&buffer, b"hello from connect");
+        assert_eq!(&packet, b"hello from connect");
 
         anyhow::Ok(())
       },
@@ -39,13 +40,13 @@ mod tests {
 
         let (mut mt_connections, _) = mt_connections_connect(address, 2).await?;
 
-        let mut buffer = [0u8; 19];
+        let packet = mt_connections.next().await.unwrap();
 
-        mt_connections.read_exact(&mut buffer).await?;
+        println!("connect packet: {:?}", packet);
 
-        assert_eq!(&buffer, b"hello from listener");
+        assert_eq!(&packet, b"hello from listener");
 
-        mt_connections.write_all(b"hello from connect").await?;
+        mt_connections.send(b"hello from connect".to_vec()).await?;
 
         anyhow::Ok(())
       },
