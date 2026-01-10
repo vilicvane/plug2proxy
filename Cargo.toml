@@ -24,3 +24,6 @@ disallowed_macros = "warn"
 module_inception = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"
+
+[dev-dependencies]
+test-log = "0.2.19"

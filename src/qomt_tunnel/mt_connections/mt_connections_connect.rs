@@ -1,7 +1,12 @@
 use std::net::SocketAddr;
 
 use lits::duration;
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::oneshot, time::sleep};
+use tokio::{
+  io::AsyncWriteExt,
+  net::TcpStream,
+  sync::oneshot,
+  time::{sleep, timeout},
+};
 
 use crate::{
   qomt_tunnel::{
@@ -84,23 +89,49 @@ where
       }
     }
 
-    while tcp_stream_close_receiver.recv().await.is_some() {
-      let tcp_stream = loop {
-        if let Ok(tcp_stream) = TcpStream::connect(address).await.inspect_err(|error| {
-          log::warn!("error connecting to address {}: {}", address, error);
-        }) {
-          break tcp_stream;
+    'outer: loop {
+      if tcp_stream_close_receiver.recv().await.is_none() {
+        break;
+      }
+
+      let mut connections_to_extend = 1;
+
+      loop {
+        match timeout(duration!("1s"), tcp_stream_close_receiver.recv()).await {
+          // another close within 1 second.
+          Ok(Some(())) => connections_to_extend += 1,
+          // all connections closed.
+          Ok(None) => break 'outer,
+          // nothing new in 1 second, time to handle the batch.
+          Err(_) => break,
+        }
+      }
+
+      for _ in 1..connections_to_extend {
+        let tcp_stream = loop {
+          if let Ok(tcp_stream) = TcpStream::connect(address).await.inspect_err(|error| {
+            log::warn!("error connecting to address {}: {}", address, error);
+          }) {
+            break tcp_stream;
+          }
+
+          sleep(duration!("5s")).await;
+        };
+
+        if tcp_stream_close_receiver.is_closed() {
+          break 'outer;
         }
 
-        sleep(duration!("5s")).await;
-      };
-
-      tcp_stream_sender
-        .send(tcp_stream)
-        .inspect_err(|error| {
-          log::warn!("error adding tcp stream to mt connections: {}", error);
-        })
-        .ok();
+        if tcp_stream_sender
+          .send(tcp_stream)
+          .inspect_err(|error| {
+            log::warn!("error extending tcp stream to mt connections: {}", error);
+          })
+          .is_err()
+        {
+          break 'outer;
+        }
+      }
     }
   });
 
