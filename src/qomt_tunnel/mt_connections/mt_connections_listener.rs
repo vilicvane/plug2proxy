@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use lowkit::SelfWrapExt;
 use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
@@ -6,26 +6,34 @@ use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
 use crate::{
   qomt_tunnel::{
     MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsId, MtConnectionsMagic,
-    MtConnectionsRequestHead, MtConnectionsRequestHeadData, MtConnectionsResponseHead,
-    MtConnectionsResponseHeadData,
+    MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
+    MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
   utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
 };
 
-pub struct MtConnectionsListener {
+pub struct MtConnectionsListener<TPacket>
+where
+  TPacket: MtConnectionsPacket,
+{
   listener: Arc<tokio::net::TcpListener>,
   tcp_stream_sender_map: HashMap<MtConnectionsId, mpsc::UnboundedSender<TcpStream>>,
+  _type_hint: PhantomData<TPacket>,
 }
 
-impl MtConnectionsListener {
+impl<TPacket> MtConnectionsListener<TPacket>
+where
+  TPacket: MtConnectionsPacket,
+{
   pub fn new(listener: tokio::net::TcpListener) -> Self {
     Self {
       listener: listener.arc(),
       tcp_stream_sender_map: HashMap::new(),
+      _type_hint: PhantomData,
     }
   }
 
-  pub async fn accept(&mut self) -> Result<MtConnections, MtConnectionsListenerError> {
+  pub async fn accept(&mut self) -> Result<MtConnections<TPacket>, MtConnectionsListenerError> {
     loop {
       let (mut stream, _) = self.listener.accept().await?;
 
@@ -39,7 +47,6 @@ impl MtConnectionsListener {
 
           let (mt_connections, tcp_stream_sender, _) = MtConnections::new(stream);
 
-          // prune tcp_stream_sender_map
           self
             .tcp_stream_sender_map
             .retain(|_, tcp_stream_sender| !tcp_stream_sender.is_closed());

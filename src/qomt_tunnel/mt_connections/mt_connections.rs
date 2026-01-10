@@ -6,8 +6,10 @@ use std::{
 use futures::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use tokio::{
-  io::{AsyncReadExt, AsyncWriteExt},
-  net::TcpStream,
+  net::{
+    TcpStream,
+    tcp::{OwnedReadHalf, OwnedWriteHalf},
+  },
   sync::mpsc,
   task::JoinSet,
 };
@@ -15,13 +17,19 @@ use uuid::{Uuid, serde::compact};
 
 const PACKET_CHANNEL_CAPACITY: usize = 1024;
 
-pub struct MtConnections {
-  packet_sink: flume::r#async::SendSink<'static, Vec<u8>>,
-  packet_stream: flume::r#async::RecvStream<'static, Vec<u8>>,
+pub struct MtConnections<TPacket>
+where
+  TPacket: 'static,
+{
+  packet_sink: flume::r#async::SendSink<'static, TPacket>,
+  packet_stream: flume::r#async::RecvStream<'static, TPacket>,
   task_set: JoinSet<()>,
 }
 
-impl MtConnections {
+impl<TPacket> MtConnections<TPacket>
+where
+  TPacket: MtConnectionsPacket,
+{
   pub fn new(
     initial_tcp_stream: TcpStream,
   ) -> (
@@ -33,9 +41,9 @@ impl MtConnections {
     let (tcp_stream_close_sender, tcp_stream_close_receiver) = mpsc::unbounded_channel();
 
     let (external_packet_sender, packet_receiver) =
-      flume::bounded::<Vec<u8>>(PACKET_CHANNEL_CAPACITY);
+      flume::bounded::<TPacket>(PACKET_CHANNEL_CAPACITY);
     let (packet_sender, external_packet_receiver) =
-      flume::bounded::<Vec<u8>>(PACKET_CHANNEL_CAPACITY);
+      flume::bounded::<TPacket>(PACKET_CHANNEL_CAPACITY);
 
     let mut task_set = JoinSet::new();
 
@@ -52,16 +60,13 @@ impl MtConnections {
           tokio::try_join!(
             async move {
               while let Ok(packet) = packet_receiver.recv_async().await {
-                tcp_write.write_u32(packet.len() as u32).await?;
-                tcp_write.write_all(&packet).await?;
+                TPacket::write_packet(&mut tcp_write, packet).await?;
               }
 
               anyhow::Ok(())
             },
             async move {
-              while let Ok(length) = tcp_read.read_u32().await {
-                let mut packet = vec![0; length as usize];
-                tcp_read.read_exact(&mut packet).await?;
+              while let Some(packet) = TPacket::read_next_packet(&mut tcp_read).await? {
                 packet_sender.send_async(packet).await?;
               }
 
@@ -102,22 +107,22 @@ impl MtConnections {
   }
 }
 
-impl Stream for MtConnections {
-  type Item = Vec<u8>;
+impl<TPacket> Stream for MtConnections<TPacket> {
+  type Item = TPacket;
 
   fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
     Pin::new(&mut self.packet_stream).poll_next(cx)
   }
 }
 
-impl Sink<Vec<u8>> for MtConnections {
-  type Error = flume::SendError<Vec<u8>>;
+impl<TPacket> Sink<TPacket> for MtConnections<TPacket> {
+  type Error = flume::SendError<TPacket>;
 
   fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
     Pin::new(&mut self.packet_sink).poll_ready(cx)
   }
 
-  fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
+  fn start_send(mut self: Pin<&mut Self>, item: TPacket) -> Result<(), Self::Error> {
     Pin::new(&mut self.packet_sink).start_send(item)
   }
 
@@ -128,6 +133,16 @@ impl Sink<Vec<u8>> for MtConnections {
   fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
     Pin::new(&mut self.packet_sink).poll_close(cx)
   }
+}
+
+pub trait MtConnectionsPacket: Sized + Send + Sync + 'static {
+  fn read_next_packet(
+    stream: &mut OwnedReadHalf,
+  ) -> impl Future<Output = Result<Option<Self>, std::io::Error>> + Send;
+  fn write_packet(
+    stream: &mut OwnedWriteHalf,
+    packet: Self,
+  ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Debug)]

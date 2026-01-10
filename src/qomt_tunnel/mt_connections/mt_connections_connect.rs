@@ -6,16 +6,19 @@ use tokio::{io::AsyncWriteExt, net::TcpStream, sync::oneshot, time::sleep};
 use crate::{
   qomt_tunnel::{
     MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsMagic,
-    MtConnectionsRequestHead, MtConnectionsRequestHeadData, MtConnectionsResponseHead,
-    MtConnectionsResponseHeadData,
+    MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
+    MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
   utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
 };
 
-pub async fn mt_connections_connect(
+pub async fn mt_connections_connect<TPacket>(
   address: SocketAddr,
   target_connections: usize,
-) -> Result<(MtConnections, oneshot::Sender<()>), MtConnectionsConnectError> {
+) -> Result<(MtConnections<TPacket>, oneshot::Sender<()>), MtConnectionsConnectError>
+where
+  TPacket: MtConnectionsPacket,
+{
   let mut tcp_stream = TcpStream::connect(address).await?;
 
   send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create).await?;
@@ -31,7 +34,7 @@ pub async fn mt_connections_connect(
   };
 
   let (mut mt_connections, tcp_stream_sender, mut tcp_stream_close_receiver) =
-    MtConnections::new(tcp_stream);
+    MtConnections::<TPacket>::new(tcp_stream);
 
   let (extend_signal_sender, extend_signal_receiver) = oneshot::channel();
 
