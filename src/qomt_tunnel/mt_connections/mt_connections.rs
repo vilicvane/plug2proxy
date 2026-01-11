@@ -8,14 +8,10 @@ use std::{
 };
 
 use futures::{Sink, Stream};
-use lowkit::SelfWrapExt;
 use serde::{Deserialize, Serialize};
 use tokio::{
-  io::{AsyncRead, AsyncWrite, AsyncWriteExt},
-  net::{
-    TcpStream,
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
-  },
+  io::{AsyncRead, AsyncWrite},
+  net::TcpStream,
   sync::mpsc,
   task::JoinSet,
 };
@@ -188,6 +184,12 @@ pub struct MtConnectionsId(#[serde(with = "compact")] Uuid);
 impl MtConnectionsId {
   pub fn new() -> Self {
     Self(Uuid::new_v4())
+  }
+}
+
+impl Default for MtConnectionsId {
+  fn default() -> Self {
+    Self::new()
   }
 }
 

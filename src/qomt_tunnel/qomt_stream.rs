@@ -3,11 +3,17 @@ use std::{
   task::{Context, Poll},
 };
 
-use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf, ReadHalf, SimplexStream, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, SimplexStream, WriteHalf};
 
 pub struct QomtStream {
-  pub read: ReadHalf<SimplexStream>,
-  pub write: WriteHalf<SimplexStream>,
+  read: ReadHalf<SimplexStream>,
+  write: WriteHalf<SimplexStream>,
+}
+
+impl QomtStream {
+  pub fn new(read: ReadHalf<SimplexStream>, write: WriteHalf<SimplexStream>) -> Self {
+    Self { read, write }
+  }
 }
 
 impl AsyncRead for QomtStream {

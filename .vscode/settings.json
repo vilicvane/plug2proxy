@@ -1,14 +1,18 @@
 {
   "cSpell.words": [
+    "bidi",
     "clippy",
     "datagram",
     "datagrams",
+    "gcongestion",
     "lowkit",
     "mpmc",
     "mtcp",
     "oneshot",
+    "pems",
     "qomt",
     "quic",
+    "rcgen",
     "thiserror"
   ]
 }

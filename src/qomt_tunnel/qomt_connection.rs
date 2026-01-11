@@ -1,192 +1,342 @@
 use std::{
   collections::HashMap,
-  net::{IpAddr, Ipv4Addr, SocketAddr},
-  sync::Arc,
+  sync::{
+    Arc,
+    atomic::{self, AtomicBool},
+  },
 };
 
-use futures::{SinkExt, StreamExt};
-use lits::{bytes, duration};
+use colored::Colorize;
+use futures::{Sink, SinkExt, Stream, StreamExt};
+use lits::bytes;
 use lowkit::{SelfWrapExt, tokio_join_set};
 use tokio::{
-  io::{AsyncReadExt, AsyncWriteExt, SimplexStream, duplex, simplex},
+  io::{AsyncReadExt, AsyncWriteExt, SimplexStream, WriteHalf, simplex},
+  spawn,
   sync::{Notify, mpsc},
   task::JoinSet,
-  time::sleep,
+  time::sleep_until,
 };
 
-use crate::qomt_tunnel::{
-  MtConnections, MtConnectionsPacket, QomtStream, bytes_packet::BytesPacket,
+use crate::{
+  constants::SERVER_COMMON_NAME,
+  qomt_tunnel::{
+    MAX_DATAGRAM_SIZE, QomtStream, UNSPECIFIED_SOCKET_ADDRESS, bytes_packet::BytesPacket,
+  },
 };
 
-/// Though the underlying transport is TCP and we could have larger datagrams,
-/// but we'll stick with smaller ones in case it would affect performance like latency.
-const MAX_DATAGRAM_SIZE: usize = 1500;
-
-const READ_WRITE_BUFFER_SIZE: usize = bytes!("16 KiB") as usize;
+const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 const STREAM_MAX_BUFFER_SIZE: usize = bytes!("256 KiB") as usize;
 
-pub struct QomtConnection {
-  quiche_connection: Arc<tokio::sync::Mutex<quiche::Connection>>,
+pub struct QomtConnection<'a> {
+  id: quiche::ConnectionId<'a>,
+  next_stream_id_index: u64,
+  side: QomtConnectionSide,
+  established: Arc<AtomicBool>,
+  established_notify: Arc<Notify>,
+  create_stream: Arc<
+    dyn Fn(
+      u64,
+    ) -> (
+      QomtStream,
+      Arc<tokio::sync::Mutex<WriteHalf<SimplexStream>>>,
+    ),
+  >,
   stream_receiver: mpsc::UnboundedReceiver<QomtStream>,
-  task_set: JoinSet<()>,
+  _task_set: JoinSet<()>,
 }
 
-impl QomtConnection {
-  pub fn new(
+impl<'a> QomtConnection<'a> {
+  pub fn connect<TSink, TStream>(
+    quiche_config: &mut quiche::Config,
+    underlying_sink: TSink,
+    underlying_stream: TStream,
+  ) -> Self
+  where
+    TSink: Sink<BytesPacket> + Unpin + Send + 'static,
+    TSink::Error: std::fmt::Display,
+    TStream: Stream<Item = BytesPacket> + Unpin + Send + 'static,
+  {
+    let id = quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec());
+
+    let quiche_connection = quiche::connect(
+      SERVER_COMMON_NAME.some(),
+      &id,
+      *UNSPECIFIED_SOCKET_ADDRESS,
+      *UNSPECIFIED_SOCKET_ADDRESS,
+      quiche_config,
+    )
+    .unwrap_or_else(|error| panic!("failed to connect to quiche connection: {}", error));
+
+    Self::create(
+      quiche_connection,
+      id,
+      QomtConnectionSide::Client,
+      underlying_sink,
+      underlying_stream,
+    )
+  }
+
+  pub fn accept<TSink, TStream>(
+    connection_id: &quiche::ConnectionId<'a>,
+    quiche_config: &mut quiche::Config,
+    underlying_sink: TSink,
+    underlying_stream: TStream,
+  ) -> Self
+  where
+    TSink: Sink<BytesPacket> + Unpin + Send + 'static,
+    TSink::Error: std::fmt::Display,
+    TStream: Stream<Item = BytesPacket> + Unpin + Send + 'static,
+  {
+    let quiche_connection = quiche::accept(
+      connection_id,
+      None,
+      *UNSPECIFIED_SOCKET_ADDRESS,
+      *UNSPECIFIED_SOCKET_ADDRESS,
+      quiche_config,
+    )
+    .unwrap_or_else(|error| panic!("failed to accept quiche connection: {}", error));
+
+    Self::create(
+      quiche_connection,
+      connection_id.clone(),
+      QomtConnectionSide::Server,
+      underlying_sink,
+      underlying_stream,
+    )
+  }
+
+  fn create<TSink, TStream>(
     quiche_connection: quiche::Connection,
-    mut mt_connections: MtConnections<BytesPacket>,
-  ) -> Self {
-    let quiche_connection = quiche_connection.tokio_mutex().arc();
+    id: quiche::ConnectionId<'a>,
+    side: QomtConnectionSide,
+    mut underlying_sink: TSink,
+    mut underlying_stream: TStream,
+  ) -> Self
+  where
+    TSink: Sink<BytesPacket> + Unpin + Send + 'static,
+    TSink::Error: std::fmt::Display,
+    TStream: Stream<Item = BytesPacket> + Unpin + Send + 'static,
+  {
+    let quiche_connection = quiche_connection.mutex().arc();
+
+    let established = AtomicBool::new(false).arc();
+    let established_notify = Notify::new().arc();
+
+    let quiche_stream_send_continue_notify = Notify::new().arc();
+    let quiche_connection_send_continue_notify = Notify::new().arc();
+
     let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
 
-    Self {
-      quiche_connection: quiche_connection.clone(),
-      stream_receiver,
-      task_set: {
-        let (mut mt_sink, mut mt_stream) = mt_connections.split();
+    let stream_write_map = HashMap::<u64, Arc<tokio::sync::Mutex<_>>>::new()
+      .mutex()
+      .arc();
 
-        let quiche_connection_send_notify = Notify::new().arc();
-        let quiche_stream_send_notify = Notify::new().arc();
+    let create_stream = {
+      let quiche_connection = quiche_connection.clone();
+      let quiche_stream_send_continue_notify = quiche_stream_send_continue_notify.clone();
+      let quiche_connection_send_continue_notify = quiche_connection_send_continue_notify.clone();
+      let stream_write_map = stream_write_map.clone();
+      let task_set = JoinSet::new().mutex().arc();
 
-        let get_or_create_stream = {
+      move |id: u64| {
+        let (external_read, write) = simplex(STREAM_MAX_BUFFER_SIZE);
+        let (mut read, external_write) = simplex(STREAM_MAX_BUFFER_SIZE);
+
+        task_set.lock().unwrap().spawn({
           let quiche_connection = quiche_connection.clone();
-          let quiche_connection_send_notify = quiche_connection_send_notify.clone();
-          let quiche_stream_send_notify = quiche_stream_send_notify.clone();
+          let quiche_stream_send_continue_notify = quiche_stream_send_continue_notify.clone();
+          let quiche_connection_send_continue_notify =
+            quiche_connection_send_continue_notify.clone();
 
-          let stream_write_map = HashMap::<u64, Arc<tokio::sync::Mutex<_>>>::new()
-            .tokio_mutex()
-            .arc();
+          async move {
+            let mut buffer = [0; READ_WRITE_BUFFER_SIZE];
 
-          let task_set = JoinSet::new().mutex().arc();
+            'outer: while let Ok(total_length) = read.read(&mut buffer).await {
+              log::debug!("{side:?} {id}: stream send read {total_length} bytes");
 
-          move |id: u64| {
-            let quiche_connection = quiche_connection.clone();
-            let quiche_connection_send_notify = quiche_connection_send_notify.clone();
-            let quiche_stream_send_notify = quiche_stream_send_notify.clone();
-            let task_set = task_set.clone();
-            let stream_sender = stream_sender.clone();
-            let stream_write_map = stream_write_map.clone();
+              if total_length > 0 {
+                let mut offset = 0;
 
-            async move {
-              if let Some(write) = stream_write_map.lock().await.get(&id) {
-                return write.clone();
-              }
+                while offset < total_length {
+                  log::debug!("{side:?} {id}: stream send {offset}..{total_length}");
 
-              let (external_read, write) = simplex(STREAM_MAX_BUFFER_SIZE);
-              let (mut read, external_write) = simplex(STREAM_MAX_BUFFER_SIZE);
+                  let stream_send_result = quiche_connection.lock().unwrap().stream_send(
+                    id,
+                    &buffer[offset..total_length],
+                    false,
+                  );
 
-              stream_sender
-                .send(QomtStream {
-                  read: external_read,
-                  write: external_write,
-                })
-                .inspect_err(|error| log::warn!("error sending stream to stream sender: {}", error))
-                .ok();
+                  match stream_send_result {
+                    Ok(length) => {
+                      assert_ne!(length, 0);
 
-              task_set.lock().unwrap().spawn(async move {
-                let mut buffer = vec![0; READ_WRITE_BUFFER_SIZE];
+                      quiche_connection_send_continue_notify.notify_waiters();
 
-                'outer: while let Ok(total_length) = read.read(&mut buffer).await {
-                  if total_length > 0 {
-                    let mut offset = 0;
+                      offset += length;
 
-                    while offset < total_length {
-                      let stream_send_result = quiche_connection.lock().await.stream_send(
-                        id,
-                        &buffer[offset..total_length],
-                        false,
+                      log::debug!(
+                        "{side:?} {id}: {stream_send} {offset}/{total_length}",
+                        stream_send = "stream send".on_green(),
                       );
-
-                      match stream_send_result {
-                        Ok(length) => {
-                          assert_ne!(length, 0);
-
-                          quiche_stream_send_notify.notify_waiters();
-
-                          offset += length;
-                        }
-                        Err(quiche::Error::Done) => {
-                          quiche_connection_send_notify.notified().await;
-                        }
-                        Err(error) => {
-                          log::warn!("error sending packet to quiche connection: {}", error);
-                          break 'outer;
-                        }
-                      }
                     }
-                  } else {
-                    let stream_send_result =
-                      quiche_connection.lock().await.stream_send(id, &[], true);
+                    Err(quiche::Error::Done) => {
+                      log::debug!("{side:?} {id}: quiche stream send done");
 
-                    match stream_send_result {
-                      Ok(_) => {
-                        break;
-                      }
-                      Err(quiche::Error::Done) => {
-                        quiche_connection_send_notify.notified().await;
-                      }
-                      Err(error) => {
-                        log::warn!("error sending packet to quiche connection: {}", error);
-                        break;
-                      }
+                      quiche_stream_send_continue_notify.notified().await;
+                    }
+                    Err(error) => {
+                      log::warn!("error sending packet to quiche stream: {}", error);
+                      break 'outer;
                     }
                   }
                 }
-              });
+              } else {
+                let stream_send_result =
+                  quiche_connection.lock().unwrap().stream_send(id, &[], true);
 
-              let write = write.tokio_mutex().arc();
+                match stream_send_result {
+                  Ok(_) => {
+                    log::debug!(
+                      "{side:?} {id}: {stream_send} finished",
+                      stream_send = "stream send".on_green()
+                    );
 
-              stream_write_map.lock().await.insert(id, write.clone());
-
-              write
+                    break;
+                  }
+                  Err(quiche::Error::Done) => {
+                    quiche_stream_send_continue_notify.notified().await;
+                  }
+                  Err(error) => {
+                    log::warn!(
+                      "error sending packet (finished) to quiche stream: {}",
+                      error
+                    );
+                    break;
+                  }
+                }
+              }
             }
           }
-        };
+        });
 
-        let mt_to_quiche_future = {
+        let write = write.tokio_mutex().arc();
+
+        stream_write_map.lock().unwrap().insert(id, write.clone());
+
+        (QomtStream::new(external_read, external_write), write)
+      }
+    }
+    .arc();
+
+    Self {
+      id,
+      side,
+      established: established.clone(),
+      established_notify: established_notify.clone(),
+      create_stream: create_stream.clone(),
+      next_stream_id_index: 0,
+      stream_receiver,
+      _task_set: {
+        let underlying_to_quiche_future = {
           let quiche_connection = quiche_connection.clone();
+          let quiche_connection_send_continue_notify =
+            quiche_connection_send_continue_notify.clone();
 
           async move {
             // Read from the underlying multiple TCP connections.
 
             let receive_info: quiche::RecvInfo = quiche::RecvInfo {
-              from: SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)),
-              to: SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)),
+              from: *UNSPECIFIED_SOCKET_ADDRESS,
+              to: *UNSPECIFIED_SOCKET_ADDRESS,
             };
 
             let mut write_task_set = JoinSet::new();
 
-            while let Some(mut packet) = mt_stream.next().await {
-              let receive_result = quiche_connection
-                .lock()
-                .await
-                .recv(&mut packet, receive_info);
+            'outer: while let Some(mut packet) = underlying_stream.next().await {
+              let receive_result = {
+                log::debug!("{side:?} {recv}", recv = "recv".red());
+
+                let mut quiche_connection = quiche_connection.lock().unwrap();
+
+                let result = quiche_connection.recv(&mut packet, receive_info);
+
+                if quiche_connection.is_established()
+                  && !established.load(atomic::Ordering::Relaxed)
+                {
+                  established.store(true, atomic::Ordering::Relaxed);
+                  established_notify.notify_waiters();
+                }
+
+                result
+              };
 
               match receive_result {
                 Ok(_) => {
                   // Source code suggests that recv always return the length of the packet if Ok.
 
-                  let readable = quiche_connection.lock().await.readable();
+                  quiche_connection_send_continue_notify.notify_waiters();
+
+                  let readable = quiche_connection.lock().unwrap().readable();
 
                   for id in readable {
-                    let stream_write = get_or_create_stream(id).await;
+                    let stream_write =
+                      if let Some(write) = stream_write_map.lock().unwrap().get(&id) {
+                        write.clone()
+                      } else {
+                        let (stream, write) = create_stream(id);
 
-                    let quiche_connection = quiche_connection.clone();
+                        if stream_sender
+                          .send(stream)
+                          .inspect_err(|error| {
+                            log::warn!("error sending stream to stream sender: {}", error)
+                          })
+                          .is_err()
+                        {
+                          break 'outer;
+                        }
 
-                    write_task_set.spawn(async move {
-                      let Ok(mut stream_write) = stream_write.try_lock() else {
-                        // Stream could still be written to by previously triggered task.
-                        return;
+                        write
                       };
 
+                    let Ok(mut stream_write) = stream_write.try_lock_owned() else {
+                      // Stream could still be written to by previously triggered task.
+                      log::debug!("{side:?} {id}: stream recv blocked by other task");
+                      continue;
+                    };
+
+                    log::debug!("{side:?} {id}: stream recv spawn");
+
+                    let quiche_connection = quiche_connection.clone();
+                    let quiche_connection_send_continue_notify =
+                      quiche_connection_send_continue_notify.clone();
+
+                    write_task_set.spawn(async move {
                       let mut buffer = vec![0; READ_WRITE_BUFFER_SIZE];
 
                       loop {
-                        let stream_receive_result =
-                          quiche_connection.lock().await.stream_recv(id, &mut buffer);
+                        let stream_receive_result = {
+                          log::debug!(
+                            "{side:?} {id}: {stream_recv}",
+                            stream_recv = "stream recv".on_red()
+                          );
+
+                          let mut quiche_connection = quiche_connection.lock().unwrap();
+
+                          if quiche_connection.stream_finished(id) {
+                            log::debug!("{side:?} {id}: stream recv break");
+                            break;
+                          }
+
+                          quiche_connection.stream_recv(id, &mut buffer)
+                        };
 
                         match stream_receive_result {
                           Ok((length, finished)) => {
+                            log::debug!("{side:?} {id}: stream recv {length} {finished}");
+
+                            quiche_connection_send_continue_notify.notify_waiters();
+
                             if length > 0 {
                               if stream_write
                                 .write_all(&buffer[..length])
@@ -212,9 +362,12 @@ impl QomtConnection {
                               break;
                             }
                           }
-                          Err(quiche::Error::Done) => break,
+                          Err(quiche::Error::Done) => {
+                            log::debug!("{side:?} {id}: stream recv done");
+                            break;
+                          }
                           Err(error) => {
-                            log::warn!("error receiving packet from quiche connection: {}", error);
+                            log::warn!("error receiving packet from quiche stream: {}", error);
                             break;
                           }
                         }
@@ -224,40 +377,6 @@ impl QomtConnection {
                 }
                 Err(quiche::Error::Done) => continue,
                 Err(error) => {
-                  log::warn!("error sending packet to quiche connection: {}", error);
-                  break;
-                }
-              }
-            }
-          }
-        };
-
-        let quiche_to_mt_future = {
-          async move {
-            let mut buffer = vec![0; READ_WRITE_BUFFER_SIZE];
-
-            loop {
-              let send_result = quiche_connection.lock().await.send(&mut buffer);
-
-              match send_result {
-                Ok((length, _)) => {
-                  quiche_connection_send_notify.notify_waiters();
-
-                  if mt_sink
-                    .send(buffer[..length].to_vec().into())
-                    .await
-                    .inspect_err(|error| {
-                      log::warn!("error sending packet to mt connections: {}", error)
-                    })
-                    .is_err()
-                  {
-                    break;
-                  }
-                }
-                Err(quiche::Error::Done) => {
-                  quiche_stream_send_notify.notified().await;
-                }
-                Err(error) => {
                   log::warn!("error receiving packet from quiche connection: {}", error);
                   break;
                 }
@@ -266,13 +385,108 @@ impl QomtConnection {
           }
         };
 
-        tokio_join_set!(mt_to_quiche_future, quiche_to_mt_future)
+        let quiche_to_underlying_future = {
+          async move {
+            let mut buffer = [0; MAX_DATAGRAM_SIZE];
+
+            loop {
+              log::debug!("{side:?} {send}", send = "send".green());
+
+              let send_result = quiche_connection.lock().unwrap().send(&mut buffer);
+
+              match send_result {
+                Ok((length, _)) => {
+                  log::debug!("{side:?} sent {length} bytes");
+
+                  quiche_stream_send_continue_notify.notify_waiters();
+
+                  if underlying_sink
+                    .send(buffer[..length].to_vec().into())
+                    .await
+                    .inspect_err(|error| {
+                      log::warn!("error sending packet to underlying sink: {}", error)
+                    })
+                    .is_err()
+                  {
+                    break;
+                  }
+                }
+                Err(quiche::Error::Done) => {
+                  let timeout_instant = quiche_connection.lock().unwrap().timeout_instant();
+
+                  if let Some(timeout_instant) = timeout_instant {
+                    spawn({
+                      let quiche_connection = quiche_connection.clone();
+                      let quiche_connection_send_continue_notify =
+                        quiche_connection_send_continue_notify.clone();
+
+                      async move {
+                        sleep_until(timeout_instant.into()).await;
+                        quiche_connection.lock().unwrap().on_timeout();
+                        quiche_connection_send_continue_notify.notify_waiters();
+                      }
+                    });
+                  }
+
+                  quiche_connection_send_continue_notify.notified().await;
+                }
+                Err(error) => {
+                  log::warn!("error sending packet to quiche connection: {}", error);
+                  break;
+                }
+              }
+            }
+          }
+        };
+
+        tokio_join_set!(underlying_to_quiche_future, quiche_to_underlying_future)
       },
     }
   }
 
-  pub async fn accept(&mut self) -> Option<QomtStream> {
+  pub fn is_established(&self) -> bool {
+    self.established.load(atomic::Ordering::Relaxed)
+  }
+
+  pub async fn established(&self) {
+    if self.is_established() {
+      return;
+    }
+
+    self.established_notify.notified().await;
+  }
+
+  pub fn id(&self) -> &quiche::ConnectionId<'a> {
+    &self.id
+  }
+
+  pub async fn accept_stream(&mut self) -> Option<QomtStream> {
     self.stream_receiver.recv().await
+  }
+
+  pub fn open_stream(&mut self) -> QomtStream {
+    let stream_id = self.next_stream_id_index << 2 | self.side.stream_id_bits();
+
+    self.next_stream_id_index += 1;
+
+    let (stream, _) = (self.create_stream)(stream_id);
+
+    stream
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum QomtConnectionSide {
+  Client,
+  Server,
+}
+
+impl QomtConnectionSide {
+  pub fn stream_id_bits(&self) -> u64 {
+    match self {
+      QomtConnectionSide::Client => 0b00,
+      QomtConnectionSide::Server => 0b01,
+    }
   }
 }
 
