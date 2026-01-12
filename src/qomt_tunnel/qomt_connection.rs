@@ -9,7 +9,7 @@ use std::{
 use colored::Colorize;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use lits::bytes;
-use lowkit::{SelfWrapExt, tokio_join_set};
+use lowkit::{DropCallback, SelfWrapExt, tokio_join_set};
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt, SimplexStream, WriteHalf, simplex},
   spawn,
@@ -26,7 +26,29 @@ use crate::{
 };
 
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
-const STREAM_MAX_BUFFER_SIZE: usize = bytes!("256 KiB") as usize;
+
+const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
+
+// TODO:
+// - stream drop should release related resources.
+// - rename to QuicConnection.
+
+// recv loop
+//   - read from transport -> recv()
+//     - NOTIFY to send (ack)
+//   - readable() + stream_recv()
+//     - ASYNC
+//       - write to quic stream
+//       - NOTIFY to send (flow control)
+// send loop
+//   - send()
+//   - timeout()
+//     - ASYNC
+//       - on_timeout()
+//       - NOTIFY to send (?)
+// external
+//   - write to quic stream -> stream_send()
+//   - NOTIFY to send (data)
 
 pub struct QomtConnection<'a> {
   id: quiche::ConnectionId<'a>,
@@ -140,8 +162,10 @@ impl<'a> QomtConnection<'a> {
       let task_set = JoinSet::new().mutex().arc();
 
       move |id: u64| {
-        let (external_read, write) = simplex(STREAM_MAX_BUFFER_SIZE);
-        let (mut read, external_write) = simplex(STREAM_MAX_BUFFER_SIZE);
+        log::debug!("{side:?} {id}: create stream");
+
+        let (external_read, write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
+        let (mut read, external_write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
 
         task_set.lock().unwrap().spawn({
           let quiche_connection = quiche_connection.clone();
@@ -217,6 +241,8 @@ impl<'a> QomtConnection<'a> {
                 }
               }
             }
+
+            log::debug!("{side:?} {id}: stream read finished");
           }
         });
 
@@ -224,7 +250,18 @@ impl<'a> QomtConnection<'a> {
 
         stream_write_map.lock().unwrap().insert(id, write.clone());
 
-        (QomtStream::new(external_read, external_write), write)
+        let drop_callback = DropCallback::new({
+          let stream_write_map = stream_write_map.clone();
+
+          Box::new(move || {
+            stream_write_map.lock().unwrap().remove(&id);
+          }) as Box<dyn Fn() + Send>
+        });
+
+        (
+          QomtStream::new(external_read, external_write, drop_callback),
+          write,
+        )
       }
     }
     .arc();

@@ -3,16 +3,28 @@ use std::{
   task::{Context, Poll},
 };
 
+use lowkit::DropCallback;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, SimplexStream, WriteHalf};
+
+type QomtStreamDropCallback = DropCallback<Box<dyn Fn() + Send>>;
 
 pub struct QomtStream {
   read: ReadHalf<SimplexStream>,
   write: WriteHalf<SimplexStream>,
+  _drop_callback: QomtStreamDropCallback,
 }
 
 impl QomtStream {
-  pub fn new(read: ReadHalf<SimplexStream>, write: WriteHalf<SimplexStream>) -> Self {
-    Self { read, write }
+  pub fn new(
+    read: ReadHalf<SimplexStream>,
+    write: WriteHalf<SimplexStream>,
+    drop_callback: QomtStreamDropCallback,
+  ) -> Self {
+    Self {
+      read,
+      write,
+      _drop_callback: drop_callback,
+    }
   }
 }
 
