@@ -14,6 +14,7 @@ use crate::{
     MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
     MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
+  primitives::ConnectionSide,
   utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
 };
 
@@ -39,7 +40,7 @@ where
   };
 
   let (mut mt_connections, tcp_stream_sender, mut tcp_stream_close_receiver) =
-    MtConnections::<TPacket>::new(tcp_stream);
+    MtConnections::<TPacket>::new(tcp_stream, ConnectionSide::Client);
 
   let (extend_signal_sender, extend_signal_receiver) = oneshot::channel();
 
@@ -77,15 +78,17 @@ where
         .is_ok()
     };
 
-    if extend_signal_receiver
-      .await
-      .inspect_err(|error| {
-        log::warn!("error receiving extend signal: {}", error);
-      })
-      .is_ok()
-    {
-      for _ in 1..target_connections {
-        add_tcp_stream().await;
+    match extend_signal_receiver.await {
+      Ok(()) => {
+        for _ in 1..target_connections {
+          add_tcp_stream().await;
+        }
+      }
+      Err(_) => {
+        // Sender dropped, no more connections to extend. Also no need to reopen
+        // after close, as the MtConnections will be closed if the only
+        // tcp_stream is closed.
+        return;
       }
     }
 

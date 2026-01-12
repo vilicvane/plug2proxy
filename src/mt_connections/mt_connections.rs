@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::{Sink, Stream};
+use lowkit::{SelfWrapExt, TurnArcWeak, tokio_join_set};
 use serde::{Deserialize, Serialize};
 use tokio::{
   io::{AsyncRead, AsyncWrite},
@@ -17,7 +18,7 @@ use tokio::{
 };
 use uuid::{Uuid, serde::compact};
 
-const PACKET_CHANNEL_CAPACITY: usize = 1024;
+use crate::primitives::ConnectionSide;
 
 pub struct MtConnections<TPacket>
 where
@@ -26,7 +27,7 @@ where
   packet_sink: flume::r#async::SendSink<'static, TPacket>,
   packet_stream: flume::r#async::RecvStream<'static, TPacket>,
   connection_count: Arc<AtomicUsize>,
-  task_set: JoinSet<()>,
+  join_set: JoinSet<()>,
 }
 
 impl<TPacket> MtConnections<TPacket>
@@ -35,6 +36,7 @@ where
 {
   pub fn new(
     initial_tcp_stream: TcpStream,
+    side: ConnectionSide,
   ) -> (
     Self,
     mpsc::UnboundedSender<TcpStream>,
@@ -43,10 +45,8 @@ where
     let (tcp_stream_sender, mut tcp_stream_receiver) = mpsc::unbounded_channel();
     let (tcp_stream_close_sender, tcp_stream_close_receiver) = mpsc::unbounded_channel();
 
-    let (external_packet_sender, packet_receiver) =
-      flume::bounded::<TPacket>(PACKET_CHANNEL_CAPACITY);
-    let (packet_sender, external_packet_receiver) =
-      flume::bounded::<TPacket>(PACKET_CHANNEL_CAPACITY);
+    let (external_packet_sender, packet_receiver) = flume::bounded::<TPacket>(0);
+    let (packet_sender, external_packet_receiver) = flume::bounded::<TPacket>(0);
 
     let connection_count = Arc::new(AtomicUsize::new(0));
 
@@ -54,84 +54,91 @@ where
       packet_sink: external_packet_sender.into_sink(),
       packet_stream: external_packet_receiver.into_stream(),
       connection_count: connection_count.clone(),
-      task_set: {
-        let mut task_set = JoinSet::new();
-
+      join_set: tokio_join_set!(async move {
         let (all_connections_closed_sender, mut all_connections_closed_receiver) = mpsc::channel(1);
 
-        task_set.spawn(async move {
-          let pipe_bidirectional = |tcp_stream: TcpStream| {
-            let tcp_stream_close_sender = tcp_stream_close_sender.clone();
+        let packet_sender = TurnArcWeak::new(packet_sender).mutex().arc();
 
-            let packet_sender = packet_sender.clone();
-            let packet_receiver = packet_receiver.clone();
+        let pipe_bidirectional = |tcp_stream: TcpStream| {
+          let tcp_stream_close_sender = tcp_stream_close_sender.clone();
 
-            let connection_count = connection_count.clone();
+          let packet_sender = packet_sender.clone();
+          let packet_receiver = packet_receiver.clone();
 
-            let all_connections_closed_sender = all_connections_closed_sender.clone();
+          let connection_count = connection_count.clone();
 
-            async move {
-              let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+          let all_connections_closed_sender = all_connections_closed_sender.clone();
 
-              connection_count.fetch_add(1, atomic::Ordering::Relaxed);
+          async move {
+            let Some(packet_sender) = packet_sender.lock().unwrap().get_arc() else {
+              return;
+            };
 
-              let to_tcp_future = async move {
-                while let Ok(packet) = packet_receiver.recv_async().await {
-                  TPacket::write_packet(&mut tcp_write, packet).await?;
+            let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+            connection_count.fetch_add(1, atomic::Ordering::Relaxed);
+
+            tokio::try_join!(
+              async move {
+                loop {
+                  match packet_receiver.recv_async().await {
+                    Ok(packet) => {
+                      TPacket::write_packet(&mut tcp_write, packet).await?;
+                    }
+                    Err(flume::RecvError::Disconnected) => {
+                      break;
+                    }
+                  }
                 }
 
-                anyhow::Ok(())
-              };
+                log::debug!("{side} write tcp stream loop ended");
 
-              let from_tcp_future = async move {
+                anyhow::Ok(())
+              },
+              async move {
                 while let Some(packet) = TPacket::read_next_packet(&mut tcp_read).await? {
                   packet_sender.send_async(packet).await?;
                 }
 
+                log::debug!("{side} read tcp stream loop ended");
+
                 anyhow::Ok(())
-              };
+              },
+            )
+            .inspect_err(|error| {
+              log::warn!("error copying bidirectional packet stream: {}", error);
+            })
+            .ok();
 
-              tokio::select! {
-                result = to_tcp_future => result,
-                result = from_tcp_future => result,
-              }
-              .inspect_err(|error| {
-                log::warn!("error copying bidirectional packet stream: {}", error);
-              })
-              .ok();
+            let all_connections_closed =
+              connection_count.fetch_sub(1, atomic::Ordering::Relaxed) == 1;
 
-              let all_connections_closed =
-                connection_count.fetch_sub(1, atomic::Ordering::Relaxed) == 1;
-
-              if all_connections_closed {
-                all_connections_closed_sender.send(()).await.ok();
-              } else {
-                tcp_stream_close_sender.send(()).ok();
-              }
+            if all_connections_closed {
+              all_connections_closed_sender.send(()).await.ok();
+            } else {
+              tcp_stream_close_sender.send(()).ok();
             }
-          };
-
-          let mut join_set = JoinSet::new();
-
-          join_set.spawn(pipe_bidirectional(initial_tcp_stream));
-
-          while let Some(tcp_stream) = tokio::select!(
-            tcp_stream = tcp_stream_receiver.recv() => tcp_stream,
-            _ = all_connections_closed_receiver.recv() => None,
-          ) {
-            join_set.spawn(pipe_bidirectional(tcp_stream));
           }
-        });
+        };
 
-        task_set
-      },
+        let mut join_set = JoinSet::new();
+
+        join_set.spawn(pipe_bidirectional(initial_tcp_stream));
+
+        while let Some(tcp_stream) = tokio::select!(
+          tcp_stream = tcp_stream_receiver.recv() => tcp_stream,
+          _ = all_connections_closed_receiver.recv() => None,
+        ) {
+          join_set.spawn(pipe_bidirectional(tcp_stream));
+        }
+      }),
     };
 
     (mt_connections, tcp_stream_sender, tcp_stream_close_receiver)
   }
 
   pub fn spawn(&mut self, task: impl Future<Output = ()> + Send + 'static) {
-    self.task_set.spawn(task);
+    self.join_set.spawn(task);
   }
 
   pub fn connection_count(&self) -> usize {
@@ -168,9 +175,16 @@ impl<TPacket> Sink<TPacket> for MtConnections<TPacket> {
 }
 
 pub trait MtConnectionsPacket: Sized + Send + Sync + 'static {
+  fn len(&self) -> usize;
+
+  fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
   fn read_next_packet(
     stream: &mut (dyn AsyncRead + Unpin + Send),
   ) -> impl Future<Output = Result<Option<Self>, std::io::Error>> + Send;
+
   fn write_packet(
     stream: &mut (dyn AsyncWrite + Unpin + Send),
     packet: Self,

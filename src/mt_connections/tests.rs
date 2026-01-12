@@ -1,13 +1,18 @@
+use std::time::Instant;
+
 use futures::{SinkExt, StreamExt};
 use lits::duration;
-use tokio::{net::TcpListener, sync::oneshot, task::JoinSet, time::sleep};
+use lowkit::SelfWrapExt;
+use tokio::{net::TcpListener, sync::oneshot, time::sleep};
 
 use super::*;
 
 #[tokio::test]
 #[test_log::test]
-async fn test_mt_connections_connect() -> anyhow::Result<()> {
+async fn test_mt_connections() -> anyhow::Result<()> {
   let (listener_ready_sender, listener_ready_receiver) = oneshot::channel();
+
+  let instant = None.mutex();
 
   tokio::try_join!(
     async {
@@ -21,9 +26,9 @@ async fn test_mt_connections_connect() -> anyhow::Result<()> {
 
       let mut mt_connections = listener.accept().await?;
 
-      let mut join_set = JoinSet::new();
+      let main_future = async {
+        instant.lock().unwrap().replace(Instant::now());
 
-      join_set.spawn(async {
         mt_connections
           .send(b"hello from listener".to_vec().into())
           .await?;
@@ -34,15 +39,21 @@ async fn test_mt_connections_connect() -> anyhow::Result<()> {
         assert_eq!(*packets[1], b"hello from connect 2");
 
         anyhow::Ok(())
-      });
+      };
 
-      join_set.spawn(async move {
+      let listener_future = async {
         listener.accept().await?;
 
         anyhow::bail!("only meant to poll the listener");
-      });
 
-      join_set.join_next().await.unwrap()??;
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+      };
+
+      tokio::select!(
+        result = main_future => result,
+        result = listener_future => result.and_then(|_| Err(anyhow::anyhow!("Listener future completed"))),
+      )?;
 
       anyhow::Ok(())
     },
@@ -53,6 +64,11 @@ async fn test_mt_connections_connect() -> anyhow::Result<()> {
         mt_connections_connect::<MtBytesPacket>(address, 2).await?;
 
       let packet = mt_connections.next().await.unwrap();
+
+      log::debug!(
+        "packet 1 received after {:?}",
+        instant.lock().unwrap().unwrap().elapsed()
+      );
 
       assert_eq!(*packet, b"hello from listener");
 

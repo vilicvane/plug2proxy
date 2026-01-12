@@ -9,6 +9,7 @@ use crate::{
     MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
     MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
+  primitives::ConnectionSide,
   utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
 };
 
@@ -45,7 +46,8 @@ where
 
           send_response_head(&mut stream, MtConnectionsResponseHeadData::Created(id)).await?;
 
-          let (mt_connections, tcp_stream_sender, _) = MtConnections::new(stream);
+          let (mt_connections, tcp_stream_sender, _) =
+            MtConnections::new(stream, ConnectionSide::Server);
 
           self
             .tcp_stream_sender_map

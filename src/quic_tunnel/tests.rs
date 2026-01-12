@@ -1,11 +1,15 @@
+use std::{
+  path::PathBuf,
+  sync::{Arc, LazyLock},
+};
+
 use futures::{SinkExt, StreamExt};
-use lits::{bytes, duration};
-use lowkit::SelfWrapExt;
+use lits::bytes;
 use rand::Rng;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
   net::TcpListener,
-  time::sleep,
+  sync::oneshot,
 };
 
 use crate::{
@@ -16,21 +20,63 @@ use crate::{
 
 use super::*;
 
+// Cache generated cert paths to avoid regenerating across tests.
+static QUICHE_CERT_PATHS: tokio::sync::OnceCell<(PathBuf, PathBuf, PathBuf)> =
+  tokio::sync::OnceCell::const_new();
+
+async fn get_quiche_configs() -> anyhow::Result<[quiche::Config; 2]> {
+  let (ca_pem_file_path, hub_pem_file_path, out_pem_file_path) = QUICHE_CERT_PATHS
+    .get_or_try_init(|| async {
+      let test_dir = test_dir();
+
+      let ca_pem_file_path = generate_ca_pem_file(&test_dir).await?;
+
+      let hub_pem_file_path = generate_node_pem_file(&test_dir, "hub").await?;
+      let out_pem_file_path = generate_node_pem_file(&test_dir, "out").await?;
+
+      anyhow::Ok((ca_pem_file_path, hub_pem_file_path, out_pem_file_path))
+    })
+    .await?
+    .clone();
+
+  Ok([
+    create_quiche_config(&hub_pem_file_path, &ca_pem_file_path)?,
+    create_quiche_config(&out_pem_file_path, &ca_pem_file_path)?,
+  ])
+}
+
+static RANDOM_DATA_1: LazyLock<Arc<Vec<u8>>> = LazyLock::new(|| {
+  let mut random_data = vec![0u8; bytes!("8 MiB") as usize];
+  rand::rng().fill(&mut random_data[..]);
+  Arc::new(random_data)
+});
+
+static RANDOM_DATA_2: LazyLock<Arc<Vec<u8>>> = LazyLock::new(|| {
+  let mut random_data = vec![0u8; bytes!("8 MiB") as usize];
+  rand::rng().fill(&mut random_data[..]);
+  Arc::new(random_data)
+});
+
+#[tokio::test]
+#[test_log::test]
+async fn test_init() -> anyhow::Result<()> {
+  // Avoid confusing test duration as it takes some time.
+
+  let _ = get_quiche_configs().await?;
+
+  let _ = *RANDOM_DATA_1;
+  let _ = *RANDOM_DATA_2;
+
+  Ok(())
+}
+
 #[tokio::test]
 #[test_log::test]
 async fn test_quic_connection() -> anyhow::Result<()> {
-  let test_dir = test_dir();
+  let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
 
-  let ca_pem_file_path = generate_ca_pem_file(&test_dir).await?;
-
-  let hub_pem_file_path = generate_node_pem_file(&test_dir, "hub").await?;
-  let out_pem_file_path = generate_node_pem_file(&test_dir, "out").await?;
-
-  let mut hub_quiche_config = create_quiche_config(&hub_pem_file_path, &ca_pem_file_path)?;
-  let mut out_quiche_config = create_quiche_config(&out_pem_file_path, &ca_pem_file_path)?;
-
-  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<MtBytesPacket>(16);
-  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<MtBytesPacket>(16);
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
 
   let connection_id = QuicConnection::generate_connection_id();
 
@@ -48,12 +94,6 @@ async fn test_quic_connection() -> anyhow::Result<()> {
     out_to_hub_packet_receiver.into_stream(),
   );
 
-  let mut random_data_1 = vec![0u8; bytes!("8 MiB") as usize];
-  let mut random_data_2 = vec![0u8; bytes!("8 MiB") as usize];
-
-  rand::rng().fill(&mut random_data_1[..]);
-  rand::rng().fill(&mut random_data_2[..]);
-
   tokio::try_join!(
     async {
       out_quic_connection.established().await;
@@ -61,14 +101,14 @@ async fn test_quic_connection() -> anyhow::Result<()> {
       {
         let mut stream = out_quic_connection.open_stream();
 
-        stream.write_all(&random_data_1).await?;
+        stream.write_all(&RANDOM_DATA_1).await?;
         stream.shutdown().await?;
 
         let mut data = Vec::new();
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, random_data_2);
+        assert_eq!(data, **RANDOM_DATA_2);
       }
 
       {
@@ -78,9 +118,9 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, random_data_1);
+        assert_eq!(data, **RANDOM_DATA_1);
 
-        stream.write_all(&random_data_2).await?;
+        stream.write_all(&RANDOM_DATA_2).await?;
         stream.shutdown().await?;
       }
 
@@ -96,23 +136,23 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, random_data_1);
+        assert_eq!(data, **RANDOM_DATA_1);
 
-        stream.write_all(&random_data_2).await?;
+        stream.write_all(&RANDOM_DATA_2).await?;
         stream.shutdown().await?;
       }
 
       {
         let mut stream = hub_quic_connection.open_stream();
 
-        stream.write_all(&random_data_1).await?;
+        stream.write_all(&RANDOM_DATA_1).await?;
         stream.shutdown().await?;
 
         let mut data = Vec::new();
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, random_data_2);
+        assert_eq!(data, **RANDOM_DATA_2);
       }
 
       anyhow::Ok(())
@@ -125,34 +165,16 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 #[tokio::test]
 #[test_log::test]
 async fn test_qomt_connection() -> anyhow::Result<()> {
-  let test_dir = test_dir();
-
-  let ca_pem_file_path = generate_ca_pem_file(&test_dir).await?;
-
-  let hub_pem_file_path = generate_node_pem_file(&test_dir, "hub").await?;
-  let out_pem_file_path = generate_node_pem_file(&test_dir, "out").await?;
-
-  let mut hub_quiche_config = create_quiche_config(&hub_pem_file_path, &ca_pem_file_path)?;
-  let mut out_quiche_config = create_quiche_config(&out_pem_file_path, &ca_pem_file_path)?;
-
-  let mut random_data_1 = vec![0u8; bytes!("1 KiB") as usize];
-  let mut random_data_2 = vec![0u8; bytes!("1 KiB") as usize];
-
-  rand::rng().fill(&mut random_data_1[..]);
-  rand::rng().fill(&mut random_data_2[..]);
-
-  let random_data_1 = random_data_1.arc();
-  let random_data_2 = random_data_2.arc();
+  let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
 
   let listener = TcpListener::bind("127.0.0.1:0").await?;
 
   let address = listener.local_addr()?;
 
+  let (read_complete_sender, read_complete_receiver) = oneshot::channel();
+
   tokio::try_join!(
     async {
-      let random_data_1 = random_data_1.clone();
-      let random_data_2 = random_data_2.clone();
-
       let mut hub_mt_connections_listener = MtConnectionsListener::<MtBytesPacket>::new(listener);
 
       let mut hub_mt_connections = hub_mt_connections_listener.accept().await?;
@@ -177,24 +199,30 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
           stream.read_to_end(&mut data).await?;
 
-          assert_eq!(data, *random_data_1);
+          assert_eq!(data, **RANDOM_DATA_1);
 
-          stream.write_all(&random_data_2).await?;
+          stream.write_all(&RANDOM_DATA_2).await?;
           stream.shutdown().await?;
         }
+
+        log::debug!("hub accept stream ended");
 
         {
           let mut stream = hub_qomt_connection.open_stream();
 
-          stream.write_all(&random_data_1).await?;
+          stream.write_all(&RANDOM_DATA_1).await?;
           stream.shutdown().await?;
 
           let mut data = Vec::new();
 
           stream.read_to_end(&mut data).await?;
 
-          assert_eq!(data, *random_data_2);
+          assert_eq!(data, **RANDOM_DATA_2);
         }
+
+        read_complete_sender.send(()).unwrap();
+
+        log::debug!("hub open stream ended");
 
         anyhow::Ok(())
       };
@@ -216,7 +244,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
       let (mut out_mt_connections, extend_signal_sender) =
         mt_connections_connect::<MtBytesPacket>(address, 2).await?;
 
-      let connection_id = quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec());
+      let connection_id = QuicConnection::generate_connection_id();
 
       out_mt_connections
         .send(connection_id.to_vec().into())
@@ -230,15 +258,17 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
       {
         let mut stream = out_qomt_connection.open_stream();
 
-        stream.write_all(&random_data_1).await?;
+        stream.write_all(&RANDOM_DATA_1).await?;
         stream.shutdown().await?;
 
         let mut data = Vec::new();
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, *random_data_2);
+        assert_eq!(data, **RANDOM_DATA_2);
       }
+
+      log::debug!("out open stream ended");
 
       extend_signal_sender
         .send(())
@@ -251,13 +281,15 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, *random_data_1);
+        assert_eq!(data, **RANDOM_DATA_1);
 
-        stream.write_all(&random_data_2).await?;
+        stream.write_all(&RANDOM_DATA_2).await?;
         stream.shutdown().await?;
+
+        read_complete_receiver.await?;
       }
 
-      sleep(duration!("100ms")).await;
+      log::debug!("out accept stream ended");
 
       anyhow::Ok(())
     },

@@ -28,6 +28,10 @@ impl DerefMut for MtBytesPacket {
 }
 
 impl MtConnectionsPacket for MtBytesPacket {
+  fn len(&self) -> usize {
+    self.0.len()
+  }
+
   async fn read_next_packet(
     stream: &mut (dyn AsyncRead + Unpin + Send),
   ) -> Result<Option<Self>, std::io::Error> {
