@@ -68,7 +68,27 @@ pub struct QuicConnection<'a> {
 }
 
 impl<'a> QuicConnection<'a> {
-  pub fn connect<TSink, TStream>(
+  pub fn connect<TStream>(
+    connection_id: &quiche::ConnectionId<'a>,
+    quiche_config: &mut quiche::Config,
+    underlying_stream: TStream,
+  ) -> Self
+  where
+    TStream: Sink<MtBytesPacket> + Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream::Error: std::fmt::Display,
+  {
+    let (underlying_sink, underlying_stream) = underlying_stream.split();
+
+    Self::connect_with_sink_and_stream(
+      connection_id,
+      quiche_config,
+      underlying_sink,
+      underlying_stream,
+    )
+  }
+
+  pub fn connect_with_sink_and_stream<TSink, TStream>(
+    connection_id: &quiche::ConnectionId<'a>,
     quiche_config: &mut quiche::Config,
     underlying_sink: TSink,
     underlying_stream: TStream,
@@ -78,11 +98,9 @@ impl<'a> QuicConnection<'a> {
     TSink::Error: std::fmt::Display,
     TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
-    let id = quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec());
-
     let quiche_connection = quiche::connect(
       SERVER_COMMON_NAME.some(),
-      &id,
+      connection_id,
       *UNSPECIFIED_SOCKET_ADDRESS,
       *UNSPECIFIED_SOCKET_ADDRESS,
       quiche_config,
@@ -91,14 +109,33 @@ impl<'a> QuicConnection<'a> {
 
     Self::create(
       quiche_connection,
-      id,
+      connection_id.clone(),
       QuicConnectionSide::Client,
       underlying_sink,
       underlying_stream,
     )
   }
 
-  pub fn accept<TSink, TStream>(
+  pub fn accept<TStream>(
+    connection_id: &quiche::ConnectionId<'a>,
+    quiche_config: &mut quiche::Config,
+    underlying_stream: TStream,
+  ) -> Self
+  where
+    TStream: Sink<MtBytesPacket> + Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream::Error: std::fmt::Display,
+  {
+    let (underlying_sink, underlying_stream) = underlying_stream.split();
+
+    Self::accept_with_sink_and_stream(
+      connection_id,
+      quiche_config,
+      underlying_sink,
+      underlying_stream,
+    )
+  }
+
+  pub fn accept_with_sink_and_stream<TSink, TStream>(
     connection_id: &quiche::ConnectionId<'a>,
     quiche_config: &mut quiche::Config,
     underlying_sink: TSink,
@@ -161,7 +198,7 @@ impl<'a> QuicConnection<'a> {
       let task_set = JoinSet::new().mutex().arc();
 
       move |id: u64| {
-        log::debug!("{side:?} {id}: create stream");
+        log::debug!("{side:?} {id}: quic stream create");
 
         let (external_read, write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
         let (mut read, external_write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
@@ -190,11 +227,11 @@ impl<'a> QuicConnection<'a> {
                     false,
                   );
 
+                  quiche_connection_send_continue_notify.notify_waiters();
+
                   match stream_send_result {
                     Ok(length) => {
                       assert_ne!(length, 0);
-
-                      quiche_connection_send_continue_notify.notify_waiters();
 
                       offset += length;
 
@@ -241,7 +278,7 @@ impl<'a> QuicConnection<'a> {
               }
             }
 
-            log::debug!("{side:?} {id}: stream read finished");
+            log::debug!("{side:?} {id}: quic stream read finished");
           }
         });
 
@@ -274,7 +311,7 @@ impl<'a> QuicConnection<'a> {
       next_stream_id_index: 0,
       stream_receiver,
       _task_set: {
-        let underlying_to_quiche_future = {
+        let quiche_connection_recv_future = {
           let quiche_connection = quiche_connection.clone();
           let quiche_connection_send_continue_notify =
             quiche_connection_send_continue_notify.clone();
@@ -287,11 +324,19 @@ impl<'a> QuicConnection<'a> {
               to: *UNSPECIFIED_SOCKET_ADDRESS,
             };
 
-            let mut write_task_set = JoinSet::new();
+            let mut stream_recv_join_set = JoinSet::new();
+
+            let mut packet_count = 0;
+            let mut byte_count = 0;
 
             'outer: while let Some(mut packet) = underlying_stream.next().await {
+              packet_count += 1;
+              byte_count += packet.len();
+
+              log::debug!("{side:?} underlying read {packet_count} packets, {byte_count} bytes");
+
               let receive_result = {
-                log::debug!("{side:?} {recv}", recv = "recv".red());
+                log::debug!("{side:?} {} {}", "recv".red(), packet.len());
 
                 let mut quiche_connection = quiche_connection.lock().unwrap();
 
@@ -309,6 +354,8 @@ impl<'a> QuicConnection<'a> {
 
               match receive_result {
                 Ok(_) => {
+                  log::debug!("{side:?} quiche recv ok");
+
                   // Source code suggests that recv always return the length of the packet if Ok.
 
                   quiche_connection_send_continue_notify.notify_waiters();
@@ -347,7 +394,7 @@ impl<'a> QuicConnection<'a> {
                     let quiche_connection_send_continue_notify =
                       quiche_connection_send_continue_notify.clone();
 
-                    write_task_set.spawn(async move {
+                    stream_recv_join_set.spawn(async move {
                       let mut buffer = vec![0; READ_WRITE_BUFFER_SIZE];
 
                       loop {
@@ -421,9 +468,12 @@ impl<'a> QuicConnection<'a> {
           }
         };
 
-        let quiche_to_underlying_future = {
+        let quiche_connection_send_future = {
           async move {
             let mut buffer = [0; MAX_DATAGRAM_SIZE];
+
+            let mut packet_count = 0;
+            let mut byte_count = 0;
 
             loop {
               log::debug!("{side:?} {send}", send = "send".green());
@@ -432,7 +482,10 @@ impl<'a> QuicConnection<'a> {
 
               match send_result {
                 Ok((length, _)) => {
-                  log::debug!("{side:?} sent {length} bytes");
+                  packet_count += 1;
+                  byte_count += length;
+
+                  log::debug!("{side:?} quiche send {packet_count} packets, {byte_count} bytes");
 
                   quiche_stream_send_continue_notify.notify_waiters();
 
@@ -472,12 +525,18 @@ impl<'a> QuicConnection<'a> {
                 }
               }
             }
+
+            log::debug!("{side:?} quiche connection send loop ended");
           }
         };
 
-        tokio_join_set!(underlying_to_quiche_future, quiche_to_underlying_future)
+        tokio_join_set!(quiche_connection_recv_future, quiche_connection_send_future)
       },
     }
+  }
+
+  pub fn generate_connection_id() -> quiche::ConnectionId<'a> {
+    quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec())
   }
 
   pub fn is_established(&self) -> bool {
