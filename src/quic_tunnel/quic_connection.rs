@@ -20,9 +20,8 @@ use tokio::{
 
 use crate::{
   constants::SERVER_COMMON_NAME,
-  qomt_tunnel::{
-    MAX_DATAGRAM_SIZE, QomtStream, UNSPECIFIED_SOCKET_ADDRESS, bytes_packet::BytesPacket,
-  },
+  mt_connections::MtBytesPacket,
+  quic_tunnel::{MAX_DATAGRAM_SIZE, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
 };
 
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
@@ -50,34 +49,34 @@ const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 //   - write to quic stream -> stream_send()
 //   - NOTIFY to send (data)
 
-pub struct QomtConnection<'a> {
+pub struct QuicConnection<'a> {
   id: quiche::ConnectionId<'a>,
   next_stream_id_index: u64,
-  side: QomtConnectionSide,
+  side: QuicConnectionSide,
   established: Arc<AtomicBool>,
   established_notify: Arc<Notify>,
   create_stream: Arc<
     dyn Fn(
       u64,
     ) -> (
-      QomtStream,
+      QuicStream,
       Arc<tokio::sync::Mutex<WriteHalf<SimplexStream>>>,
     ),
   >,
-  stream_receiver: mpsc::UnboundedReceiver<QomtStream>,
+  stream_receiver: mpsc::UnboundedReceiver<QuicStream>,
   _task_set: JoinSet<()>,
 }
 
-impl<'a> QomtConnection<'a> {
+impl<'a> QuicConnection<'a> {
   pub fn connect<TSink, TStream>(
     quiche_config: &mut quiche::Config,
     underlying_sink: TSink,
     underlying_stream: TStream,
   ) -> Self
   where
-    TSink: Sink<BytesPacket> + Unpin + Send + 'static,
+    TSink: Sink<MtBytesPacket> + Unpin + Send + 'static,
     TSink::Error: std::fmt::Display,
-    TStream: Stream<Item = BytesPacket> + Unpin + Send + 'static,
+    TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
     let id = quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec());
 
@@ -93,7 +92,7 @@ impl<'a> QomtConnection<'a> {
     Self::create(
       quiche_connection,
       id,
-      QomtConnectionSide::Client,
+      QuicConnectionSide::Client,
       underlying_sink,
       underlying_stream,
     )
@@ -106,9 +105,9 @@ impl<'a> QomtConnection<'a> {
     underlying_stream: TStream,
   ) -> Self
   where
-    TSink: Sink<BytesPacket> + Unpin + Send + 'static,
+    TSink: Sink<MtBytesPacket> + Unpin + Send + 'static,
     TSink::Error: std::fmt::Display,
-    TStream: Stream<Item = BytesPacket> + Unpin + Send + 'static,
+    TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
     let quiche_connection = quiche::accept(
       connection_id,
@@ -122,7 +121,7 @@ impl<'a> QomtConnection<'a> {
     Self::create(
       quiche_connection,
       connection_id.clone(),
-      QomtConnectionSide::Server,
+      QuicConnectionSide::Server,
       underlying_sink,
       underlying_stream,
     )
@@ -131,14 +130,14 @@ impl<'a> QomtConnection<'a> {
   fn create<TSink, TStream>(
     quiche_connection: quiche::Connection,
     id: quiche::ConnectionId<'a>,
-    side: QomtConnectionSide,
+    side: QuicConnectionSide,
     mut underlying_sink: TSink,
     mut underlying_stream: TStream,
   ) -> Self
   where
-    TSink: Sink<BytesPacket> + Unpin + Send + 'static,
+    TSink: Sink<MtBytesPacket> + Unpin + Send + 'static,
     TSink::Error: std::fmt::Display,
-    TStream: Stream<Item = BytesPacket> + Unpin + Send + 'static,
+    TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
     let quiche_connection = quiche_connection.mutex().arc();
 
@@ -259,7 +258,7 @@ impl<'a> QomtConnection<'a> {
         });
 
         (
-          QomtStream::new(external_read, external_write, drop_callback),
+          QuicStream::new(external_read, external_write, drop_callback),
           write,
         )
       }
@@ -497,11 +496,11 @@ impl<'a> QomtConnection<'a> {
     &self.id
   }
 
-  pub async fn accept_stream(&mut self) -> Option<QomtStream> {
+  pub async fn accept_stream(&mut self) -> Option<QuicStream> {
     self.stream_receiver.recv().await
   }
 
-  pub fn open_stream(&mut self) -> QomtStream {
+  pub fn open_stream(&mut self) -> QuicStream {
     let stream_id = self.next_stream_id_index << 2 | self.side.stream_id_bits();
 
     self.next_stream_id_index += 1;
@@ -513,22 +512,22 @@ impl<'a> QomtConnection<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum QomtConnectionSide {
+pub enum QuicConnectionSide {
   Client,
   Server,
 }
 
-impl QomtConnectionSide {
+impl QuicConnectionSide {
   pub fn stream_id_bits(&self) -> u64 {
     match self {
-      QomtConnectionSide::Client => 0b00,
-      QomtConnectionSide::Server => 0b01,
+      QuicConnectionSide::Client => 0b00,
+      QuicConnectionSide::Server => 0b01,
     }
   }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum QomtConnectionError {
+pub enum QuicConnectionError {
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
 }

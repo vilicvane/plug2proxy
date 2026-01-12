@@ -2,18 +2,18 @@ use std::ops::{Deref, DerefMut};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::qomt_tunnel::MtConnectionsPacket;
+use crate::mt_connections::MtConnectionsPacket;
 
 #[derive(Debug)]
-pub struct BytesPacket(Vec<u8>);
+pub struct MtBytesPacket(Vec<u8>);
 
-impl From<Vec<u8>> for BytesPacket {
+impl From<Vec<u8>> for MtBytesPacket {
   fn from(value: Vec<u8>) -> Self {
     Self(value)
   }
 }
 
-impl Deref for BytesPacket {
+impl Deref for MtBytesPacket {
   type Target = Vec<u8>;
 
   fn deref(&self) -> &Self::Target {
@@ -21,13 +21,13 @@ impl Deref for BytesPacket {
   }
 }
 
-impl DerefMut for BytesPacket {
+impl DerefMut for MtBytesPacket {
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.0
   }
 }
 
-impl MtConnectionsPacket for BytesPacket {
+impl MtConnectionsPacket for MtBytesPacket {
   async fn read_next_packet(
     stream: &mut (dyn AsyncRead + Unpin + Send),
   ) -> Result<Option<Self>, std::io::Error> {

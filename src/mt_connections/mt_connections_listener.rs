@@ -4,7 +4,7 @@ use lowkit::SelfWrapExt;
 use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
 
 use crate::{
-  qomt_tunnel::{
+  mt_connections::{
     MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsId, MtConnectionsMagic,
     MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
     MtConnectionsResponseHead, MtConnectionsResponseHeadData,

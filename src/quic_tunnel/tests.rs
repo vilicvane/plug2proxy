@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
   cert::{generate_ca_pem_file, generate_node_pem_file},
-  qomt_tunnel::bytes_packet::BytesPacket,
+  mt_connections::MtBytesPacket,
   test::test_dir,
 };
 
@@ -12,7 +12,7 @@ use super::*;
 
 #[tokio::test]
 #[test_log::test]
-async fn test_qomt_connection() -> anyhow::Result<()> {
+async fn test_quic_connection() -> anyhow::Result<()> {
   let test_dir = test_dir();
 
   let ca_pem_file_path = generate_ca_pem_file(&test_dir).await?;
@@ -23,17 +23,17 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
   let mut hub_quiche_config = create_quiche_config(&hub_pem_file_path, &ca_pem_file_path)?;
   let mut out_quiche_config = create_quiche_config(&out_pem_file_path, &ca_pem_file_path)?;
 
-  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<BytesPacket>(16);
-  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<BytesPacket>(16);
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<MtBytesPacket>(16);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<MtBytesPacket>(16);
 
-  let mut out_qomt_connection = QomtConnection::connect(
+  let mut out_quic_connection = QuicConnection::connect(
     &mut out_quiche_config,
     out_to_hub_packet_sender.into_sink(),
     hub_to_out_packet_receiver.into_stream(),
   );
 
-  let mut hub_qomt_connection = QomtConnection::accept(
-    out_qomt_connection.id(),
+  let mut hub_quic_connection = QuicConnection::accept(
+    out_quic_connection.id(),
     &mut hub_quiche_config,
     hub_to_out_packet_sender.into_sink(),
     out_to_hub_packet_receiver.into_stream(),
@@ -48,9 +48,9 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
   tokio::try_join!(
     async {
-      out_qomt_connection.established().await;
+      out_quic_connection.established().await;
 
-      let mut stream = out_qomt_connection.open_stream();
+      let mut stream = out_quic_connection.open_stream();
 
       stream.write_all(&random_data_1).await?;
       stream.shutdown().await?;
@@ -64,9 +64,9 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
       anyhow::Ok(())
     },
     async {
-      hub_qomt_connection.established().await;
+      hub_quic_connection.established().await;
 
-      let mut stream = hub_qomt_connection.accept_stream().await.unwrap();
+      let mut stream = hub_quic_connection.accept_stream().await.unwrap();
 
       let mut data = Vec::new();
 

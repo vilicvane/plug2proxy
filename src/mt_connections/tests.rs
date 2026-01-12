@@ -2,7 +2,7 @@ use futures::{SinkExt, StreamExt};
 use lits::duration;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinSet, time::sleep};
 
-use crate::qomt_tunnel::{bytes_packet::BytesPacket, *};
+use super::*;
 
 #[tokio::test]
 #[test_log::test]
@@ -15,7 +15,7 @@ async fn test_mt_connections_connect() -> anyhow::Result<()> {
 
       let address = listener.local_addr()?;
 
-      let mut listener = MtConnectionsListener::<BytesPacket>::new(listener);
+      let mut listener = MtConnectionsListener::<MtBytesPacket>::new(listener);
 
       listener_ready_sender.send(address).unwrap();
 
@@ -50,7 +50,7 @@ async fn test_mt_connections_connect() -> anyhow::Result<()> {
       let address = listener_ready_receiver.await?;
 
       let (mut mt_connections, extend_signal_sender) =
-        mt_connections_connect::<BytesPacket>(address, 2).await?;
+        mt_connections_connect::<MtBytesPacket>(address, 2).await?;
 
       let packet = mt_connections.next().await.unwrap();
 

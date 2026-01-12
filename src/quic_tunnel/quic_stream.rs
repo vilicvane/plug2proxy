@@ -6,19 +6,19 @@ use std::{
 use lowkit::DropCallback;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, SimplexStream, WriteHalf};
 
-type QomtStreamDropCallback = DropCallback<Box<dyn Fn() + Send>>;
+type QuicStreamDropCallback = DropCallback<Box<dyn Fn() + Send>>;
 
-pub struct QomtStream {
+pub struct QuicStream {
   read: ReadHalf<SimplexStream>,
   write: WriteHalf<SimplexStream>,
-  _drop_callback: QomtStreamDropCallback,
+  _drop_callback: QuicStreamDropCallback,
 }
 
-impl QomtStream {
+impl QuicStream {
   pub fn new(
     read: ReadHalf<SimplexStream>,
     write: WriteHalf<SimplexStream>,
-    drop_callback: QomtStreamDropCallback,
+    drop_callback: QuicStreamDropCallback,
   ) -> Self {
     Self {
       read,
@@ -28,7 +28,7 @@ impl QomtStream {
   }
 }
 
-impl AsyncRead for QomtStream {
+impl AsyncRead for QuicStream {
   fn poll_read(
     mut self: Pin<&mut Self>,
     cx: &mut Context,
@@ -38,7 +38,7 @@ impl AsyncRead for QomtStream {
   }
 }
 
-impl AsyncWrite for QomtStream {
+impl AsyncWrite for QuicStream {
   fn poll_write(
     mut self: Pin<&mut Self>,
     cx: &mut Context,

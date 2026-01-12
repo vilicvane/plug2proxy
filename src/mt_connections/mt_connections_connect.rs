@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use crate::{
-  qomt_tunnel::{
+  mt_connections::{
     MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsMagic,
     MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
     MtConnectionsResponseHead, MtConnectionsResponseHeadData,
