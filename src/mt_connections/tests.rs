@@ -1,16 +1,30 @@
-use std::time::Instant;
+use std::{sync::LazyLock, time::Instant};
 
 use futures::{SinkExt, StreamExt};
-use lits::duration;
+use lits::{bytes, duration};
 use lowkit::SelfWrapExt;
+use rand::Rng;
 use tokio::{net::TcpListener, sync::oneshot, time::sleep};
 
 use super::*;
+
+static RANDOM_DATA_1: LazyLock<Vec<u8>> = LazyLock::new(|| {
+  let mut random_data = vec![0u8; bytes!("8 MiB") as usize];
+  rand::rng().fill(&mut random_data[..]);
+  random_data
+});
+
+static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
+  let mut random_data = vec![0u8; bytes!("8 MiB") as usize];
+  rand::rng().fill(&mut random_data[..]);
+  random_data
+});
 
 #[tokio::test]
 #[test_log::test]
 async fn test_mt_connections() -> anyhow::Result<()> {
   let (listener_ready_sender, listener_ready_receiver) = oneshot::channel();
+  let (complete_sender, complete_receiver) = oneshot::channel();
 
   let instant = None.mutex();
 
@@ -29,14 +43,16 @@ async fn test_mt_connections() -> anyhow::Result<()> {
       let main_future = async {
         instant.lock().unwrap().replace(Instant::now());
 
-        mt_connections
-          .send(b"hello from listener".to_vec().into())
-          .await?;
+        mt_connections.send(RANDOM_DATA_1.clone().into()).await?;
+        mt_connections.send(RANDOM_DATA_2.clone().into()).await?;
 
-        let packets = mt_connections.collect::<Vec<_>>().await;
+        let packet_1 = mt_connections.next().await.unwrap();
+        let packet_2 = mt_connections.next().await.unwrap();
 
-        assert_eq!(*packets[0], b"hello from connect 1");
-        assert_eq!(*packets[1], b"hello from connect 2");
+        assert!(*packet_1 == *RANDOM_DATA_1 || *packet_1 == *RANDOM_DATA_2);
+        assert!(*packet_2 == *RANDOM_DATA_1 || *packet_2 == *RANDOM_DATA_2);
+
+        complete_sender.send(()).unwrap();
 
         anyhow::Ok(())
       };
@@ -63,14 +79,17 @@ async fn test_mt_connections() -> anyhow::Result<()> {
       let (mut mt_connections, extend_signal_sender) =
         mt_connections_connect::<MtBytesPacket>(address, 2).await?;
 
-      let packet = mt_connections.next().await.unwrap();
+      let packet_1 = mt_connections.next().await.unwrap();
 
       log::debug!(
         "packet 1 received after {:?}",
         instant.lock().unwrap().unwrap().elapsed()
       );
 
-      assert_eq!(*packet, b"hello from listener");
+      let packet_2 = mt_connections.next().await.unwrap();
+
+      assert!(*packet_1 == *RANDOM_DATA_1 || *packet_1 == *RANDOM_DATA_2);
+      assert!(*packet_2 == *RANDOM_DATA_1 || *packet_2 == *RANDOM_DATA_2);
 
       extend_signal_sender.send(()).unwrap();
 
@@ -78,13 +97,10 @@ async fn test_mt_connections() -> anyhow::Result<()> {
 
       assert_eq!(mt_connections.connection_count(), 2);
 
-      mt_connections
-        .send(b"hello from connect 1".to_vec().into())
-        .await?;
+      mt_connections.send(RANDOM_DATA_1.clone().into()).await?;
+      mt_connections.send(RANDOM_DATA_2.clone().into()).await?;
 
-      mt_connections
-        .send(b"hello from connect 2".to_vec().into())
-        .await?;
+      complete_receiver.await?;
 
       anyhow::Ok(())
     },

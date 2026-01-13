@@ -6,14 +6,9 @@ use std::{
 
 use lits::{bytes, duration};
 
-/// Though the underlying transport is TCP and we could have larger datagrams,
-/// but we'll stick with smaller ones in case it would affect performance like latency.
-pub const MAX_DATAGRAM_SIZE: usize = 1500;
+pub const MAX_DATAGRAM_SIZE: usize = bytes!("64 KiB") as usize;
 
-#[cfg(test)]
-pub const MAX_DATA_BUFFER_SIZE: u64 = bytes!("1 MiB");
-#[cfg(not(test))]
-pub const MAX_DATA_BUFFER_SIZE: u64 = bytes!("16 MiB");
+pub const MAX_DATA_BUFFER_SIZE: u64 = bytes!("32 MiB");
 
 pub static UNSPECIFIED_SOCKET_ADDRESS: LazyLock<SocketAddr> =
   LazyLock::new(|| SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)));

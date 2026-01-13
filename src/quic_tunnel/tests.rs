@@ -1,7 +1,4 @@
-use std::{
-  path::PathBuf,
-  sync::{Arc, LazyLock},
-};
+use std::{path::PathBuf, sync::LazyLock};
 
 use futures::{SinkExt, StreamExt};
 use lits::bytes;
@@ -45,19 +42,19 @@ async fn get_quiche_configs() -> anyhow::Result<[quiche::Config; 2]> {
   ])
 }
 
-static RANDOM_DATA_1: LazyLock<Arc<Vec<u8>>> = LazyLock::new(|| {
+static RANDOM_DATA_1: LazyLock<Vec<u8>> = LazyLock::new(|| {
   let mut random_data = vec![0u8; bytes!("8 MiB") as usize];
   rand::rng().fill(&mut random_data[..]);
-  Arc::new(random_data)
+  random_data
 });
 
-static RANDOM_DATA_2: LazyLock<Arc<Vec<u8>>> = LazyLock::new(|| {
+static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
   let mut random_data = vec![0u8; bytes!("8 MiB") as usize];
   rand::rng().fill(&mut random_data[..]);
-  Arc::new(random_data)
+  random_data
 });
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[test_log::test]
 async fn test_init() -> anyhow::Result<()> {
   // Avoid confusing test duration as it takes some time.
@@ -108,7 +105,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, **RANDOM_DATA_2);
+        assert!(data == *RANDOM_DATA_2);
       }
 
       {
@@ -118,7 +115,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, **RANDOM_DATA_1);
+        assert!(data == *RANDOM_DATA_1);
 
         stream.write_all(&RANDOM_DATA_2).await?;
         stream.shutdown().await?;
@@ -136,7 +133,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, **RANDOM_DATA_1);
+        assert!(data == *RANDOM_DATA_1);
 
         stream.write_all(&RANDOM_DATA_2).await?;
         stream.shutdown().await?;
@@ -152,7 +149,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, **RANDOM_DATA_2);
+        assert!(data == *RANDOM_DATA_2);
       }
 
       anyhow::Ok(())
@@ -162,7 +159,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[test_log::test]
 async fn test_qomt_connection() -> anyhow::Result<()> {
   let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
@@ -199,7 +196,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
           stream.read_to_end(&mut data).await?;
 
-          assert_eq!(data, **RANDOM_DATA_1);
+          assert!(data == *RANDOM_DATA_1);
 
           stream.write_all(&RANDOM_DATA_2).await?;
           stream.shutdown().await?;
@@ -217,7 +214,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
           stream.read_to_end(&mut data).await?;
 
-          assert_eq!(data, **RANDOM_DATA_2);
+          assert!(data == *RANDOM_DATA_2);
         }
 
         read_complete_sender.send(()).unwrap();
@@ -242,7 +239,11 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
     },
     async {
       let (mut out_mt_connections, extend_signal_sender) =
-        mt_connections_connect::<MtBytesPacket>(address, 2).await?;
+        mt_connections_connect::<MtBytesPacket>(address, 4).await?;
+
+      extend_signal_sender
+        .send(())
+        .map_err(|_| anyhow::anyhow!("Error sending extend signal"))?;
 
       let connection_id = QuicConnection::generate_connection_id();
 
@@ -265,14 +266,10 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, **RANDOM_DATA_2);
+        assert!(data == *RANDOM_DATA_2);
       }
 
       log::debug!("out open stream ended");
-
-      extend_signal_sender
-        .send(())
-        .map_err(|_| anyhow::anyhow!("Error sending extend signal"))?;
 
       {
         let mut stream = out_qomt_connection.accept_stream().await.unwrap();
@@ -281,7 +278,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
         stream.read_to_end(&mut data).await?;
 
-        assert_eq!(data, **RANDOM_DATA_1);
+        assert!(data == *RANDOM_DATA_1);
 
         stream.write_all(&RANDOM_DATA_2).await?;
         stream.shutdown().await?;
