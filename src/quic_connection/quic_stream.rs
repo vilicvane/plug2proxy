@@ -6,21 +6,33 @@ use std::{
 use lowkit::DropCallback;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, SimplexStream, WriteHalf};
 
+use crate::primitives::ConnectionSide;
+
 type QuicStreamDropCallback = DropCallback<Box<dyn Fn() + Send>>;
 
+#[derive(derive_more::Debug, derive_more::Display)]
+#[display("QuicStream {side} {id}")]
 pub struct QuicStream {
+  #[debug("{}", side)]
+  side: ConnectionSide,
+  id: u64,
   read: ReadHalf<SimplexStream>,
   write: WriteHalf<SimplexStream>,
+  #[debug(ignore)]
   _drop_callback: QuicStreamDropCallback,
 }
 
 impl QuicStream {
   pub fn new(
+    side: ConnectionSide,
+    id: u64,
     read: ReadHalf<SimplexStream>,
     write: WriteHalf<SimplexStream>,
     drop_callback: QuicStreamDropCallback,
   ) -> Self {
     Self {
+      side,
+      id,
       read,
       write,
       _drop_callback: drop_callback,

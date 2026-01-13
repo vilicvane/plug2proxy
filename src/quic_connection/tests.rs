@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::LazyLock};
 
 use futures::{SinkExt, StreamExt};
 use lits::bytes;
+use lowkit::SelfWrapExt;
 use rand::Rng;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
@@ -17,29 +18,43 @@ use crate::{
 
 use super::*;
 
-// Cache generated cert paths to avoid regenerating across tests.
-static QUICHE_CERT_PATHS: tokio::sync::OnceCell<(PathBuf, PathBuf, PathBuf)> =
-  tokio::sync::OnceCell::const_new();
+static QUICHE_CERT_PATHS: tokio::sync::OnceCell<[PathBuf; 2]> = tokio::sync::OnceCell::const_new();
 
 async fn get_quiche_configs() -> anyhow::Result<[quiche::Config; 2]> {
-  let (ca_pem_file_path, hub_pem_file_path, out_pem_file_path) = QUICHE_CERT_PATHS
+  let [hub_pem_file_path, out_pem_file_path] = QUICHE_CERT_PATHS
     .get_or_try_init(|| async {
       let test_dir = test_dir();
 
-      let ca_pem_file_path = generate_ca_pem_file(&test_dir).await?;
+      generate_ca_pem_file(&test_dir).await?;
 
       let hub_pem_file_path = generate_node_pem_file(&test_dir, "hub").await?;
       let out_pem_file_path = generate_node_pem_file(&test_dir, "out").await?;
 
-      anyhow::Ok((ca_pem_file_path, hub_pem_file_path, out_pem_file_path))
+      anyhow::Ok([hub_pem_file_path, out_pem_file_path])
     })
     .await?
     .clone();
 
   Ok([
-    create_quiche_config(&hub_pem_file_path, &ca_pem_file_path)?,
-    create_quiche_config(&out_pem_file_path, &ca_pem_file_path)?,
+    create_quiche_config(&hub_pem_file_path)?,
+    create_quiche_config(&out_pem_file_path)?,
   ])
+}
+
+static WRONG_CERT_PATH: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
+
+async fn get_wrong_cert_path() -> anyhow::Result<PathBuf> {
+  WRONG_CERT_PATH
+    .get_or_try_init(|| async {
+      let test_dir = test_dir().join("wrong");
+
+      generate_ca_pem_file(&test_dir).await?;
+
+      generate_node_pem_file(&test_dir, "node").await
+    })
+    .await?
+    .clone()
+    .wrap_ok()
 }
 
 static RANDOM_DATA_1: LazyLock<Vec<u8>> = LazyLock::new(|| {
@@ -93,7 +108,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
   tokio::try_join!(
     async {
-      out_quic_connection.established().await;
+      out_quic_connection.established().await?;
 
       {
         let mut stream = out_quic_connection.open_stream();
@@ -109,7 +124,7 @@ async fn test_quic_connection() -> anyhow::Result<()> {
       }
 
       {
-        let mut stream = out_quic_connection.accept_stream().await.unwrap();
+        let mut stream = out_quic_connection.accept_stream().await?.unwrap();
 
         let mut data = Vec::new();
 
@@ -124,10 +139,10 @@ async fn test_quic_connection() -> anyhow::Result<()> {
       anyhow::Ok(())
     },
     async {
-      hub_quic_connection.established().await;
+      hub_quic_connection.established().await?;
 
       {
-        let mut stream = hub_quic_connection.accept_stream().await.unwrap();
+        let mut stream = hub_quic_connection.accept_stream().await?.unwrap();
 
         let mut data = Vec::new();
 
@@ -187,10 +202,10 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
         let mut hub_qomt_connection =
           QuicConnection::accept(&connection_id, &mut hub_quiche_config, hub_mt_connections);
 
-        hub_qomt_connection.established().await;
+        hub_qomt_connection.established().await?;
 
         {
-          let mut stream = hub_qomt_connection.accept_stream().await.unwrap();
+          let mut stream = hub_qomt_connection.accept_stream().await?.unwrap();
 
           let mut data = Vec::new();
 
@@ -254,7 +269,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
       let mut out_qomt_connection =
         QuicConnection::connect(&connection_id, &mut out_quiche_config, out_mt_connections);
 
-      out_qomt_connection.established().await;
+      out_qomt_connection.established().await?;
 
       {
         let mut stream = out_qomt_connection.open_stream();
@@ -272,7 +287,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
       log::debug!("out open stream ended");
 
       {
-        let mut stream = out_qomt_connection.accept_stream().await.unwrap();
+        let mut stream = out_qomt_connection.accept_stream().await?.unwrap();
 
         let mut data = Vec::new();
 
@@ -287,6 +302,86 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
       }
 
       log::debug!("out accept stream ended");
+
+      anyhow::Ok(())
+    },
+  )?;
+
+  Ok(())
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_client_verification() -> anyhow::Result<()> {
+  let [mut hub_quiche_config, _] = get_quiche_configs().await?;
+
+  let mut out_quiche_config = {
+    let node_pem_file_path = get_wrong_cert_path().await?;
+
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+    config.set_application_protos(&[b"p2p"])?;
+    config.load_cert_chain_from_pem_file(node_pem_file_path.to_str().unwrap())?;
+    config.load_priv_key_from_pem_file(node_pem_file_path.to_str().unwrap())?;
+    config
+  };
+
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
+
+  let connection_id = QuicConnection::generate_connection_id();
+
+  let out_quic_connection = QuicConnection::connect_with_sink_and_stream(
+    &connection_id,
+    &mut out_quiche_config,
+    out_to_hub_packet_sender.into_sink(),
+    hub_to_out_packet_receiver.into_stream(),
+  );
+
+  let hub_quic_connection = QuicConnection::accept_with_sink_and_stream(
+    out_quic_connection.id(),
+    &mut hub_quiche_config,
+    hub_to_out_packet_sender.into_sink(),
+    out_to_hub_packet_receiver.into_stream(),
+  );
+
+  let (complete_sender, complete_receiver) = oneshot::channel();
+
+  tokio::try_join!(
+    async {
+      let error = hub_quic_connection
+        .established()
+        .await
+        .expect_err("Should fail to establish connection");
+
+      assert!(matches!(
+        error,
+        QuicConnectionError::QuicheConnectionLocal(quiche::ConnectionError {
+          is_app: false,
+          error_code: 0x0133, // 0x0100 CRYPTO_ERROR + 0x33 certificate_unknown
+          ..
+        })
+      ));
+
+      complete_receiver.await?;
+
+      anyhow::Ok(())
+    },
+    async {
+      let error = out_quic_connection
+        .established()
+        .await
+        .expect_err("Should fail to establish connection");
+
+      assert!(matches!(
+        error,
+        QuicConnectionError::QuicheConnectionPeer(quiche::ConnectionError {
+          is_app: false,
+          error_code: 0x0133,
+          ..
+        })
+      ));
+
+      complete_sender.send(()).unwrap();
 
       anyhow::Ok(())
     },

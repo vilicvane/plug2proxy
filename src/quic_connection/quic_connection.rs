@@ -1,9 +1,6 @@
 use std::{
   collections::HashMap,
-  sync::{
-    Arc,
-    atomic::{self, AtomicBool},
-  },
+  sync::{Arc, Mutex},
   time::Instant,
 };
 
@@ -30,12 +27,12 @@ const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 pub struct QuicConnection<'a> {
+  connection: Arc<Mutex<quiche::Connection>>,
   id: quiche::ConnectionId<'a>,
   next_stream_id_index: u64,
   side: ConnectionSide,
-  established: Arc<AtomicBool>,
-  established_notify: Arc<Notify>,
-  create_stream: Arc<dyn Fn(u64, bool) -> QuicStream>,
+  state_updater: Arc<StateUpdater>,
+  create_stream: Arc<dyn Fn(ConnectionSide, u64) -> QuicStream>,
   stream_receiver: mpsc::UnboundedReceiver<QuicStream>,
   _join_set: JoinSet<()>,
 }
@@ -71,7 +68,7 @@ impl<'a> QuicConnection<'a> {
     TSink::Error: std::fmt::Display,
     TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
-    let quiche_connection = quiche::connect(
+    let connection = quiche::connect(
       SERVER_COMMON_NAME.some(),
       connection_id,
       *UNSPECIFIED_SOCKET_ADDRESS,
@@ -81,7 +78,7 @@ impl<'a> QuicConnection<'a> {
     .unwrap_or_else(|error| panic!("failed to connect to quiche connection: {}", error));
 
     Self::create(
-      quiche_connection,
+      connection,
       connection_id.clone(),
       ConnectionSide::Client,
       underlying_sink,
@@ -119,7 +116,7 @@ impl<'a> QuicConnection<'a> {
     TSink::Error: std::fmt::Display,
     TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
-    let quiche_connection = quiche::accept(
+    let connection = quiche::accept(
       connection_id,
       None,
       *UNSPECIFIED_SOCKET_ADDRESS,
@@ -129,7 +126,7 @@ impl<'a> QuicConnection<'a> {
     .unwrap_or_else(|error| panic!("failed to accept quiche connection: {}", error));
 
     Self::create(
-      quiche_connection,
+      connection,
       connection_id.clone(),
       ConnectionSide::Server,
       underlying_sink,
@@ -138,7 +135,7 @@ impl<'a> QuicConnection<'a> {
   }
 
   fn create<TSink, TStream>(
-    quiche_connection: quiche::Connection,
+    connection: quiche::Connection,
     id: quiche::ConnectionId<'a>,
     side: ConnectionSide,
     mut underlying_sink: TSink,
@@ -149,38 +146,36 @@ impl<'a> QuicConnection<'a> {
     TSink::Error: std::fmt::Display,
     TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
   {
-    let quiche_connection = quiche_connection.mutex().arc();
+    let connection = connection.mutex().arc();
+    let state_updater = StateUpdater::new(side).arc();
 
-    let established = AtomicBool::new(false).arc();
-    let established_notify = Notify::new().arc();
+    let stream_send_continue_notify = Notify::new().arc();
+    let connection_send_continue_notify = Notify::new().arc();
 
-    let quiche_stream_send_continue_notify = Notify::new().arc();
-    let quiche_connection_send_continue_notify = Notify::new().arc();
-
-    let quiche_stream_recv_continue_notify_map = HashMap::<u64, Arc<Notify>>::new().mutex().arc();
+    let stream_recv_continue_notify_map = HashMap::<u64, Arc<Notify>>::new().mutex().arc();
 
     let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
 
     let create_stream = {
-      let quiche_connection = quiche_connection.clone();
-      let quiche_stream_send_continue_notify = quiche_stream_send_continue_notify.clone();
-      let quiche_stream_recv_continue_notify_map = quiche_stream_recv_continue_notify_map.clone();
-      let quiche_connection_send_continue_notify = quiche_connection_send_continue_notify.clone();
+      let connection = connection.clone();
+      let stream_send_continue_notify = stream_send_continue_notify.clone();
+      let stream_recv_continue_notify_map = stream_recv_continue_notify_map.clone();
+      let connection_send_continue_notify = connection_send_continue_notify.clone();
       let join_set = JoinSet::new().mutex().arc();
 
-      move |id: u64, recv_immediately: bool| {
+      move |side: ConnectionSide, id: u64| {
         log::debug!("{side} {id}: quic stream create");
 
         let (external_read, mut write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
         let (mut read, external_write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
 
-        let quiche_stream_recv_continue_notify = Notify::new().arc();
+        let stream_recv_continue_notify = Notify::new().arc();
 
         assert!(
-          quiche_stream_recv_continue_notify_map
+          stream_recv_continue_notify_map
             .lock()
             .unwrap()
-            .insert(id, quiche_stream_recv_continue_notify.clone())
+            .insert(id, stream_recv_continue_notify.clone())
             .is_none()
         );
 
@@ -188,10 +183,9 @@ impl<'a> QuicConnection<'a> {
 
         // stream send loop
         join_set.spawn({
-          let quiche_connection = quiche_connection.clone();
-          let quiche_stream_send_continue_notify = quiche_stream_send_continue_notify.clone();
-          let quiche_connection_send_continue_notify =
-            quiche_connection_send_continue_notify.clone();
+          let connection = connection.clone();
+          let stream_send_continue_notify = stream_send_continue_notify.clone();
+          let connection_send_continue_notify = connection_send_continue_notify.clone();
 
           async move {
             let mut buffer = [0; READ_WRITE_BUFFER_SIZE];
@@ -206,7 +200,7 @@ impl<'a> QuicConnection<'a> {
                   loop {
                     log::debug!("{side} {id}: stream send {offset}..{total_length}");
 
-                    let stream_send_result = quiche_connection.lock().unwrap().stream_send(
+                    let stream_send_result = connection.lock().unwrap().stream_send(
                       id,
                       &buffer[offset..total_length],
                       total_length == 0,
@@ -214,7 +208,7 @@ impl<'a> QuicConnection<'a> {
 
                     match stream_send_result {
                       Ok(length) => {
-                        quiche_connection_send_continue_notify.notify_waiters();
+                        connection_send_continue_notify.notify_waiters();
 
                         offset += length;
 
@@ -230,7 +224,7 @@ impl<'a> QuicConnection<'a> {
                       Err(quiche::Error::Done) => {
                         log::debug!("{side} {id}: stream send done");
 
-                        quiche_stream_send_continue_notify.notified().await;
+                        stream_send_continue_notify.notified().await;
                       }
                       Err(error) => {
                         log::warn!("error writing to quic stream: {error}");
@@ -247,11 +241,11 @@ impl<'a> QuicConnection<'a> {
                   log::warn!("error reading from quic stream: {error}");
 
                   loop {
-                    let stream_send_result = quiche_connection.lock().unwrap().stream_shutdown(
-                      id,
-                      quiche::Shutdown::Write,
-                      0,
-                    );
+                    let stream_send_result =
+                      connection
+                        .lock()
+                        .unwrap()
+                        .stream_shutdown(id, quiche::Shutdown::Write, 0);
 
                     match stream_send_result {
                       Ok(_) => {
@@ -274,15 +268,14 @@ impl<'a> QuicConnection<'a> {
 
         // stream recv loop
         join_set.spawn({
-          let quiche_connection = quiche_connection.clone();
-          let quiche_connection_send_continue_notify =
-            quiche_connection_send_continue_notify.clone();
+          let connection = connection.clone();
+          let connection_send_continue_notify = connection_send_continue_notify.clone();
 
           async move {
             let mut buffer = vec![0; READ_WRITE_BUFFER_SIZE];
 
-            if !recv_immediately {
-              quiche_stream_recv_continue_notify.notified().await;
+            if side == ConnectionSide::Client {
+              stream_recv_continue_notify.notified().await;
             }
 
             loop {
@@ -292,19 +285,19 @@ impl<'a> QuicConnection<'a> {
                   stream_recv = "stream recv".on_red()
                 );
 
-                let mut quiche_connection = quiche_connection.lock().unwrap();
+                let mut connection = connection.lock().unwrap();
 
-                if quiche_connection.stream_finished(id) {
+                if connection.stream_finished(id) {
                   log::debug!("{side} {id}: stream recv break");
                   break;
                 }
 
-                quiche_connection.stream_recv(id, &mut buffer)
+                connection.stream_recv(id, &mut buffer)
               };
 
               match stream_recv_result {
                 Ok((length, finished)) => {
-                  quiche_connection_send_continue_notify.notify_waiters();
+                  connection_send_continue_notify.notify_waiters();
 
                   log::debug!("{side} {id}: stream recv {length} {finished}");
 
@@ -336,7 +329,7 @@ impl<'a> QuicConnection<'a> {
                 Err(quiche::Error::Done) => {
                   log::debug!("{side} {id}: stream recv done");
 
-                  quiche_stream_recv_continue_notify.notified().await;
+                  stream_recv_continue_notify.notified().await;
                 }
                 Err(error) => {
                   log::warn!("error receiving packet from quiche stream: {}", error);
@@ -350,27 +343,23 @@ impl<'a> QuicConnection<'a> {
         });
 
         let drop_callback = DropCallback::new({
-          let quiche_stream_recv_continue_notify_map =
-            quiche_stream_recv_continue_notify_map.clone();
+          let stream_recv_continue_notify_map = stream_recv_continue_notify_map.clone();
 
           Box::new(move || {
-            quiche_stream_recv_continue_notify_map
-              .lock()
-              .unwrap()
-              .remove(&id);
+            stream_recv_continue_notify_map.lock().unwrap().remove(&id);
           }) as Box<dyn Fn() + Send>
         });
 
-        QuicStream::new(external_read, external_write, drop_callback)
+        QuicStream::new(side, id, external_read, external_write, drop_callback)
       }
     }
     .arc();
 
     Self {
+      connection: connection.clone(),
       id,
       side,
-      established: established.clone(),
-      established_notify: established_notify.clone(),
+      state_updater: state_updater.clone(),
       create_stream: create_stream.clone(),
       next_stream_id_index: 0,
       stream_receiver,
@@ -378,9 +367,8 @@ impl<'a> QuicConnection<'a> {
         let (timeout_sender, mut timeout_receiver) = mpsc::channel::<Instant>(1);
 
         let timeout_loop = {
-          let quiche_connection = quiche_connection.clone();
-          let quiche_connection_send_continue_notify =
-            quiche_connection_send_continue_notify.clone();
+          let connection = connection.clone();
+          let connection_send_continue_notify = connection_send_continue_notify.clone();
 
           async move {
             'no_active_timeout_loop: loop {
@@ -398,8 +386,8 @@ impl<'a> QuicConnection<'a> {
                     last_timeout_instant = timeout_instant;
                   }
                   _ = sleep_until(last_timeout_instant.into()) => {
-                    quiche_connection.lock().unwrap().on_timeout();
-                    quiche_connection_send_continue_notify.notify_waiters();
+                    connection.lock().unwrap().on_timeout();
+                    connection_send_continue_notify.notify_waiters();
                     break 'active_timeout_loop;
                   }
                 }
@@ -409,9 +397,9 @@ impl<'a> QuicConnection<'a> {
         };
 
         let send_loop = {
-          let quiche_connection = quiche_connection.clone();
-          let quiche_connection_send_continue_notify =
-            quiche_connection_send_continue_notify.clone();
+          let connection = connection.clone();
+          let connection_send_continue_notify = connection_send_continue_notify.clone();
+          let state_updater = state_updater.clone();
 
           async move {
             let mut buffer = [0; MAX_DATAGRAM_SIZE];
@@ -422,9 +410,17 @@ impl<'a> QuicConnection<'a> {
             loop {
               log::debug!("{side} {send}", send = "send".green());
 
-              let send_result = quiche_connection.lock().unwrap().send(&mut buffer);
+              let send_result = {
+                let mut connection = connection.lock().unwrap();
 
-              quiche_stream_send_continue_notify.notify_waiters();
+                let result = connection.send(&mut buffer);
+
+                state_updater.update(&connection);
+
+                result
+              };
+
+              stream_send_continue_notify.notify_waiters();
 
               match send_result {
                 Ok((length, _)) => {
@@ -447,7 +443,7 @@ impl<'a> QuicConnection<'a> {
                 Err(quiche::Error::Done) => {
                   log::debug!("{side} send done");
 
-                  let timeout_instant = quiche_connection.lock().unwrap().timeout_instant();
+                  let timeout_instant = connection.lock().unwrap().timeout_instant();
 
                   if let Some(timeout_instant) = timeout_instant {
                     if timeout_sender.send(timeout_instant).await.is_err() {
@@ -455,7 +451,7 @@ impl<'a> QuicConnection<'a> {
                     }
                   }
 
-                  quiche_connection_send_continue_notify.notified().await;
+                  connection_send_continue_notify.notified().await;
                 }
                 Err(error) => {
                   log::warn!("error sending packet to quiche connection: {}", error);
@@ -470,8 +466,6 @@ impl<'a> QuicConnection<'a> {
 
         let recv_loop = {
           async move {
-            // Read from the underlying multiple TCP connections.
-
             let receive_info: quiche::RecvInfo = quiche::RecvInfo {
               from: *UNSPECIFIED_SOCKET_ADDRESS,
               to: *UNSPECIFIED_SOCKET_ADDRESS,
@@ -489,41 +483,32 @@ impl<'a> QuicConnection<'a> {
               let recv_result = {
                 log::debug!("{side} {} {}", "recv".red(), packet.len());
 
-                let mut quiche_connection = quiche_connection.lock().unwrap();
+                let mut connection = connection.lock().unwrap();
 
-                let result = quiche_connection.recv(&mut packet, receive_info);
+                let result = connection.recv(&mut packet, receive_info);
 
-                if quiche_connection.is_established()
-                  && !established.load(atomic::Ordering::Relaxed)
-                {
-                  established.store(true, atomic::Ordering::Relaxed);
-                  established_notify.notify_waiters();
-                }
+                state_updater.update(&connection);
 
                 result
               };
 
+              connection_send_continue_notify.notify_waiters();
+
               match recv_result {
                 Ok(_) => {
-                  log::debug!("{side} recv ok");
-
                   // Source code suggests that recv always return the length of the packet if Ok.
 
-                  quiche_connection_send_continue_notify.notify_waiters();
+                  log::debug!("{side} recv ok");
 
-                  let readable = quiche_connection.lock().unwrap().readable();
+                  let readable = connection.lock().unwrap().readable();
 
                   for id in readable {
                     log::debug!("{side} {id}: stream recv readable");
 
-                    if let Some(notify) = quiche_stream_recv_continue_notify_map
-                      .lock()
-                      .unwrap()
-                      .get(&id)
-                    {
+                    if let Some(notify) = stream_recv_continue_notify_map.lock().unwrap().get(&id) {
                       notify.notify_waiters();
                     } else {
-                      let stream = create_stream(id, true);
+                      let stream = create_stream(ConnectionSide::Server, id);
 
                       if stream_sender
                         .send(stream)
@@ -558,24 +543,19 @@ impl<'a> QuicConnection<'a> {
     quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec())
   }
 
-  pub fn is_established(&self) -> bool {
-    self.established.load(atomic::Ordering::Relaxed)
-  }
-
-  pub async fn established(&self) {
-    if self.is_established() {
-      return;
-    }
-
-    self.established_notify.notified().await;
+  pub fn state(&self) -> State {
+    self.state_updater.state()
   }
 
   pub fn id(&self) -> &quiche::ConnectionId<'a> {
     &self.id
   }
 
-  pub async fn accept_stream(&mut self) -> Option<QuicStream> {
-    self.stream_receiver.recv().await
+  pub async fn accept_stream(&mut self) -> Result<Option<QuicStream>, QuicConnectionError> {
+    self.stream_receiver.recv().await.map_or_else(
+      || self.build_connection_result(None),
+      |stream| Ok(Some(stream)),
+    )
   }
 
   pub fn open_stream(&mut self) -> QuicStream {
@@ -583,7 +563,27 @@ impl<'a> QuicConnection<'a> {
 
     self.next_stream_id_index += 1;
 
-    (self.create_stream)(stream_id, false)
+    (self.create_stream)(ConnectionSide::Client, stream_id)
+  }
+
+  pub async fn established(&self) -> Result<(), QuicConnectionError> {
+    self.state_updater.wait(State::Established).await;
+
+    self.build_connection_result(())
+  }
+
+  fn build_connection_result<TOk>(&self, ok: TOk) -> Result<TOk, QuicConnectionError> {
+    let connection = self.connection.lock().unwrap();
+
+    connection
+      .local_error()
+      .map(|error| QuicConnectionError::QuicheConnectionLocal(error.clone()))
+      .or_else(|| {
+        connection
+          .peer_error()
+          .map(|error| QuicConnectionError::QuicheConnectionPeer(error.clone()))
+      })
+      .map_or_else(|| Ok(ok), |error| Err(error))
   }
 }
 
@@ -596,8 +596,76 @@ impl ConnectionSide {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+pub enum State {
+  Initial,
+  Established,
+  Draining,
+  Closed,
+}
+
+struct StateUpdater {
+  side: ConnectionSide,
+  notify: Notify,
+  state: Mutex<State>,
+}
+
+impl StateUpdater {
+  fn new(side: ConnectionSide) -> Self {
+    StateUpdater {
+      side,
+      notify: Notify::new(),
+      state: State::Initial.mutex(),
+    }
+  }
+
+  fn state(&self) -> State {
+    *self.state.lock().unwrap()
+  }
+
+  fn update(&self, connection: &quiche::Connection) -> State {
+    let new_state = if connection.is_closed() {
+      State::Closed
+    } else if connection.is_draining() {
+      State::Draining
+    } else if connection.is_established() {
+      State::Established
+    } else {
+      State::Initial
+    };
+
+    let mut state = self.state.lock().unwrap();
+
+    if *state >= new_state {
+      return *state;
+    }
+
+    log::debug!("{} new state: {new_state:?}", self.side);
+
+    *state = new_state;
+
+    self.notify.notify_waiters();
+
+    new_state
+  }
+
+  async fn wait(&self, target_state: State) -> State {
+    loop {
+      let state = self.state();
+
+      if state >= target_state {
+        return state;
+      }
+
+      self.notify.notified().await;
+    }
+  }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum QuicConnectionError {
-  #[error("I/O error: {0}")]
-  Io(#[from] std::io::Error),
+  #[error("Quiche connection local error: {0:?}")]
+  QuicheConnectionLocal(quiche::ConnectionError),
+  #[error("Quiche connection peer error: {0:?}")]
+  QuicheConnectionPeer(quiche::ConnectionError),
 }

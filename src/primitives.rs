@@ -1,6 +1,6 @@
 use colored::Colorize;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum ConnectionSide {
   Client,
   Server,
