@@ -22,33 +22,12 @@ use crate::{
   constants::SERVER_COMMON_NAME,
   mt_connections::MtBytesPacket,
   primitives::ConnectionSide,
-  quic_tunnel::{MAX_DATAGRAM_SIZE, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
+  quic_connection::{MAX_DATAGRAM_SIZE, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
 };
 
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
-
-// TODO:
-// - stream drop should release related resources.
-// - rename to QuicConnection.
-
-// recv loop
-//   - read from transport -> recv()
-//     - NOTIFY to send (ack)
-//   - readable() + stream_recv()
-//     - ASYNC
-//       - write to quic stream
-//       - NOTIFY to send (flow control)
-// send loop
-//   - send()
-//   - timeout()
-//     - ASYNC
-//       - on_timeout()
-//       - NOTIFY to send (?)
-// external
-//   - write to quic stream -> stream_send()
-//   - NOTIFY to send (data)
 
 pub struct QuicConnection<'a> {
   id: quiche::ConnectionId<'a>,
