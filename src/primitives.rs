@@ -1,4 +1,7 @@
+use std::net::IpAddr;
+
 use colored::Colorize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ConnectionSide {
@@ -17,4 +20,16 @@ impl std::fmt::Display for ConnectionSide {
       }
     )
   }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Destination {
+  pub address: DestinationAddress,
+  pub port: u16,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum DestinationAddress {
+  DomainName(String),
+  IpAddress(IpAddr),
 }

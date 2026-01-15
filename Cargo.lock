@@ -94,7 +94,7 @@ dependencies = [
  "nom",
  "num-traits",
  "rusticata-macros",
- "thiserror",
+ "thiserror 2.0.17",
  "time",
 ]
 
@@ -324,7 +324,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1022,7 +1022,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "hex",
- "thiserror",
+ "thiserror 2.0.17",
  "tokio",
 ]
 
@@ -1254,6 +1254,7 @@ name = "plug2proxy"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "color-backtrace",
  "colored",
@@ -1271,8 +1272,9 @@ dependencies = [
  "rand",
  "rcgen",
  "serde",
+ "socks5-server",
  "test-log",
- "thiserror",
+ "thiserror 2.0.17",
  "time",
  "tokio",
  "uuid",
@@ -1637,6 +1639,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "socks5-proto"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d91431c4672e25e372ef46bc554be8f315068c03608f99267a71ad32a12e8c4"
+dependencies = [
+ "bytes",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "socks5-server"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5223c26981806584cc38c74fddf58808dbdcf4724890471ced69e7a2e8d86345"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "socks5-proto",
+ "tokio",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1718,11 +1743,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.17",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2283,7 +2328,7 @@ dependencies = [
  "oid-registry",
  "ring",
  "rusticata-macros",
- "thiserror",
+ "thiserror 2.0.17",
  "time",
 ]
 

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+async-trait = "0.1.89"
 color-backtrace = "0.7.2"
 colored = "3.0.0"
 console-subscriber = "0.5.0"
@@ -21,6 +22,7 @@ quiche = "0.24.7"
 rand = "0.9.2"
 rcgen = { version = "0.14.6", features = ["pem", "x509-parser"] }
 serde = "1.0.228"
+socks5-server = "0.10.1"
 thiserror = "2.0.17"
 time = "0.3.45"
 tokio = { version = "1.49.0", features = ["full"] }
