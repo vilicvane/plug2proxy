@@ -27,6 +27,8 @@ where
 {
   let mut tcp_stream = TcpStream::connect(address).await?;
 
+  tcp_stream.set_nodelay(true)?;
+
   send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create).await?;
 
   let id = {
@@ -124,6 +126,8 @@ where
         if tcp_stream_close_receiver.is_closed() {
           break 'outer;
         }
+
+        tcp_stream.set_nodelay(true).unwrap();
 
         if tcp_stream_sender
           .send(tcp_stream)

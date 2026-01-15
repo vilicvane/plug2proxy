@@ -8,6 +8,7 @@
     "lowkit",
     "mpmc",
     "mtcp",
+    "nodelay",
     "oneshot",
     "pems",
     "qomt",
