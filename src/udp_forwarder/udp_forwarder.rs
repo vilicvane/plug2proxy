@@ -13,7 +13,7 @@ use moka::sync::Cache;
 use tokio::{net::UdpSocket, task::JoinSet};
 
 use crate::{
-  primitives::{SocketDestination, SocketDestinationHost},
+  primitives::SocketDestinationHost,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource},
   utils::net::SocketAddressExt,
 };
@@ -66,7 +66,7 @@ impl UdpForwarder {
       payload,
     }: OutgoingUdpPacket,
   ) -> Result<(), std::io::Error> {
-    let (socket, destination_socket_address) = {
+    let (socket, destination_address) = {
       if let Some((socket, destination_map, _)) = sockets.get(&source) {
         if let Some(destination_ip) = destination_map.lock().unwrap().get(&destination.host) {
           (
@@ -74,19 +74,29 @@ impl UdpForwarder {
             SocketAddr::from((*destination_ip, destination.port)),
           )
         } else {
-          let destination_socket_address =
-            get_destination_socket_address(&destination, &source.address).await?;
+          let socket_ip_version = socket.local_addr()?.get_ip_version();
+
+          let destination_addresses = destination.resolve().await?;
+
+          let destination_address = destination_addresses
+            .into_iter()
+            .find(|address| address.get_ip_version() == socket_ip_version)
+            .ok_or_else(|| {
+              std::io::Error::other("Unable to resolve matching destination socket address")
+            })?;
 
           destination_map
             .lock()
             .unwrap()
-            .insert(destination.host.clone(), destination_socket_address.ip());
+            .insert(destination.host.clone(), destination_address.ip());
 
-          (socket.clone(), destination_socket_address)
+          (socket.clone(), destination_address)
         }
       } else {
         let destination_socket_address =
-          get_destination_socket_address(&destination, &source.address).await?;
+          destination.resolve_connectable().await?.ok_or_else(|| {
+            std::io::Error::other("Unable to resolve connectable destination socket address")
+          })?;
 
         let socket = UdpSocket::bind(source.address.unspecified()).await?.arc();
 
@@ -112,7 +122,7 @@ impl UdpForwarder {
       }
     };
 
-    socket.send_to(&payload, destination_socket_address).await?;
+    socket.send_to(&payload, destination_address).await?;
 
     Ok(())
   }
@@ -186,23 +196,6 @@ impl Default for UdpForwarder {
   fn default() -> Self {
     Self::new()
   }
-}
-
-async fn get_destination_socket_address(
-  destination: &SocketDestination,
-  source: &SocketAddr,
-) -> Result<SocketAddr, std::io::Error> {
-  let destination_socket_addresses = destination
-    .resolve_to_socket_addresses_for_source(source)
-    .await?;
-
-  if destination_socket_addresses.is_empty() {
-    return Err(std::io::Error::other(
-      "Unable to resolve destination socket address",
-    ));
-  }
-
-  Ok(destination_socket_addresses[0])
 }
 
 #[cfg(test)]

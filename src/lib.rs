@@ -1,7 +1,11 @@
 pub mod cert;
 pub mod constants;
+pub mod hub;
+pub mod r#in;
 pub mod inbound;
 pub mod mt_connections;
+pub mod node;
+pub mod out;
 pub mod outbound;
 pub mod primitives;
 pub mod quic_connection;

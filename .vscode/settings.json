@@ -6,6 +6,7 @@
     "datagram",
     "datagrams",
     "gcongestion",
+    "itertools",
     "lowkit",
     "moka",
     "mpmc",
