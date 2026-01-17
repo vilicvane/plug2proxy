@@ -149,7 +149,7 @@ where
 impl<TPacket> Stream for MtConnections<TPacket> {
   type Item = TPacket;
 
-  fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+  fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
     Pin::new(&mut self.packet_stream).poll_next(cx)
   }
 }
@@ -157,7 +157,7 @@ impl<TPacket> Stream for MtConnections<TPacket> {
 impl<TPacket> Sink<TPacket> for MtConnections<TPacket> {
   type Error = flume::SendError<TPacket>;
 
-  fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+  fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
     Pin::new(&mut self.packet_sink).poll_ready(cx)
   }
 
@@ -165,11 +165,11 @@ impl<TPacket> Sink<TPacket> for MtConnections<TPacket> {
     Pin::new(&mut self.packet_sink).start_send(item)
   }
 
-  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
     Pin::new(&mut self.packet_sink).poll_flush(cx)
   }
 
-  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
     Pin::new(&mut self.packet_sink).poll_close(cx)
   }
 }

@@ -22,13 +22,14 @@ use tokio::{
 
 use crate::{
   inbound::{Inbound, InboundError},
-  primitives::{Destination, DestinationAddress},
-  udp::UdpPacket,
+  primitives::{SocketDestination, SocketDestinationHost},
+  udp_forwarder::OutgoingUdpPacket,
 };
 
 pub struct Socks5Inbound {
   listen_address: SocketAddr,
-  tcp_connect_receiver: tokio::sync::Mutex<mpsc::UnboundedReceiver<(Destination, Socks5TcpStream)>>,
+  tcp_connect_receiver:
+    tokio::sync::Mutex<mpsc::UnboundedReceiver<(SocketDestination, Socks5TcpStream)>>,
   _join_set: JoinSet<()>,
 }
 
@@ -75,7 +76,7 @@ impl Inbound for Socks5Inbound {
   type TcpStream = Socks5TcpStream;
   type UdpPacketStream = Socks5UdpPacketStream;
 
-  async fn accept_tcp_connect(&self) -> Result<(Destination, Self::TcpStream), InboundError> {
+  async fn accept_tcp_connect(&self) -> Result<(SocketDestination, Self::TcpStream), InboundError> {
     let mut tcp_connect_receiver = self.tcp_connect_receiver.lock().await;
 
     tcp_connect_receiver
@@ -129,14 +130,14 @@ impl AsyncWrite for Socks5TcpStream {
 
 pub struct Socks5UdpPacketStream {}
 
-impl Sink<UdpPacket> for Socks5UdpPacketStream {
+impl Sink<OutgoingUdpPacket> for Socks5UdpPacketStream {
   type Error = InboundError;
 
   fn poll_ready(self: Pin<&mut Self>, context: &mut Context) -> Poll<Result<(), Self::Error>> {
     todo!()
   }
 
-  fn start_send(self: Pin<&mut Self>, packet: UdpPacket) -> Result<(), Self::Error> {
+  fn start_send(self: Pin<&mut Self>, packet: OutgoingUdpPacket) -> Result<(), Self::Error> {
     todo!()
   }
 
@@ -150,7 +151,7 @@ impl Sink<UdpPacket> for Socks5UdpPacketStream {
 }
 
 impl Stream for Socks5UdpPacketStream {
-  type Item = UdpPacket;
+  type Item = OutgoingUdpPacket;
 
   fn poll_next(self: Pin<&mut Self>, context: &mut Context) -> Poll<Option<Self::Item>> {
     todo!()
@@ -159,7 +160,7 @@ impl Stream for Socks5UdpPacketStream {
 
 async fn handle_incoming_connection(
   connection: IncomingConnection<(), NeedAuthenticate>,
-  tcp_connect_sender: mpsc::UnboundedSender<(Destination, Socks5TcpStream)>,
+  tcp_connect_sender: mpsc::UnboundedSender<(SocketDestination, Socks5TcpStream)>,
 ) -> Result<(), InboundError> {
   let (connection, _) = connection.authenticate().await?;
 
@@ -188,15 +189,15 @@ async fn handle_incoming_connection(
   Ok(())
 }
 
-impl From<socks5_server::proto::Address> for Destination {
+impl From<socks5_server::proto::Address> for SocketDestination {
   fn from(address: socks5_server::proto::Address) -> Self {
     match address {
-      socks5_server::proto::Address::DomainAddress(domain, port) => Destination {
-        address: DestinationAddress::DomainName(String::from_utf8_lossy(&domain).into_owned()),
+      socks5_server::proto::Address::DomainAddress(domain, port) => SocketDestination {
+        host: SocketDestinationHost::DomainName(String::from_utf8_lossy(&domain).into_owned()),
         port,
       },
-      socks5_server::proto::Address::SocketAddress(socket_address) => Destination {
-        address: DestinationAddress::IpAddress(socket_address.ip()),
+      socks5_server::proto::Address::SocketAddress(socket_address) => SocketDestination {
+        host: SocketDestinationHost::IpAddress(socket_address.ip()),
         port: socket_address.port(),
       },
     }
@@ -225,7 +226,7 @@ mod tests {
 
   use crate::{
     inbound::{Inbound, Socks5Inbound},
-    primitives::{Destination, DestinationAddress},
+    primitives::{SocketDestination, SocketDestinationHost},
   };
 
   #[tokio::test]
@@ -291,11 +292,11 @@ mod tests {
     Ok(())
   }
 
-  fn assert_destination(destination: Destination, domain: &str, port: u16) {
+  fn assert_destination(destination: SocketDestination, domain: &str, port: u16) {
     assert_eq!(destination.port, port);
-    match destination.address {
-      DestinationAddress::DomainName(domain_name) => assert_eq!(domain_name, domain),
-      DestinationAddress::IpAddress(_) => panic!("expected domain destination"),
+    match destination.host {
+      SocketDestinationHost::DomainName(domain_name) => assert_eq!(domain_name, domain),
+      SocketDestinationHost::IpAddress(_) => panic!("expected domain destination"),
     }
   }
 }
