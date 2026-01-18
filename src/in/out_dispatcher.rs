@@ -8,18 +8,18 @@ use crate::{out::OutExit, primitives::SocketDestination};
 
 #[async_trait]
 pub trait OutDispatcher: Send + Sync {
-  fn match_out(&self, route: &OutExit) -> bool;
+  fn match_exit(&self, exit: &OutExit) -> bool;
 
   async fn connect(
     &self,
-    route: &OutExit,
+    exit: OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn OutTcpStream>, Error>;
 }
 
-pub trait OutTcpStream: AsyncRead + AsyncWrite + Unpin {}
+pub trait OutTcpStream: AsyncRead + AsyncWrite + Send + Unpin {}
 
-impl OutTcpStream for TcpStream {}
+impl<T> OutTcpStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

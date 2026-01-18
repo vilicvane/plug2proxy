@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use lowkit::SelfWrapExt;
+use tokio::net::TcpStream;
 
 use crate::{
   r#in::out_dispatcher::{self, OutDispatcher, OutTcpStream},
   out::{OutExit, OutExitTag},
-  primitives::SocketDestination,
+  primitives::{SocketDestination, SocketDestinationHost},
 };
 
 pub struct DirectOutDispatcher {
@@ -23,7 +24,7 @@ impl DirectOutDispatcher {
 
 #[async_trait]
 impl OutDispatcher for DirectOutDispatcher {
-  fn match_out(&self, route: &OutExit) -> bool {
+  fn match_exit(&self, route: &OutExit) -> bool {
     match route {
       OutExit::Direct => true,
       OutExit::Proxy => self.is_proxy(),
@@ -37,15 +38,15 @@ impl OutDispatcher for DirectOutDispatcher {
 
   async fn connect(
     &self,
-    _: &OutExit,
+    _: OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn OutTcpStream>, out_dispatcher::Error> {
     let tcp_stream = match destination.host {
-      crate::primitives::SocketDestinationHost::DomainName(domain) => {
-        tokio::net::TcpStream::connect((domain, destination.port)).await?
+      SocketDestinationHost::DomainName(domain) => {
+        TcpStream::connect((domain, destination.port)).await?
       }
-      crate::primitives::SocketDestinationHost::IpAddress(ip_addr) => {
-        tokio::net::TcpStream::connect((ip_addr, destination.port)).await?
+      SocketDestinationHost::IpAddress(ip_addr) => {
+        TcpStream::connect((ip_addr, destination.port)).await?
       }
     }
     .wrap_box();

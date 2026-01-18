@@ -8,6 +8,7 @@ pub mod node;
 pub mod out;
 pub mod outbound;
 pub mod primitives;
+pub mod qomt;
 pub mod quic_connection;
 pub mod route;
 pub mod tunnel;

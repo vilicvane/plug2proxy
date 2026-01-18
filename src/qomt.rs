@@ -1,35 +1,12 @@
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::mt_connections::MtConnectionsPacket;
+use crate::{mt_connections::MtConnectionsPacket, quic_connection::QuicBytesPacket};
 
-#[derive(Debug)]
-pub struct MtBytesPacket(Vec<u8>);
-
-impl From<Vec<u8>> for MtBytesPacket {
-  fn from(value: Vec<u8>) -> Self {
-    Self(value)
-  }
-}
-
-impl Deref for MtBytesPacket {
-  type Target = Vec<u8>;
-
-  fn deref(&self) -> &Self::Target {
-    &self.0
-  }
-}
-
-impl DerefMut for MtBytesPacket {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.0
-  }
-}
-
-impl MtConnectionsPacket for MtBytesPacket {
+impl MtConnectionsPacket for QuicBytesPacket {
   fn len(&self) -> usize {
-    self.0.len()
+    self.deref().len()
   }
 
   async fn read_next_packet(
@@ -40,7 +17,7 @@ impl MtConnectionsPacket for MtBytesPacket {
       let mut buffer = vec![0; length as usize];
       stream.read_exact(&mut buffer).await?;
 
-      Ok(Some(Self(buffer)))
+      Ok(Some(buffer.into()))
     }
     .await
     .or_else(|error: std::io::Error| match error.kind() {
@@ -53,8 +30,8 @@ impl MtConnectionsPacket for MtBytesPacket {
     stream: &mut (dyn AsyncWrite + Unpin + Send),
     packet: Self,
   ) -> Result<(), std::io::Error> {
-    stream.write_u32(packet.0.len() as u32).await?;
-    stream.write_all(&packet.0).await?;
+    stream.write_u32(packet.len() as u32).await?;
+    stream.write_all(packet.deref()).await?;
     Ok(())
   }
 }

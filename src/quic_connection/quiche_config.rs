@@ -13,16 +13,6 @@ pub const MAX_DATA_BUFFER_SIZE: u64 = bytes!("64 MiB");
 pub static UNSPECIFIED_SOCKET_ADDRESS: LazyLock<SocketAddr> =
   LazyLock::new(|| SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)));
 
-pub static HUB_QUICHE_CONFIG: LazyLock<quiche::Config> = LazyLock::new(|| {
-  create_quiche_config("hub.pem")
-    .unwrap_or_else(|error| panic!("failed to create hub quiche config: {}", error))
-});
-
-pub static NODE_QUICHE_CONFIG: LazyLock<quiche::Config> = LazyLock::new(|| {
-  create_quiche_config("node.pem")
-    .unwrap_or_else(|error| panic!("failed to create node quiche config: {}", error))
-});
-
 pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche::Config> {
   let pem_path = pem_path.as_ref().to_str().unwrap();
 

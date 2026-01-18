@@ -12,11 +12,10 @@ use tokio::{
 
 use crate::{
   cert::{generate_ca_pem_file, generate_node_pem_file},
-  mt_connections::{MtBytesPacket, MtConnectionsListener, mt_connections_connect},
+  mt_connections::{MtConnectionsListener, mt_connections_connect},
+  quic_connection::{QuicBytesPacket, QuicConnection, QuicConnectionError, create_quiche_config},
   test::test_dir,
 };
-
-use super::*;
 
 static QUICHE_CERT_PATHS: tokio::sync::OnceCell<[PathBuf; 2]> = tokio::sync::OnceCell::const_new();
 
@@ -87,8 +86,8 @@ async fn test_init() -> anyhow::Result<()> {
 async fn test_quic_connection() -> anyhow::Result<()> {
   let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
 
-  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
-  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
 
   let connection_id = QuicConnection::generate_connection_id();
 
@@ -187,7 +186,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
   tokio::try_join!(
     async {
-      let mut hub_mt_connections_listener = MtConnectionsListener::<MtBytesPacket>::new(listener);
+      let mut hub_mt_connections_listener = MtConnectionsListener::<QuicBytesPacket>::new(listener);
 
       let mut hub_mt_connections = hub_mt_connections_listener.accept().await?;
 
@@ -254,7 +253,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
     },
     async {
       let (mut out_mt_connections, extend_signal_sender) =
-        mt_connections_connect::<MtBytesPacket>(address, 4).await?;
+        mt_connections_connect::<QuicBytesPacket>(address, 4).await?;
 
       extend_signal_sender
         .send(())
@@ -325,8 +324,8 @@ async fn test_client_verification() -> anyhow::Result<()> {
     config
   };
 
-  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
-  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<MtBytesPacket>(0);
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
 
   let connection_id = QuicConnection::generate_connection_id();
 

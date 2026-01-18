@@ -4,12 +4,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-  out::DirectOut,
+  r#in::out_dispatcher::OutDispatcher,
+  out::{DirectOut, OutExit, OutExitTag},
+  primitives::SocketDestination,
   route::{self, AnyRule},
 };
 
 pub trait Node {
   fn id(&self) -> NodeId;
+
+  fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -29,9 +33,19 @@ impl Default for NodeId {
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum NodeMessage {
-  InHello,
-  OutHello(Option<DirectOut>),
+pub enum NodeHello {
+  In,
+  Out(Option<DirectOut>),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum NodeInMessage {
+  Connect((OutExit, SocketDestination)),
+  Associate((OutExit, SocketDestination)),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum NodeHubMessage {
   RouteRules(Vec<AnyRule>),
   DirectOuts(Vec<DirectOut>),
 }

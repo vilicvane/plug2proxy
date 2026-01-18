@@ -1,24 +1,32 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
+use futures::StreamExt;
+use itertools::Itertools;
 use lowkit::SelfWrapExt;
+use tokio::{net::TcpListener, task::JoinSet};
 
 use crate::{
+  cert::NODE_PEM_FILE_NAME,
   r#in::{
     direct_out_dispatcher::DirectOutDispatcher,
     in_like::{self, InLike},
     out_dispatcher::OutDispatcher,
   },
-  node::{Node, NodeId},
+  mt_connections::MtConnectionsListener,
+  node::{Node, NodeHello, NodeId, NodeInMessage},
   out::{OutExit, OutExitTag, OutLike},
   primitives::SocketDestination,
+  quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
   tunnel::TunnelId,
+  utils::postcard::read_postcard_from_stream,
 };
 
 pub struct Hub {
   id: NodeId,
   direct_out_dispatcher: Arc<dyn OutDispatcher>,
   connected_out_dispatcher_map: HashMap<TunnelId, Arc<dyn OutDispatcher>>,
+  mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
 }
 
 pub struct HubOptions {
@@ -26,12 +34,15 @@ pub struct HubOptions {
 }
 
 impl Hub {
-  pub fn new(options: HubOptions) -> Self {
+  pub async fn new(options: HubOptions) -> Result<Self, std::io::Error> {
     Self {
       id: NodeId::new(),
       direct_out_dispatcher: DirectOutDispatcher::new(options.tags).arc(),
       connected_out_dispatcher_map: HashMap::new(),
+      mt_connections_listener: MtConnectionsListener::new(TcpListener::bind("127.0.0.1:0").await?)
+        .tokio_mutex(),
     }
+    .wrap_ok()
   }
 
   pub fn in_enabled(&self) -> bool {
@@ -42,32 +53,113 @@ impl Hub {
     false
   }
 
-  pub async fn run(&self) {
-    tokio::join!(
-      async {
-        if self.in_enabled() {
-          self.run_in().await;
+  pub async fn run(self) -> anyhow::Result<()> {
+    let hub = self.arc();
+
+    let mut mt_connections_listener = hub.mt_connections_listener.lock().await;
+
+    let mut join_set = JoinSet::new();
+
+    loop {
+      let hub = hub.clone();
+
+      let mut mt_connections = mt_connections_listener.accept().await?;
+
+      let first_packet = mt_connections
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no packet"))?;
+
+      let connection_id = quiche::ConnectionId::from_vec(first_packet.to_vec());
+
+      let mut quiche_config = create_quiche_config(NODE_PEM_FILE_NAME)?;
+
+      let mut qomt_connection =
+        QuicConnection::accept(&connection_id, &mut quiche_config, mt_connections);
+
+      join_set.spawn(async move {
+        async {
+          qomt_connection.established().await?;
+
+          let mut stream = qomt_connection
+            .accept_stream()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("expecting hello stream"))?;
+
+          let hello = read_postcard_from_stream::<NodeHello>(&mut stream).await?;
+
+          match hello {
+            NodeHello::In => {
+              hub.clone().handle_in_connection(qomt_connection).await?;
+            }
+            NodeHello::Out(direct_out) => {
+              todo!()
+            }
+          }
+
+          anyhow::Ok(())
         }
+        .await
+        .inspect_err(|error| {
+          log::error!("error accepting qomt connection: {}", error);
+        })
+        .ok();
+      });
+    }
+
+    Ok(())
+  }
+
+  async fn handle_in_connection(
+    self: Arc<Self>,
+    mut qomt_connection: QuicConnection,
+  ) -> anyhow::Result<()> {
+    let mut join_set = JoinSet::new();
+
+    tokio::try_join!(
+      async {
+        loop {
+          let Some(mut stream) = qomt_connection.accept_stream().await? else {
+            break;
+          };
+
+          let hub = self.clone();
+
+          join_set.spawn(async move {
+            async {
+              let message = read_postcard_from_stream::<NodeInMessage>(&mut stream).await?;
+
+              match message {
+                NodeInMessage::Connect((exit, destination)) => {
+                  hub
+                    .out_tcp_connect(exit, destination, stream.wrap_box())
+                    .await?;
+                }
+                NodeInMessage::Associate(_) => todo!(),
+              }
+
+              anyhow::Ok(())
+            }
+            .await
+            .inspect_err(|error| {
+              log::error!("error handling IN stream: {}", error);
+            })
+            .ok();
+          });
+        }
+
+        anyhow::Ok(())
       },
-      async {
-        if self.out_enabled() {
-          self.run_out().await;
-        }
-      }
-    );
+      async { anyhow::Ok(()) },
+    )?;
+
+    Ok(())
   }
 }
 
 impl Node for Hub {
   fn id(&self) -> NodeId {
     self.id
-  }
-}
-
-#[async_trait]
-impl InLike for Hub {
-  async fn route(&self, destination: &SocketDestination) -> Result<Vec<OutExit>, in_like::Error> {
-    todo!()
   }
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
@@ -76,6 +168,13 @@ impl InLike for Hub {
     dispatchers.extend(self.connected_out_dispatcher_map.values().cloned());
 
     dispatchers
+  }
+}
+
+#[async_trait]
+impl InLike for Hub {
+  async fn route(&self, destination: &SocketDestination) -> Result<Vec<OutExit>, in_like::Error> {
+    todo!()
   }
 }
 

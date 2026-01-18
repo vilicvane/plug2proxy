@@ -1,8 +1,9 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+  r#in::out_dispatcher::OutDispatcher,
   node::{Node, NodeId},
   out::{OutExitTag, OutLike},
 };
@@ -26,6 +27,10 @@ impl Default for Out {
 impl Node for Out {
   fn id(&self) -> NodeId {
     self.id
+  }
+
+  fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
+    todo!()
   }
 }
 

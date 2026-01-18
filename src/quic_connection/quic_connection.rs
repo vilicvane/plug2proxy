@@ -17,34 +17,33 @@ use tokio::{
 
 use crate::{
   constants::SERVER_COMMON_NAME,
-  mt_connections::MtBytesPacket,
   primitives::ConnectionSide,
-  quic_connection::{MAX_DATAGRAM_SIZE, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
+  quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
 };
 
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
-pub struct QuicConnection<'a> {
+pub struct QuicConnection {
   connection: Arc<Mutex<quiche::Connection>>,
-  id: quiche::ConnectionId<'a>,
+  id: quiche::ConnectionId<'static>,
   next_stream_id_index: u64,
   side: ConnectionSide,
   state_updater: Arc<StateUpdater>,
-  create_stream: Arc<dyn Fn(ConnectionSide, u64) -> QuicStream>,
+  create_stream: Arc<dyn Fn(ConnectionSide, u64) -> QuicStream + Send + Sync>,
   stream_receiver: mpsc::UnboundedReceiver<QuicStream>,
   _join_set: JoinSet<()>,
 }
 
-impl<'a> QuicConnection<'a> {
+impl QuicConnection {
   pub fn connect<TStream>(
-    connection_id: &quiche::ConnectionId<'a>,
+    connection_id: &quiche::ConnectionId<'static>,
     quiche_config: &mut quiche::Config,
     underlying_stream: TStream,
   ) -> Self
   where
-    TStream: Sink<MtBytesPacket> + Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream: Sink<QuicBytesPacket> + Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
     TStream::Error: std::fmt::Display,
   {
     let (underlying_sink, underlying_stream) = underlying_stream.split();
@@ -58,15 +57,15 @@ impl<'a> QuicConnection<'a> {
   }
 
   pub fn connect_with_sink_and_stream<TSink, TStream>(
-    connection_id: &quiche::ConnectionId<'a>,
+    connection_id: &quiche::ConnectionId<'static>,
     quiche_config: &mut quiche::Config,
     underlying_sink: TSink,
     underlying_stream: TStream,
   ) -> Self
   where
-    TSink: Sink<MtBytesPacket> + Unpin + Send + 'static,
+    TSink: Sink<QuicBytesPacket> + Unpin + Send + 'static,
     TSink::Error: std::fmt::Display,
-    TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream: Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
   {
     let connection = quiche::connect(
       SERVER_COMMON_NAME.some(),
@@ -87,12 +86,12 @@ impl<'a> QuicConnection<'a> {
   }
 
   pub fn accept<TStream>(
-    connection_id: &quiche::ConnectionId<'a>,
+    connection_id: &quiche::ConnectionId<'static>,
     quiche_config: &mut quiche::Config,
     underlying_stream: TStream,
   ) -> Self
   where
-    TStream: Sink<MtBytesPacket> + Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream: Sink<QuicBytesPacket> + Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
     TStream::Error: std::fmt::Display,
   {
     let (underlying_sink, underlying_stream) = underlying_stream.split();
@@ -106,15 +105,15 @@ impl<'a> QuicConnection<'a> {
   }
 
   pub fn accept_with_sink_and_stream<TSink, TStream>(
-    connection_id: &quiche::ConnectionId<'a>,
+    connection_id: &quiche::ConnectionId<'static>,
     quiche_config: &mut quiche::Config,
     underlying_sink: TSink,
     underlying_stream: TStream,
   ) -> Self
   where
-    TSink: Sink<MtBytesPacket> + Unpin + Send + 'static,
+    TSink: Sink<QuicBytesPacket> + Unpin + Send + 'static,
     TSink::Error: std::fmt::Display,
-    TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream: Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
   {
     let connection = quiche::accept(
       connection_id,
@@ -136,15 +135,15 @@ impl<'a> QuicConnection<'a> {
 
   fn create<TSink, TStream>(
     connection: quiche::Connection,
-    id: quiche::ConnectionId<'a>,
+    id: quiche::ConnectionId<'static>,
     side: ConnectionSide,
     mut underlying_sink: TSink,
     mut underlying_stream: TStream,
   ) -> Self
   where
-    TSink: Sink<MtBytesPacket> + Unpin + Send + 'static,
+    TSink: Sink<QuicBytesPacket> + Unpin + Send + 'static,
     TSink::Error: std::fmt::Display,
-    TStream: Stream<Item = MtBytesPacket> + Unpin + Send + 'static,
+    TStream: Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
   {
     let connection = connection.mutex().arc();
     let state_updater = StateUpdater::new(side).arc();
@@ -539,7 +538,7 @@ impl<'a> QuicConnection<'a> {
     }
   }
 
-  pub fn generate_connection_id() -> quiche::ConnectionId<'a> {
+  pub fn generate_connection_id() -> quiche::ConnectionId<'static> {
     quiche::ConnectionId::from_vec(rand::random::<[u8; 20]>().to_vec())
   }
 
@@ -547,7 +546,7 @@ impl<'a> QuicConnection<'a> {
     self.state_updater.state()
   }
 
-  pub fn id(&self) -> &quiche::ConnectionId<'a> {
+  pub fn id(&self) -> &quiche::ConnectionId<'static> {
     &self.id
   }
 

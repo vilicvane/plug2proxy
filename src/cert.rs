@@ -10,8 +10,8 @@ use crate::constants::{ORGANIZATION_NAME, SERVER_COMMON_NAME};
 
 pub const CA_COMMON_NAME: &str = "Plug2Proxy CA";
 
-const CA_PEM_FILE_NAME: &str = "ca.pem";
-const NODE_PEM_FILE_NAME: &str = "node.pem";
+pub const CA_PEM_FILE_NAME: &str = "ca.pem";
+pub const NODE_PEM_FILE_NAME: &str = "node.pem";
 
 pub async fn generate_ca_pem_file(dir: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
   let dir = dir.as_ref();

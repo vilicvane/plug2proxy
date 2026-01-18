@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use tokio::io::DuplexStream;
 
+use crate::r#in::out_dispatcher::OutDispatcher;
 use crate::node::NodeId;
 use crate::{node::Node, primitives::SocketDestination};
 
@@ -23,6 +26,10 @@ impl Default for In {
 impl Node for In {
   fn id(&self) -> NodeId {
     self.id
+  }
+
+  fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
+    todo!()
   }
 }
 

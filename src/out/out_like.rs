@@ -1,17 +1,40 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use tokio::io::copy_bidirectional;
 
-use crate::node::Node;
+use crate::{
+  r#in::out_dispatcher::{self, OutTcpStream},
+  node::Node,
+  primitives::SocketDestination,
+};
 
 #[async_trait]
 pub trait OutLike: Node {
-  async fn run_out(&self) {}
+  async fn out_tcp_connect(
+    &self,
+    exit: OutExit,
+    destination: SocketDestination,
+    mut tcp_stream: Box<dyn OutTcpStream>,
+  ) -> Result<(), Error> {
+    let out_dispatchers = self.get_out_dispatchers();
+
+    let out_dispatcher = out_dispatchers
+      .iter()
+      .find(|dispatcher| dispatcher.match_exit(&exit))
+      .ok_or(Error::OutDispatcherNotFound)?;
+
+    let mut out_tcp_stream = out_dispatcher.connect(exit, destination).await?;
+
+    copy_bidirectional(&mut tcp_stream, &mut out_tcp_stream).await?;
+
+    Ok(())
+  }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, derive_more::From)]
 pub enum OutExit {
   Direct,
-  Tag(OutExitTag),
+  Tag(#[from] OutExitTag),
   Proxy,
   Any,
 }
@@ -27,17 +50,15 @@ impl From<String> for OutExit {
   }
 }
 
-// impl OutExit {
-//   /// Lower the number, higher the priority.
-//   pub fn priority(&self) -> u8 {
-//     match self {
-//       OutExit::Direct => 0,
-//       OutExit::Tag(_) => 1,
-//       OutExit::Proxy => 2,
-//       OutExit::Any => 3,
-//     }
-//   }
-// }
-
 #[derive(Debug, Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
 pub struct OutExitTag(pub String);
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+  #[error("I/O error: {0}")]
+  Io(#[from] std::io::Error),
+  #[error("Out dispatcher error: {0}")]
+  OutDispatcher(#[from] out_dispatcher::Error),
+  #[error("Out dispatcher not found")]
+  OutDispatcherNotFound,
+}

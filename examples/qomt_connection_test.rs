@@ -7,8 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use plug2proxy::{
   cert::{generate_ca_pem_file, generate_node_pem_file},
-  mt_connections::{MtBytesPacket, MtConnectionsListener, mt_connections_connect},
-  quic_connection::{QuicConnection, create_quiche_config},
+  mt_connections::{MtConnectionsListener, mt_connections_connect},
+  quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
 };
 
 #[derive(Parser, Debug)]
@@ -82,7 +82,7 @@ async fn run_server(listen: SocketAddr) -> anyhow::Result<()> {
     .await
     .context("bind server listener")?;
 
-  let mut listener = MtConnectionsListener::<MtBytesPacket>::new(listener);
+  let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(listener);
 
   loop {
     let mt_connections = listener.accept().await.context("accept MtConnections")?;
@@ -91,7 +91,7 @@ async fn run_server(listen: SocketAddr) -> anyhow::Result<()> {
 }
 
 async fn handle_server_connection(
-  mut mt_connections: plug2proxy::mt_connections::MtConnections<MtBytesPacket>,
+  mut mt_connections: plug2proxy::mt_connections::MtConnections<QuicBytesPacket>,
 ) -> anyhow::Result<()> {
   let first_packet = mt_connections
     .next()
@@ -185,7 +185,7 @@ async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
   );
 
   let (mut mt_connections, extend_signal_sender) =
-    mt_connections_connect::<MtBytesPacket>(args.connect, args.connections)
+    mt_connections_connect::<QuicBytesPacket>(args.connect, args.connections)
       .await
       .context("mt_connections_connect")?;
 
@@ -227,7 +227,7 @@ struct Stats {
 }
 
 async fn run_upload_test(
-  quic_connection: &mut QuicConnection<'_>,
+  quic_connection: &mut QuicConnection,
   total_bytes: u64,
   chunk_bytes: usize,
 ) -> anyhow::Result<Stats> {
@@ -269,7 +269,7 @@ async fn run_upload_test(
 }
 
 async fn run_download_test(
-  quic_connection: &mut QuicConnection<'_>,
+  quic_connection: &mut QuicConnection,
   total_bytes: u64,
   chunk_bytes: usize,
 ) -> anyhow::Result<Stats> {

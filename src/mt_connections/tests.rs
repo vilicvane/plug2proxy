@@ -6,6 +6,8 @@ use lowkit::SelfWrapExt;
 use rand::Rng;
 use tokio::{net::TcpListener, sync::oneshot, time::sleep};
 
+use crate::quic_connection::QuicBytesPacket;
+
 use super::*;
 
 static RANDOM_DATA_1: LazyLock<Vec<u8>> = LazyLock::new(|| {
@@ -34,7 +36,7 @@ async fn test_mt_connections() -> anyhow::Result<()> {
 
       let address = listener.local_addr()?;
 
-      let mut listener = MtConnectionsListener::<MtBytesPacket>::new(listener);
+      let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(listener);
 
       listener_ready_sender.send(address).unwrap();
 
@@ -77,7 +79,7 @@ async fn test_mt_connections() -> anyhow::Result<()> {
       let address = listener_ready_receiver.await?;
 
       let (mut mt_connections, extend_signal_sender) =
-        mt_connections_connect::<MtBytesPacket>(address, 2).await?;
+        mt_connections_connect::<QuicBytesPacket>(address, 2).await?;
 
       let packet_1 = mt_connections.next().await.unwrap();
 

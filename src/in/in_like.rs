@@ -14,9 +14,7 @@ use crate::{
 pub trait InLike: Node {
   async fn route(&self, destination: &SocketDestination) -> Result<Vec<OutExit>, Error>;
 
-  fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>>;
-
-  async fn tcp_connect(
+  async fn in_tcp_connect(
     &self,
     destination: SocketDestination,
   ) -> Result<Box<dyn OutTcpStream>, Error> {
@@ -29,11 +27,11 @@ pub trait InLike: Node {
     let out_dispatchers = self.get_out_dispatchers();
 
     let (exit, out_dispatcher) = exits
-      .iter()
+      .into_iter()
       .find_map(|route| {
         out_dispatchers
           .iter()
-          .find(|dispatcher| dispatcher.match_out(route))
+          .find(|dispatcher| dispatcher.match_exit(&route))
           .map(|dispatcher| (route, dispatcher))
       })
       .ok_or(Error::RouteNotFound)?;
