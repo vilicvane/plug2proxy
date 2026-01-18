@@ -1177,6 +1177,9 @@ name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "ipnetwork"
@@ -1340,6 +1343,9 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "hex",
+ "regex",
+ "serde",
+ "serde_regex",
  "thiserror 2.0.17",
  "tokio",
 ]
@@ -1621,6 +1627,7 @@ dependencies = [
  "colored",
  "console-subscriber",
  "derive_more",
+ "enum_dispatch",
  "env_logger",
  "flume",
  "futures",
@@ -2166,6 +2173,16 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_regex"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8136f1a4ea815d7eac4101cfd0b16dc0cb5e1fe1b8609dfd728058656b7badf"
+dependencies = [
+ "regex",
+ "serde",
 ]
 
 [[package]]

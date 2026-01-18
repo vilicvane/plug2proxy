@@ -1,8 +1,13 @@
 use std::net::SocketAddr;
 
-use crate::out::OutExit;
+use enum_dispatch::enum_dispatch;
+use lowkit::SerdeRegex;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub trait Rule: Send + Sync {
+use crate::{out::OutExit, utils::serde::SerdeIpNet};
+
+#[enum_dispatch(AnyRule)]
+pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
   fn priority(&self) -> i64;
 
   fn exits(&self) -> &[OutExit];
@@ -15,7 +20,17 @@ pub trait Rule: Send + Sync {
   ) -> bool;
 }
 
-#[derive(Clone, Debug)]
+#[enum_dispatch]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AnyRule {
+  GeoIp(GeoIpRule),
+  Address(AddressRule),
+  Domain(DomainRule),
+  DomainPattern(DomainPatternRule),
+  Fallback(FallbackRule),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeoIpRule {
   pub matches: Vec<String>,
   pub priority: i64,
@@ -53,9 +68,9 @@ impl Rule for GeoIpRule {
   }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AddressRule {
-  pub match_ips: Option<Vec<ipnet::IpNet>>,
+  pub match_ips: Option<Vec<SerdeIpNet>>,
   pub match_ports: Option<Vec<u16>>,
   pub priority: i64,
   pub negate: bool,
@@ -103,7 +118,7 @@ impl Rule for AddressRule {
   }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DomainRule {
   pub matches: Vec<String>,
   pub priority: i64,
@@ -144,9 +159,9 @@ impl Rule for DomainRule {
   }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DomainPatternRule {
-  pub matches: Vec<regex::Regex>,
+  pub matches: Vec<SerdeRegex>,
   pub priority: i64,
   pub negate: bool,
   pub exits: Vec<OutExit>,
@@ -181,7 +196,7 @@ impl Rule for DomainPatternRule {
   }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FallbackRule {
   pub exits: Vec<OutExit>,
 }

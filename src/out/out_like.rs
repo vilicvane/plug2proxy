@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::node::Node;
 
@@ -8,7 +8,7 @@ pub trait OutLike: Node {
   async fn run_out(&self) {}
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OutExit {
   Direct,
   Tag(OutExitTag),
@@ -24,15 +24,6 @@ impl From<String> for OutExit {
       "ANY" => OutExit::Any,
       _ => OutExit::Tag(OutExitTag(value)),
     }
-  }
-}
-
-impl<'de> Deserialize<'de> for OutExit {
-  fn deserialize<TDeserializer>(deserializer: TDeserializer) -> Result<Self, TDeserializer::Error>
-  where
-    TDeserializer: Deserializer<'de>,
-  {
-    Ok(String::deserialize(deserializer)?.into())
   }
 }
 

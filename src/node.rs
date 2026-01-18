@@ -1,5 +1,12 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::{
+  out::DirectOut,
+  route::{self, AnyRule},
+};
 
 pub trait Node {
   fn id(&self) -> NodeId;
@@ -21,8 +28,10 @@ impl Default for NodeId {
   }
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum NodeMessage {
   InHello,
-  OutHello,
-  RouteRules {},
+  OutHello(Option<DirectOut>),
+  RouteRules(Vec<AnyRule>),
+  DirectOuts(Vec<DirectOut>),
 }

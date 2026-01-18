@@ -7,7 +7,7 @@ use serde::{
   de::{self, DeserializeOwned},
 };
 
-#[derive(Clone, derive_more::From, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SerdeOneOrMany<T> {
   One(T),
@@ -23,7 +23,7 @@ impl<T> From<SerdeOneOrMany<T>> for Vec<T> {
   }
 }
 
-#[derive(Clone, derive_more::From)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SerdeIpNet(ipnet::IpNet);
 
 impl Deref for SerdeIpNet {

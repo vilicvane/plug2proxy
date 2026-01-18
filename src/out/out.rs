@@ -1,6 +1,10 @@
+use std::net::SocketAddr;
+
+use serde::{Deserialize, Serialize};
+
 use crate::{
   node::{Node, NodeId},
-  out::OutLike,
+  out::{OutExitTag, OutLike},
 };
 
 pub struct Out {
@@ -26,3 +30,9 @@ impl Node for Out {
 }
 
 impl OutLike for Out {}
+
+#[derive(Serialize, Deserialize)]
+pub struct DirectOut {
+  pub tags: Vec<OutExitTag>,
+  pub address: SocketAddr,
+}

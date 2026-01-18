@@ -1,4 +1,9 @@
-pub mod config;
-pub mod geolite2;
-pub mod router;
-pub mod rule;
+mod config;
+mod geolite2;
+mod router;
+mod rule;
+
+pub use config::*;
+pub use geolite2::*;
+pub use router::*;
+pub use rule::*;

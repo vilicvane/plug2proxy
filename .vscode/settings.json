@@ -21,6 +21,7 @@
     "quic",
     "rcgen",
     "reqwest",
+    "serde",
     "thiserror"
   ]
 }

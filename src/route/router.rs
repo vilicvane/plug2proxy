@@ -9,16 +9,16 @@ use lowkit::SelfWrapExt;
 
 use crate::{node::NodeId, out::OutExit};
 
-use super::rule::Rule;
+use super::{rule::AnyRule, rule::Rule};
 
 pub struct Router {
-  local_rules: Vec<Arc<dyn Rule>>,
-  remote_rules_map: Mutex<HashMap<NodeId, Vec<Arc<dyn Rule>>>>,
-  merged_rules_cache: Mutex<Vec<Arc<dyn Rule>>>,
+  local_rules: Vec<Arc<AnyRule>>,
+  remote_rules_map: Mutex<HashMap<NodeId, Vec<Arc<AnyRule>>>>,
+  merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
 }
 
 impl Router {
-  pub fn new(rules: Vec<Arc<dyn Rule>>) -> Self {
+  pub fn new(rules: Vec<Arc<AnyRule>>) -> Self {
     Self {
       local_rules: rules.clone(),
       remote_rules_map: HashMap::new().mutex(),
@@ -43,7 +43,7 @@ impl Router {
       .collect_vec()
   }
 
-  pub fn register_rules(&self, node_id: NodeId, rules: Vec<Arc<dyn Rule>>) {
+  pub fn register_rules(&self, node_id: NodeId, rules: Vec<Arc<AnyRule>>) {
     self
       .remote_rules_map
       .lock()
