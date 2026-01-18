@@ -1,11 +1,12 @@
 use std::{
   fs, io,
   net::IpAddr,
-  path::PathBuf,
+  path::{Path, PathBuf},
   sync::{Arc, Mutex},
   time::{Duration, Instant, SystemTime},
 };
 
+use lits::duration;
 use lowkit::{SelfWrapExt, tokio_join_set};
 use maxminddb::geoip2::Country;
 use tokio::task::JoinSet;
@@ -20,7 +21,9 @@ pub struct GeoLite2 {
 type GeoLite2Reader = maxminddb::Reader<Vec<u8>>;
 
 impl GeoLite2 {
-  pub fn new(cache_path: &PathBuf, url: String, update_interval: Duration) -> Self {
+  pub fn new(cache_path: impl AsRef<Path>, url: String, update_interval: Duration) -> Self {
+    let cache_path = cache_path.as_ref();
+
     let modified_time = fs::metadata(cache_path).map_or_else(
       |error| {
         if error.kind() == io::ErrorKind::NotFound {
@@ -52,7 +55,7 @@ impl GeoLite2 {
       reader: reader.clone(),
       _join_set: tokio_join_set!(Self::schedule_reader_update(
         reader,
-        cache_path.clone(),
+        cache_path.to_path_buf(),
         url,
         update_interval,
         next_update_time,
@@ -128,5 +131,15 @@ impl GeoLite2 {
       })
       .await;
     }
+  }
+}
+
+impl Default for GeoLite2 {
+  fn default() -> Self {
+    Self::new(
+      "geolite2.mmdb",
+      "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb".to_owned(),
+      duration!("24 hours"),
+    )
   }
 }

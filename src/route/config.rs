@@ -5,7 +5,8 @@ use lowkit::SerdeRegex;
 use serde::Deserialize;
 
 use crate::{
-  out::{OutExit, OutExitConfig},
+  out::OutExitConfig,
+  primitives::OutExit,
   route::{
     AnyRule,
     rule::{AddressRule, DomainPatternRule, DomainRule, FallbackRule, GeoIpRule},

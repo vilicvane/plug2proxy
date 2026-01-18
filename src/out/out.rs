@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
   r#in::out_dispatcher::OutDispatcher,
   node::{Node, NodeId},
-  out::{OutExitTag, OutLike},
+  primitives::OutExitTag,
 };
 
 pub struct Out {
@@ -33,8 +33,6 @@ impl Node for Out {
     todo!()
   }
 }
-
-impl OutLike for Out {}
 
 #[derive(Serialize, Deserialize)]
 pub struct DirectOut {

@@ -1,7 +1,7 @@
 use lowkit::SelfWrapExt;
 use serde::{Deserialize, Deserializer};
 
-use crate::out::{OutExit, OutExitTag};
+use crate::primitives::{OutExit, OutExitTag};
 
 #[derive(Clone, Debug)]
 pub struct OutExitConfig(pub OutExit);

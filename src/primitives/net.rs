@@ -12,12 +12,6 @@ pub struct SocketDestination {
   pub port: u16,
 }
 
-#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
-pub enum SocketDestinationHost {
-  DomainName(String),
-  IpAddress(IpAddr),
-}
-
 impl SocketDestination {
   pub async fn resolve(&self) -> Result<Vec<SocketAddr>, std::io::Error> {
     match &self.host {
@@ -39,5 +33,20 @@ impl SocketDestination {
     }
 
     Ok(None)
+  }
+}
+
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
+pub enum SocketDestinationHost {
+  DomainName(String),
+  IpAddress(IpAddr),
+}
+
+impl SocketDestinationHost {
+  pub fn as_domain_name(&self) -> Option<String> {
+    match self {
+      SocketDestinationHost::DomainName(domain) => domain.clone().some(),
+      SocketDestinationHost::IpAddress(_) => None,
+    }
   }
 }

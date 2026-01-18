@@ -11,6 +11,7 @@
     "itertools",
     "lowkit",
     "maxminddb",
+    "mmdb",
     "moka",
     "mpmc",
     "mtcp",

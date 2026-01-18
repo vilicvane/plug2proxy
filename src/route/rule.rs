@@ -4,7 +4,7 @@ use enum_dispatch::enum_dispatch;
 use lowkit::SerdeRegex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{out::OutExit, utils::serde::SerdeIpNet};
+use crate::{primitives::OutExit, utils::serde::SerdeIpNet};
 
 #[enum_dispatch(AnyRule)]
 pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
@@ -14,7 +14,7 @@ pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
 
   fn test(
     &self,
-    address: SocketAddr,
+    address: &Option<SocketAddr>,
     domain: &Option<String>,
     region_codes: &Option<Vec<String>>,
   ) -> bool;
@@ -49,7 +49,7 @@ impl Rule for GeoIpRule {
 
   fn test(
     &self,
-    _address: SocketAddr,
+    _address: &Option<SocketAddr>,
     _domain: &Option<String>,
     region_codes: &Option<Vec<String>>,
   ) -> bool {
@@ -88,10 +88,14 @@ impl Rule for AddressRule {
 
   fn test(
     &self,
-    address: SocketAddr,
+    address: &Option<SocketAddr>,
     _domain: &Option<String>,
     _region_codes: &Option<Vec<String>>,
   ) -> bool {
+    let Some(address) = address else {
+      return false;
+    };
+
     if self.match_ips.is_none() && self.match_ports.is_none() {
       return false;
     }
@@ -137,7 +141,7 @@ impl Rule for DomainRule {
 
   fn test(
     &self,
-    _address: SocketAddr,
+    _address: &Option<SocketAddr>,
     domain: &Option<String>,
     _region_codes: &Option<Vec<String>>,
   ) -> bool {
@@ -178,7 +182,7 @@ impl Rule for DomainPatternRule {
 
   fn test(
     &self,
-    _address: SocketAddr,
+    _address: &Option<SocketAddr>,
     domain: &Option<String>,
     _region_codes: &Option<Vec<String>>,
   ) -> bool {
@@ -212,7 +216,7 @@ impl Rule for FallbackRule {
 
   fn test(
     &self,
-    _address: SocketAddr,
+    _address: &Option<SocketAddr>,
     _domain: &Option<String>,
     _region_codes: &Option<Vec<String>>,
   ) -> bool {

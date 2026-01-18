@@ -1,10 +1,6 @@
 use async_trait::async_trait;
-use tokio::{
-  io::{AsyncRead, AsyncWrite},
-  net::TcpStream,
-};
 
-use crate::{out::OutExit, primitives::SocketDestination};
+use crate::primitives::{BidiStream, OutExit, SocketDestination};
 
 #[async_trait]
 pub trait OutDispatcher: Send + Sync {
@@ -14,12 +10,8 @@ pub trait OutDispatcher: Send + Sync {
     &self,
     exit: OutExit,
     destination: SocketDestination,
-  ) -> Result<Box<dyn OutTcpStream>, Error>;
+  ) -> Result<Box<dyn BidiStream>, Error>;
 }
-
-pub trait OutTcpStream: AsyncRead + AsyncWrite + Send + Unpin {}
-
-impl<T> OutTcpStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

@@ -1,23 +1,19 @@
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
-use async_trait::async_trait;
 use futures::StreamExt;
-use itertools::Itertools;
 use lowkit::SelfWrapExt;
 use tokio::{net::TcpListener, task::JoinSet};
 
 use crate::{
   cert::NODE_PEM_FILE_NAME,
   r#in::{
-    direct_out_dispatcher::DirectOutDispatcher,
-    in_like::{self, InLike},
-    out_dispatcher::OutDispatcher,
+    direct_out_dispatcher::DirectOutDispatcher, in_like::InLike, out_dispatcher::OutDispatcher,
   },
   mt_connections::MtConnectionsListener,
   node::{Node, NodeHello, NodeId, NodeInMessage},
-  out::{OutExit, OutExitTag, OutLike},
-  primitives::SocketDestination,
+  primitives::OutExitTag,
   quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
+  route::{GeoLite2, Router},
   tunnel::TunnelId,
   utils::postcard::read_postcard_from_stream,
 };
@@ -27,6 +23,7 @@ pub struct Hub {
   direct_out_dispatcher: Arc<dyn OutDispatcher>,
   connected_out_dispatcher_map: HashMap<TunnelId, Arc<dyn OutDispatcher>>,
   mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
+  router: Router,
 }
 
 pub struct HubOptions {
@@ -41,6 +38,7 @@ impl Hub {
       connected_out_dispatcher_map: HashMap::new(),
       mt_connections_listener: MtConnectionsListener::new(TcpListener::bind("127.0.0.1:0").await?)
         .tokio_mutex(),
+      router: Router::new(GeoLite2::default()),
     }
     .wrap_ok()
   }
@@ -106,8 +104,6 @@ impl Hub {
         .ok();
       });
     }
-
-    Ok(())
   }
 
   async fn handle_in_connection(
@@ -132,7 +128,7 @@ impl Hub {
               match message {
                 NodeInMessage::Connect((exit, destination)) => {
                   hub
-                    .out_tcp_connect(exit, destination, stream.wrap_box())
+                    .tcp_connect(vec![exit], destination, stream.wrap_box())
                     .await?;
                 }
                 NodeInMessage::Associate(_) => todo!(),
@@ -171,12 +167,8 @@ impl Node for Hub {
   }
 }
 
-#[async_trait]
 impl InLike for Hub {
-  async fn route(&self, destination: &SocketDestination) -> Result<Vec<OutExit>, in_like::Error> {
-    todo!()
+  fn router(&self) -> &Router {
+    &self.router
   }
 }
-
-#[async_trait]
-impl OutLike for Hub {}

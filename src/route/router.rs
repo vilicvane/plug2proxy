@@ -1,42 +1,54 @@
 use std::{
   collections::HashMap,
-  net::SocketAddr,
   sync::{Arc, Mutex},
 };
 
 use itertools::Itertools as _;
 use lowkit::SelfWrapExt;
 
-use crate::{node::NodeId, out::OutExit};
+use crate::{
+  node::NodeId,
+  primitives::{OutExit, SocketDestination},
+  route::GeoLite2,
+};
 
 use super::{rule::AnyRule, rule::Rule};
 
 pub struct Router {
-  local_rules: Vec<Arc<AnyRule>>,
+  geolite2: GeoLite2,
   remote_rules_map: Mutex<HashMap<NodeId, Vec<Arc<AnyRule>>>>,
   merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
 }
 
 impl Router {
-  pub fn new(rules: Vec<Arc<AnyRule>>) -> Self {
+  pub fn new(geolite2: GeoLite2) -> Self {
     Self {
-      local_rules: rules.clone(),
+      geolite2,
       remote_rules_map: HashMap::new().mutex(),
-      merged_rules_cache: rules.mutex(),
+      merged_rules_cache: Vec::new().mutex(),
     }
   }
 
-  pub fn match_exits(
-    &self,
-    address: SocketAddr,
-    domain: &Option<String>,
-    region_codes: &Option<Vec<String>>,
-  ) -> Vec<OutExit> {
+  pub async fn match_exits(&self, socket_destination: &SocketDestination) -> Vec<OutExit> {
+    let address = socket_destination
+      .resolve()
+      .await
+      .ok()
+      .map(|addresses| addresses[0]);
+
+    let domain = socket_destination.host.as_domain_name();
+
     let rules = self.merged_rules_cache.lock().unwrap();
+
+    let region_codes = if let Some(address) = address {
+      self.geolite2.lookup(address.ip())
+    } else {
+      None
+    };
 
     rules
       .iter()
-      .filter(|rule| rule.test(address, domain, region_codes))
+      .filter(|rule| rule.test(&address, &domain, &region_codes))
       .flat_map(|rule| rule.exits())
       .unique()
       .cloned()
@@ -62,9 +74,11 @@ impl Router {
 
   fn update_rules_cache(&self) {
     let mut rules = self
-      .local_rules
-      .iter()
-      .chain(self.remote_rules_map.lock().unwrap().values().flatten())
+      .remote_rules_map
+      .lock()
+      .unwrap()
+      .values()
+      .flatten()
       .cloned()
       .collect_vec();
 
