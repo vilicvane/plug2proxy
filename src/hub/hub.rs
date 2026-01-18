@@ -2,19 +2,16 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use lowkit::SelfWrapExt;
-use tokio::io::DuplexStream;
-use uuid::Uuid;
 
 use crate::{
   r#in::{
-    self,
     direct_out_dispatcher::DirectOutDispatcher,
     in_like::{self, InLike},
     out_dispatcher::OutDispatcher,
   },
   node::{Node, NodeId},
-  out::{OutExitTag, OutLike, run_out},
-  primitives::{Route, SocketDestination},
+  out::{OutExit, OutExitTag, OutLike},
+  primitives::SocketDestination,
   tunnel::TunnelId,
 };
 
@@ -44,6 +41,21 @@ impl Hub {
   pub fn out_enabled(&self) -> bool {
     false
   }
+
+  pub async fn run(&self) {
+    tokio::join!(
+      async {
+        if self.in_enabled() {
+          self.run_in().await;
+        }
+      },
+      async {
+        if self.out_enabled() {
+          self.run_out().await;
+        }
+      }
+    );
+  }
 }
 
 impl Node for Hub {
@@ -54,7 +66,7 @@ impl Node for Hub {
 
 #[async_trait]
 impl InLike for Hub {
-  async fn route(&self, destination: &SocketDestination) -> Result<Vec<Route>, in_like::Error> {
+  async fn route(&self, destination: &SocketDestination) -> Result<Vec<OutExit>, in_like::Error> {
     todo!()
   }
 
@@ -67,19 +79,5 @@ impl InLike for Hub {
   }
 }
 
+#[async_trait]
 impl OutLike for Hub {}
-
-async fn run_hub(node: &Hub) {
-  tokio::join!(
-    async {
-      // if node.in_enabled() {
-      //   run_in(node).await;
-      // }
-    },
-    async {
-      if node.out_enabled() {
-        run_out(node).await;
-      }
-    }
-  );
-}

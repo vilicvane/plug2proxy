@@ -4,15 +4,15 @@ use tokio::{
   net::TcpStream,
 };
 
-use crate::primitives::{Route, SocketDestination};
+use crate::{out::OutExit, primitives::SocketDestination};
 
 #[async_trait]
 pub trait OutDispatcher: Send + Sync {
-  fn match_out(&self, route: &Route) -> bool;
+  fn match_out(&self, route: &OutExit) -> bool;
 
   async fn connect(
     &self,
-    route: &Route,
+    route: &OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn OutTcpStream>, Error>;
 }

@@ -6,8 +6,11 @@
     "datagram",
     "datagrams",
     "gcongestion",
+    "geoip",
+    "geolite",
     "itertools",
     "lowkit",
+    "maxminddb",
     "moka",
     "mpmc",
     "mtcp",
@@ -17,6 +20,7 @@
     "qomt",
     "quic",
     "rcgen",
+    "reqwest",
     "thiserror"
   ]
 }

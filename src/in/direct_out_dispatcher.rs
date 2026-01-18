@@ -3,8 +3,8 @@ use lowkit::SelfWrapExt;
 
 use crate::{
   r#in::out_dispatcher::{self, OutDispatcher, OutTcpStream},
-  out::OutExitTag,
-  primitives::{Route, SocketDestination},
+  out::{OutExit, OutExitTag},
+  primitives::SocketDestination,
 };
 
 pub struct DirectOutDispatcher {
@@ -23,12 +23,12 @@ impl DirectOutDispatcher {
 
 #[async_trait]
 impl OutDispatcher for DirectOutDispatcher {
-  fn match_out(&self, route: &Route) -> bool {
+  fn match_out(&self, route: &OutExit) -> bool {
     match route {
-      Route::Direct => true,
-      Route::Proxy => self.is_proxy(),
-      Route::Any => true,
-      Route::Tag(route_tag) => self
+      OutExit::Direct => true,
+      OutExit::Proxy => self.is_proxy(),
+      OutExit::Any => true,
+      OutExit::Tag(route_tag) => self
         .tags
         .as_ref()
         .is_some_and(|tags| tags.iter().any(|tag| tag == route_tag)),
@@ -37,7 +37,7 @@ impl OutDispatcher for DirectOutDispatcher {
 
   async fn connect(
     &self,
-    _: &Route,
+    _: &OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn OutTcpStream>, out_dispatcher::Error> {
     let tcp_stream = match destination.host {

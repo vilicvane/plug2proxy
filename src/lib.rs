@@ -9,11 +9,10 @@ pub mod out;
 pub mod outbound;
 pub mod primitives;
 pub mod quic_connection;
+pub mod route;
 pub mod tunnel;
 pub mod udp_forwarder;
 pub mod utils;
-
-pub use udp_forwarder::UdpForwarder;
 
 #[cfg(test)]
 pub mod test;

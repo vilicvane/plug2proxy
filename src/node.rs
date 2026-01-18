@@ -14,3 +14,15 @@ impl NodeId {
     Self(Uuid::new_v4())
   }
 }
+
+impl Default for NodeId {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+pub enum NodeMessage {
+  InHello,
+  OutHello,
+  RouteRules {},
+}

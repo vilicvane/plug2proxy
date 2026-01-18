@@ -6,12 +6,13 @@ use itertools::Itertools;
 use crate::{
   r#in::out_dispatcher::{self, OutDispatcher, OutTcpStream},
   node::Node,
-  primitives::{Route, SocketDestination},
+  out::OutExit,
+  primitives::SocketDestination,
 };
 
 #[async_trait]
 pub trait InLike: Node {
-  async fn route(&self, destination: &SocketDestination) -> Result<Vec<Route>, Error>;
+  async fn route(&self, destination: &SocketDestination) -> Result<Vec<OutExit>, Error>;
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>>;
 
@@ -19,32 +20,31 @@ pub trait InLike: Node {
     &self,
     destination: SocketDestination,
   ) -> Result<Box<dyn OutTcpStream>, Error> {
-    let routes = self.route(&destination).await?;
+    let exits = self.route(&destination).await?;
 
-    if routes.is_empty() {
+    if exits.is_empty() {
       return Err(Error::RouteNotFound);
     }
 
-    let (route, out_dispatcher) = self
-      .get_out_dispatchers()
-      .into_iter()
-      .filter_map(|dispatcher| {
-        routes
+    let out_dispatchers = self.get_out_dispatchers();
+
+    let (exit, out_dispatcher) = exits
+      .iter()
+      .find_map(|route| {
+        out_dispatchers
           .iter()
-          .find(|route| dispatcher.match_out(route))
-          .map(|route| (route, dispatcher))
+          .find(|dispatcher| dispatcher.match_out(route))
+          .map(|dispatcher| (route, dispatcher))
       })
-      .sorted_by(|(a, _), (b, _)| a.priority().cmp(&b.priority()))
-      .next()
       .ok_or(Error::RouteNotFound)?;
 
-    let tcp_stream = out_dispatcher.connect(route, destination).await?;
+    let tcp_stream = out_dispatcher.connect(exit, destination).await?;
 
     Ok(tcp_stream)
   }
-}
 
-pub async fn run_in(node: &impl InLike) {}
+  async fn run_in(&self) {}
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
