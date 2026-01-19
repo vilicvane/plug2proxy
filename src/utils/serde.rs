@@ -1,13 +1,10 @@
-use std::{net::IpAddr, ops::Deref, str::FromStr};
+use std::{net::IpAddr, ops::Deref};
 
 use ipnet::IpNet;
 use lowkit::SelfWrapExt;
-use serde::{
-  Deserialize, Deserializer, Serialize,
-  de::{self, DeserializeOwned},
-};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SerdeOneOrMany<T> {
   One(T),

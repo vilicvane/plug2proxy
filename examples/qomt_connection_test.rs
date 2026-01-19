@@ -101,8 +101,7 @@ async fn handle_server_connection(
   let connection_id = quiche::ConnectionId::from_vec(first_packet.to_vec());
 
   let mut quiche_config = create_test_quiche_config("qomt-server").await?;
-  let mut quic_connection =
-    QuicConnection::accept(&connection_id, &mut quiche_config, mt_connections);
+  let quic_connection = QuicConnection::accept(&connection_id, &mut quiche_config, mt_connections);
 
   quic_connection
     .established()
@@ -329,7 +328,7 @@ async fn create_test_quiche_config(common_name: &str) -> anyhow::Result<quiche::
     .await
     .with_context(|| format!("generate CA pem in {}", dir.display()))?;
 
-  let node_pem_file_path = generate_node_pem_file(&dir, common_name)
+  let node_pem_file_path = generate_node_pem_file(&dir, common_name, true)
     .await
     .with_context(|| format!("generate node pem in {}", dir.display()))?;
 

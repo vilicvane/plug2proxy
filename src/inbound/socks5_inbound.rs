@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use colored::Colorize;
 use futures::{Sink, Stream};
 use lowkit::{SelfWrapExt, tokio_join_set};
 use socks5_server::{
@@ -43,6 +44,12 @@ impl Socks5Inbound {
     let tcp_listener = TcpListener::bind(options.listen).await?;
 
     let listen_address = tcp_listener.local_addr()?;
+
+    log::info!(
+      "{} is listening on {}...",
+      "SOCKS5".red(),
+      listen_address.to_string().yellow()
+    );
 
     let server = Server::new(tcp_listener, NoAuth.arc());
 

@@ -10,7 +10,7 @@ use crate::{
   utils::serde::{SerdeIpNet, SerdeOneOrMany},
 };
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct RouteConfig {
   pub rules: Vec<RouteRuleConfig>,
   pub priority: Option<i64>,
@@ -27,7 +27,7 @@ impl From<RouteConfig> for Vec<AnyRule> {
   }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum RouteRuleConfig {
   #[serde(rename = "geoip")]
@@ -82,7 +82,7 @@ impl RouteRuleConfig {
   }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct GeoIpRuleConfig {
   pub r#match: SerdeOneOrMany<String>,
   #[serde(default)]
@@ -91,7 +91,7 @@ pub struct GeoIpRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct AddressRuleConfig {
   pub match_ip: Option<SerdeOneOrMany<SerdeIpNet>>,
   pub match_port: Option<SerdeOneOrMany<u16>>,
@@ -101,7 +101,7 @@ pub struct AddressRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DomainRuleConfig {
   pub r#match: SerdeOneOrMany<String>,
   #[serde(default)]
@@ -110,7 +110,7 @@ pub struct DomainRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DomainPatternRuleConfig {
   pub r#match: SerdeOneOrMany<SerdeRegex>,
   #[serde(default)]
@@ -119,7 +119,7 @@ pub struct DomainPatternRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct FallbackRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
 }

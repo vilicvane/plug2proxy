@@ -1,17 +1,19 @@
 use std::{
   collections::HashMap,
-  path::PathBuf,
+  path::{Path, PathBuf},
   sync::{Arc, Mutex},
 };
 
+use colored::Colorize;
 use futures::StreamExt;
 use lowkit::SelfWrapExt;
 use tokio::{net::TcpListener, task::JoinSet};
 
 use crate::{
-  cert::NODE_PEM_FILE_NAME,
+  cert::{CA_PEM_FILE_NAME, NODE_PEM_FILE_NAME, generate_ca_pem_file, generate_node_pem_file},
+  hub::HubConfig,
   r#in::InLike,
-  inbound::{AnyInbound, Inbound},
+  inbound::{AnyInbound, Inbound, Socks5Inbound},
   mt_connections::MtConnectionsListener,
   node::{
     DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut,
@@ -19,7 +21,7 @@ use crate::{
   },
   primitives::OutExitTag,
   quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
-  route::Router,
+  route::{GeoLite2, Router},
   utils::postcard::{postcard_read_stream, postcard_read_stream_to_end},
 };
 
@@ -256,4 +258,61 @@ impl InLike for Hub {
   fn router(&self) -> &Router {
     &self.router
   }
+}
+
+pub async fn run_hub(
+  context_dir: impl AsRef<Path>,
+  HubConfig {
+    listen,
+    tags,
+    route: route_config,
+    inbounds: inbounds_config,
+  }: HubConfig,
+) -> anyhow::Result<()> {
+  let context_dir = context_dir.as_ref();
+
+  let ca_pem_file_path = context_dir.join(CA_PEM_FILE_NAME);
+  let node_pem_file_path = context_dir.join(NODE_PEM_FILE_NAME);
+
+  if !node_pem_file_path.exists() {
+    if !ca_pem_file_path.exists() {
+      generate_ca_pem_file(context_dir).await?;
+    }
+
+    generate_node_pem_file(context_dir, "hub", false).await?;
+  }
+
+  let tcp_listener = TcpListener::bind(*listen).await?;
+
+  log::info!(
+    "{} is listening on {}...",
+    "HUB".cyan(),
+    tcp_listener.local_addr()?.to_string().yellow()
+  );
+
+  let mut inbounds = vec![];
+
+  if let Some(inbounds_config) = inbounds_config {
+    if let Some(socks5_config) = inbounds_config.socks5 {
+      inbounds.push(Socks5Inbound::new(socks5_config.into()).await?.into());
+    }
+  }
+
+  let router = Router::new(GeoLite2::new(context_dir));
+
+  if let Some(route_config) = route_config {
+    router.register_local_rules(route_config.into());
+  }
+
+  let hub = Hub::new(
+    tcp_listener,
+    inbounds,
+    router,
+    HubOptions {
+      tags,
+      context_dir: context_dir.to_path_buf(),
+    },
+  );
+
+  hub.run().await
 }

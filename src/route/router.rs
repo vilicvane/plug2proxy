@@ -9,7 +9,7 @@ use lowkit::SelfWrapExt;
 use crate::{
   node::NodeId,
   primitives::{OutExit, SocketDestination},
-  route::GeoLite2,
+  route::{FallbackRule, GeoLite2},
 };
 
 use super::{rule::AnyRule, rule::Rule};
@@ -97,6 +97,18 @@ impl Router {
       .collect_vec();
 
     rules.sort_by_key(|rule| rule.priority());
+
+    if !rules
+      .iter()
+      .any(|rule| matches!(**rule, AnyRule::Fallback(_)))
+    {
+      rules.push(Arc::new(
+        FallbackRule {
+          exits: vec![OutExit::Direct],
+        }
+        .into(),
+      ));
+    }
 
     *self.merged_rules_cache.lock().unwrap() = rules;
   }

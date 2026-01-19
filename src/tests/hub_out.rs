@@ -21,8 +21,8 @@ async fn test_hub_out() -> anyhow::Result<()> {
 
   generate_ca_pem_file(&test_dir).await?;
 
-  generate_node_pem_file(&test_dir, "hub").await?;
-  generate_node_pem_file(&test_dir, "out").await?;
+  generate_node_pem_file(&test_dir, "hub", true).await?;
+  generate_node_pem_file(&test_dir, "out", true).await?;
 
   let hub_tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
 
@@ -39,7 +39,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
     async {
       let inbounds = vec![socks5_inbound.into()];
 
-      let router = Router::new(GeoLite2::new(hub_dir.join("geolite2.mmdb")));
+      let router = Router::new(GeoLite2::new(&hub_dir));
 
       router.register_local_rules(vec![
         FallbackRule {

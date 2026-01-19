@@ -25,10 +25,10 @@ pub struct GeoLite2 {
 type GeoLite2Reader = maxminddb::Reader<Vec<u8>>;
 
 impl GeoLite2 {
-  pub fn new(path: impl AsRef<Path>) -> Self {
-    let path = path.as_ref();
+  pub fn new(dir: impl AsRef<Path>) -> Self {
+    let path = dir.as_ref().join("geolite2.mmdb");
 
-    let modified_time = fs::metadata(path).map_or_else(
+    let modified_time = fs::metadata(&path).map_or_else(
       |error| {
         if error.kind() == io::ErrorKind::NotFound {
           None
@@ -49,17 +49,13 @@ impl GeoLite2 {
     });
 
     let reader = modified_time
-      .map(|_| maxminddb::Reader::open_readfile(path).expect("failed to open GeoLite2 database."))
+      .map(|_| maxminddb::Reader::open_readfile(&path).expect("failed to open GeoLite2 database."))
       .mutex()
       .arc();
 
     Self {
       reader: reader.clone(),
-      _join_set: tokio_join_set!(Self::schedule_reader_update(
-        reader,
-        path.to_path_buf(),
-        next_update_time,
-      )),
+      _join_set: tokio_join_set!(Self::schedule_reader_update(reader, path, next_update_time)),
     }
   }
 

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use lits::duration;
+use pem::PemError;
 use rcgen::{
   BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
   KeyUsagePurpose,
@@ -13,7 +14,7 @@ pub const CA_COMMON_NAME: &str = "Plug2Proxy CA";
 pub const CA_PEM_FILE_NAME: &str = "ca.pem";
 pub const NODE_PEM_FILE_NAME: &str = "node.pem";
 
-pub async fn generate_ca_pem_file(dir: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+pub async fn generate_ca_pem_file(dir: impl AsRef<Path>) -> Result<PathBuf, Error> {
   let dir = dir.as_ref();
 
   tokio::fs::create_dir_all(dir).await?;
@@ -54,24 +55,40 @@ pub async fn generate_ca_pem_file(dir: impl AsRef<Path>) -> anyhow::Result<PathB
 pub async fn generate_node_pem_file(
   dir: impl AsRef<Path>,
   common_name: &str,
-) -> anyhow::Result<PathBuf> {
+  in_subdir: bool,
+) -> Result<PathBuf, Error> {
   let dir = dir.as_ref();
-  let node_dir = dir.join(common_name);
 
-  tokio::fs::create_dir_all(&node_dir).await?;
+  let node_dir = if in_subdir {
+    let subdir = dir.join(common_name);
+    tokio::fs::create_dir_all(&subdir).await?;
+    subdir
+  } else {
+    dir.to_owned()
+  };
 
-  let ca_pems = pem::parse_many(tokio::fs::read_to_string(dir.join(CA_PEM_FILE_NAME)).await?)?;
+  let ca_pem = tokio::fs::read_to_string(dir.join(CA_PEM_FILE_NAME))
+    .await
+    .map_err(|error| {
+      if error.kind() == std::io::ErrorKind::NotFound {
+        Error::CaNotFound
+      } else {
+        error.into()
+      }
+    })?;
+
+  let ca_pems = pem::parse_many(ca_pem)?;
 
   let ca_cert_pem = ca_pems
     .iter()
     .find(|p| p.tag() == "CERTIFICATE")
-    .ok_or(anyhow::anyhow!("CERTIFICATE not found"))?
+    .ok_or(Error::CaCertificateNotFound)?
     .to_string();
 
   let ca_key_pem = ca_pems
     .iter()
     .find(|p| p.tag() == "PRIVATE KEY")
-    .ok_or(anyhow::anyhow!("PRIVATE KEY not found"))?
+    .ok_or(Error::CaPrivateKeyNotFound)?
     .to_string();
 
   let ca_key_pair = KeyPair::from_pem(&ca_key_pem)?;
@@ -118,4 +135,20 @@ pub async fn generate_node_pem_file(
   .await?;
 
   Ok(node_pem_file_path)
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+  #[error("I/O error: {0}")]
+  Io(#[from] std::io::Error),
+  #[error("PEM error: {0}")]
+  Pem(#[from] PemError),
+  #[error("RcGen error: {0}")]
+  RcGen(#[from] rcgen::Error),
+  #[error("CA PEM file not found")]
+  CaNotFound,
+  #[error("CERTIFICATE not found in CA PEM file")]
+  CaCertificateNotFound,
+  #[error("PRIVATE KEY not found in CA PEM file")]
+  CaPrivateKeyNotFound,
 }

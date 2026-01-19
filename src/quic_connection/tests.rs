@@ -26,8 +26,8 @@ async fn get_quiche_configs() -> anyhow::Result<[quiche::Config; 2]> {
 
       generate_ca_pem_file(&test_dir).await?;
 
-      let hub_pem_file_path = generate_node_pem_file(&test_dir, "hub").await?;
-      let out_pem_file_path = generate_node_pem_file(&test_dir, "out").await?;
+      let hub_pem_file_path = generate_node_pem_file(&test_dir, "hub", true).await?;
+      let out_pem_file_path = generate_node_pem_file(&test_dir, "out", true).await?;
 
       anyhow::Ok([hub_pem_file_path, out_pem_file_path])
     })
@@ -49,7 +49,7 @@ async fn get_wrong_cert_path() -> anyhow::Result<PathBuf> {
 
       generate_ca_pem_file(&test_dir).await?;
 
-      generate_node_pem_file(&test_dir, "node").await
+      generate_node_pem_file(&test_dir, "node", true).await
     })
     .await?
     .clone()
@@ -91,14 +91,14 @@ async fn test_quic_connection() -> anyhow::Result<()> {
 
   let connection_id = QuicConnection::generate_connection_id();
 
-  let mut out_quic_connection = QuicConnection::connect_with_sink_and_stream(
+  let out_quic_connection = QuicConnection::connect_with_sink_and_stream(
     &connection_id,
     &mut out_quiche_config,
     out_to_hub_packet_sender.into_sink(),
     hub_to_out_packet_receiver.into_stream(),
   );
 
-  let mut hub_quic_connection = QuicConnection::accept_with_sink_and_stream(
+  let hub_quic_connection = QuicConnection::accept_with_sink_and_stream(
     out_quic_connection.id(),
     &mut hub_quiche_config,
     hub_to_out_packet_sender.into_sink(),
@@ -198,7 +198,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
 
         let connection_id = quiche::ConnectionId::from_vec(first_packet.to_vec());
 
-        let mut hub_qomt_connection =
+        let hub_qomt_connection =
           QuicConnection::accept(&connection_id, &mut hub_quiche_config, hub_mt_connections);
 
         hub_qomt_connection.established().await?;
@@ -265,7 +265,7 @@ async fn test_qomt_connection() -> anyhow::Result<()> {
         .send(connection_id.to_vec().into())
         .await?;
 
-      let mut out_qomt_connection =
+      let out_qomt_connection =
         QuicConnection::connect(&connection_id, &mut out_quiche_config, out_mt_connections);
 
       out_qomt_connection.established().await?;
