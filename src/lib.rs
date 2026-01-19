@@ -11,9 +11,11 @@ pub mod primitives;
 pub mod qomt;
 pub mod quic_connection;
 pub mod route;
-pub mod tunnel;
 pub mod udp_forwarder;
 pub mod utils;
 
 #[cfg(test)]
 pub mod test;
+
+#[cfg(test)]
+pub mod tests;

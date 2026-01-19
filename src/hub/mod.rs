@@ -1,3 +1,3 @@
-pub mod hub;
+mod hub;
 
-pub use hub::Hub;
+pub use hub::*;

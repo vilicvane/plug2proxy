@@ -55,13 +55,13 @@ impl Router {
       .collect_vec()
   }
 
-  pub fn register_rules(&self, node_id: NodeId, rules: Vec<Arc<AnyRule>>) {
+  pub fn register_rules(&self, node_id: NodeId, rules: Vec<AnyRule>) {
     self
       .remote_rules_map
       .lock()
       .unwrap()
       .entry(node_id)
-      .insert_entry(rules);
+      .insert_entry(rules.into_iter().map(|rule| rule.arc()).collect());
 
     self.update_rules_cache();
   }

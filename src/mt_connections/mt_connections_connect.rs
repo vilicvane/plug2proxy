@@ -15,7 +15,7 @@ use crate::{
     MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
   primitives::ConnectionSide,
-  utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
+  utils::postcard::{PostcardStreamError, postcard_read_stream},
 };
 
 pub async fn mt_connections_connect<TPacket>(
@@ -32,8 +32,7 @@ where
   send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create).await?;
 
   let id = {
-    let response_head =
-      read_postcard_from_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
+    let response_head = postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
 
     match response_head.data {
       MtConnectionsResponseHeadData::Created(id) => id,
@@ -55,7 +54,7 @@ where
           send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Extend(id)).await?;
 
           let response_head =
-            read_postcard_from_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
+            postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
 
           match response_head.data {
             MtConnectionsResponseHeadData::Extended => Ok(tcp_stream),
@@ -155,11 +154,11 @@ pub enum MtConnectionsConnectError {
   InvalidResponseHead,
 }
 
-impl From<ReadPostcardFromStreamError> for MtConnectionsConnectError {
-  fn from(error: ReadPostcardFromStreamError) -> Self {
+impl From<PostcardStreamError> for MtConnectionsConnectError {
+  fn from(error: PostcardStreamError) -> Self {
     match error {
-      ReadPostcardFromStreamError::Io(error) => Self::Io(error),
-      ReadPostcardFromStreamError::Deserialization(error) => Self::PostcardDeserialization(error),
+      PostcardStreamError::Io(error) => Self::Io(error),
+      PostcardStreamError::Deserialization(error) => Self::PostcardDeserialization(error),
     }
   }
 }

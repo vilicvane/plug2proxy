@@ -3,8 +3,10 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
+use async_trait::async_trait;
 use tokio::net::UdpSocket;
 
+#[async_trait]
 pub trait SocketAddressExt: Borrow<SocketAddr> {
   fn unspecified(&self) -> SocketAddr {
     match self.borrow() {

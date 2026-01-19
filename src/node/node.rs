@@ -6,9 +6,9 @@ use tokio::io::copy_bidirectional;
 use uuid::Uuid;
 
 use crate::{
-  r#in::out_dispatcher::{self, OutDispatcher},
+  node::OutDispatcher,
   out::DirectOut,
-  primitives::{BidiStream, OutExit, SocketDestination},
+  primitives::{BidiStream, OutExit, OutExitTag, SocketDestination},
   route::AnyRule,
 };
 
@@ -62,18 +62,25 @@ impl Default for NodeId {
 
 #[derive(Serialize, Deserialize)]
 pub enum NodeHello {
-  In,
-  Out(Option<DirectOut>),
+  In(NodeId),
+  Out(NodeHelloOut),
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum NodeInMessage {
-  Connect((OutExit, SocketDestination)),
-  Associate((OutExit, SocketDestination)),
+pub struct NodeHelloOut {
+  pub id: NodeId,
+  pub direct_out: Option<DirectOut>,
+  pub tags: Vec<OutExitTag>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum NodeHubMessage {
+pub enum NodeMessageToOut {
+  Connect(OutExit, SocketDestination),
+  Associate(OutExit, SocketDestination),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum NodeMessageToIn {
   RouteRules(Vec<AnyRule>),
   DirectOuts(Vec<DirectOut>),
 }
@@ -82,8 +89,6 @@ pub enum NodeHubMessage {
 pub enum Error {
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
-  #[error("Out dispatcher error: {0}")]
-  OutDispatcher(#[from] out_dispatcher::Error),
   #[error("Out dispatcher not matched")]
   OutDispatcherNotMatched,
 }

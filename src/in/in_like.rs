@@ -33,8 +33,8 @@ pub trait InLike: Node {
 pub enum Error {
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
-  #[error("Node error: {0}")]
+  #[error("node error: {0}")]
   Node(#[from] node::Error),
-  #[error("Exit not matched")]
+  #[error("exit not matched")]
   ExitNotMatched,
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::r#in::out_dispatcher::OutDispatcher;
 use crate::node::Node;
 use crate::node::NodeId;
+use crate::node::OutDispatcher;
 
 pub struct In {
   id: NodeId,
@@ -29,12 +29,3 @@ impl Node for In {
     todo!()
   }
 }
-
-// #[async_trait]
-// impl InLike for In {
-//   type TcpStream = DuplexStream;
-
-//   async fn tcp_connect(&self, destination: SocketDestination) -> Result<Self::TcpStream, Error> {
-//     todo!()
-//   }
-// }

@@ -1,23 +1,25 @@
 use async_trait::async_trait;
 use futures::{Sink, Stream};
-use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{primitives::SocketDestination, udp_forwarder::OutgoingUdpPacket};
+use crate::{
+  inbound::Error,
+  primitives::{BidiStream, SocketDestination},
+  udp_forwarder::OutgoingUdpPacket,
+};
 
 #[async_trait]
 pub trait Inbound {
-  type TcpStream: AsyncRead + AsyncWrite;
-  type UdpPacketStream: Sink<OutgoingUdpPacket> + Stream<Item = OutgoingUdpPacket>;
+  async fn accept_tcp_connect(&self) -> Result<(SocketDestination, Box<dyn BidiStream>), Error>;
 
-  async fn accept_tcp_connect(&self) -> Result<(SocketDestination, Self::TcpStream), InboundError>;
-
-  async fn get_udp_packet_stream(&self) -> Result<Self::UdpPacketStream, InboundError>;
+  async fn get_udp_packet_stream(&self) -> Result<Box<dyn InboundUdpPacketStream>, Error>;
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum InboundError {
-  #[error("I/O error: {0}")]
-  Io(#[from] std::io::Error),
-  #[error("Inbound closed")]
-  Closed,
+pub trait InboundUdpPacketStream:
+  Sink<OutgoingUdpPacket, Error = Error> + Stream<Item = OutgoingUdpPacket>
+{
+}
+
+impl<T> InboundUdpPacketStream for T where
+  T: Sink<OutgoingUdpPacket, Error = Error> + Stream<Item = OutgoingUdpPacket>
+{
 }

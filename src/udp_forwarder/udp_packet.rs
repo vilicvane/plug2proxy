@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{primitives::SocketDestination, tunnel::TunnelId};
+use crate::{node::NodeId, primitives::SocketDestination};
 
 #[derive(Serialize, Deserialize)]
 pub struct OutgoingUdpPacket {
@@ -13,7 +13,7 @@ pub struct OutgoingUdpPacket {
 
 #[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
 pub struct UdpPacketSource {
-  pub via: Vec<TunnelId>,
+  pub via: Vec<NodeId>,
   pub address: SocketAddr,
 }
 

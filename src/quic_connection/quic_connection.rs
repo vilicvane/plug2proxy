@@ -1,6 +1,9 @@
 use std::{
   collections::HashMap,
-  sync::{Arc, Mutex},
+  sync::{
+    Arc, Mutex,
+    atomic::{self, AtomicU64},
+  },
   time::Instant,
 };
 
@@ -28,11 +31,11 @@ const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 pub struct QuicConnection {
   connection: Arc<Mutex<quiche::Connection>>,
   id: quiche::ConnectionId<'static>,
-  next_stream_id_index: u64,
+  next_stream_id_index: AtomicU64,
   side: ConnectionSide,
   state_updater: Arc<StateUpdater>,
   create_stream: Arc<dyn Fn(ConnectionSide, u64) -> QuicStream + Send + Sync>,
-  stream_receiver: mpsc::UnboundedReceiver<QuicStream>,
+  stream_receiver: tokio::sync::Mutex<mpsc::UnboundedReceiver<QuicStream>>,
   _join_set: JoinSet<()>,
 }
 
@@ -360,8 +363,8 @@ impl QuicConnection {
       side,
       state_updater: state_updater.clone(),
       create_stream: create_stream.clone(),
-      next_stream_id_index: 0,
-      stream_receiver,
+      next_stream_id_index: AtomicU64::new(0),
+      stream_receiver: stream_receiver.tokio_mutex(),
       _join_set: {
         let (timeout_sender, mut timeout_receiver) = mpsc::channel::<Instant>(1);
 
@@ -550,17 +553,19 @@ impl QuicConnection {
     &self.id
   }
 
-  pub async fn accept_stream(&mut self) -> Result<Option<QuicStream>, QuicConnectionError> {
-    self.stream_receiver.recv().await.map_or_else(
+  pub async fn accept_stream(&self) -> Result<Option<QuicStream>, QuicConnectionError> {
+    self.stream_receiver.lock().await.recv().await.map_or_else(
       || self.build_connection_result(None),
       |stream| Ok(Some(stream)),
     )
   }
 
-  pub fn open_stream(&mut self) -> QuicStream {
-    let stream_id = self.next_stream_id_index << 2 | self.side.stream_id_bits();
+  pub fn open_stream(&self) -> QuicStream {
+    let stream_id_index = self
+      .next_stream_id_index
+      .fetch_add(1, atomic::Ordering::Relaxed);
 
-    self.next_stream_id_index += 1;
+    let stream_id = stream_id_index << 2 | self.side.stream_id_bits();
 
     (self.create_stream)(ConnectionSide::Client, stream_id)
   }

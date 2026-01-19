@@ -11,7 +11,11 @@ use lowkit::{SelfWrapExt, tokio_join_set};
 use maxminddb::geoip2::Country;
 use tokio::task::JoinSet;
 
-const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const GEOLITE2_URL: &str =
+  "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb";
+
+const UPDATE_INTERVAL: Duration = duration!("24h");
+const RETRY_INTERVAL: Duration = duration!("30s");
 
 pub struct GeoLite2 {
   reader: Arc<Mutex<Option<GeoLite2Reader>>>,
@@ -21,10 +25,10 @@ pub struct GeoLite2 {
 type GeoLite2Reader = maxminddb::Reader<Vec<u8>>;
 
 impl GeoLite2 {
-  pub fn new(cache_path: impl AsRef<Path>, url: String, update_interval: Duration) -> Self {
-    let cache_path = cache_path.as_ref();
+  pub fn new(path: impl AsRef<Path>) -> Self {
+    let path = path.as_ref();
 
-    let modified_time = fs::metadata(cache_path).map_or_else(
+    let modified_time = fs::metadata(path).map_or_else(
       |error| {
         if error.kind() == io::ErrorKind::NotFound {
           None
@@ -37,7 +41,7 @@ impl GeoLite2 {
 
     let next_update_time = modified_time.map_or_else(Instant::now, |modified_time| {
       Instant::now()
-        + (update_interval.saturating_sub(
+        + (UPDATE_INTERVAL.saturating_sub(
           SystemTime::now()
             .duration_since(modified_time)
             .unwrap_or(Duration::from_secs(0)),
@@ -45,9 +49,7 @@ impl GeoLite2 {
     });
 
     let reader = modified_time
-      .map(|_| {
-        maxminddb::Reader::open_readfile(cache_path).expect("failed to open GeoLite2 database.")
-      })
+      .map(|_| maxminddb::Reader::open_readfile(path).expect("failed to open GeoLite2 database."))
       .mutex()
       .arc();
 
@@ -55,9 +57,7 @@ impl GeoLite2 {
       reader: reader.clone(),
       _join_set: tokio_join_set!(Self::schedule_reader_update(
         reader,
-        cache_path.to_path_buf(),
-        url,
-        update_interval,
+        path.to_path_buf(),
         next_update_time,
       )),
     }
@@ -89,9 +89,7 @@ impl GeoLite2 {
 
   async fn schedule_reader_update(
     reader: Arc<Mutex<Option<GeoLite2Reader>>>,
-    cache_path: PathBuf,
-    url: String,
-    update_interval: Duration,
+    path: PathBuf,
     next_update_time: Instant,
   ) {
     tokio::time::sleep_until(next_update_time.into()).await;
@@ -100,11 +98,9 @@ impl GeoLite2 {
       let updated = async {
         log::info!("updating GeoLite2 database...");
 
-        log::debug!("downloading GeoLite2 database from: {}", url);
+        let data = reqwest::get(GEOLITE2_URL).await?.bytes().await?.to_vec();
 
-        let data = reqwest::get(&url).await?.bytes().await?.to_vec();
-
-        tokio::fs::write(&cache_path, &data).await?;
+        tokio::fs::write(&path, &data).await?;
 
         reader
           .lock()
@@ -125,21 +121,11 @@ impl GeoLite2 {
       );
 
       tokio::time::sleep(if updated {
-        update_interval
+        UPDATE_INTERVAL
       } else {
         RETRY_INTERVAL
       })
       .await;
     }
-  }
-}
-
-impl Default for GeoLite2 {
-  fn default() -> Self {
-    Self::new(
-      "geolite2.mmdb",
-      "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb".to_owned(),
-      duration!("24 hours"),
-    )
   }
 }

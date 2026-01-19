@@ -10,7 +10,7 @@ use crate::{
     MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
   primitives::ConnectionSide,
-  utils::postcard::{ReadPostcardFromStreamError, read_postcard_from_stream},
+  utils::postcard::{PostcardStreamError, postcard_read_stream},
 };
 
 pub struct MtConnectionsListener<TPacket>
@@ -38,7 +38,7 @@ where
     loop {
       let (mut stream, _) = self.listener.accept().await?;
 
-      let request_head = read_postcard_from_stream::<MtConnectionsRequestHead>(&mut stream).await?;
+      let request_head = postcard_read_stream::<MtConnectionsRequestHead>(&mut stream).await?;
 
       match request_head.data {
         MtConnectionsRequestHeadData::Create => {
@@ -79,11 +79,11 @@ pub enum MtConnectionsListenerError {
   PostcardDeserialization(postcard::Error),
 }
 
-impl From<ReadPostcardFromStreamError> for MtConnectionsListenerError {
-  fn from(error: ReadPostcardFromStreamError) -> Self {
+impl From<PostcardStreamError> for MtConnectionsListenerError {
+  fn from(error: PostcardStreamError) -> Self {
     match error {
-      ReadPostcardFromStreamError::Io(error) => Self::Io(error),
-      ReadPostcardFromStreamError::Deserialization(error) => Self::PostcardDeserialization(error),
+      PostcardStreamError::Io(error) => Self::Io(error),
+      PostcardStreamError::Deserialization(error) => Self::PostcardDeserialization(error),
     }
   }
 }

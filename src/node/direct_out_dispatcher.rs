@@ -3,7 +3,7 @@ use lowkit::SelfWrapExt;
 use tokio::net::TcpStream;
 
 use crate::{
-  r#in::out_dispatcher::{self, OutDispatcher},
+  node::{Error, OutDispatcher},
   primitives::{BidiStream, OutExit, OutExitTag, SocketDestination, SocketDestinationHost},
 };
 
@@ -39,7 +39,7 @@ impl OutDispatcher for DirectOutDispatcher {
     &self,
     _: OutExit,
     destination: SocketDestination,
-  ) -> Result<Box<dyn BidiStream>, out_dispatcher::Error> {
+  ) -> Result<Box<dyn BidiStream>, Error> {
     let tcp_stream = match destination.host {
       SocketDestinationHost::DomainName(domain) => {
         TcpStream::connect((domain, destination.port)).await?

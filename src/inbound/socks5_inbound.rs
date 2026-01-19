@@ -15,17 +15,18 @@ use socks5_server::{
 };
 use tokio::{
   io::{AsyncRead, AsyncWrite, ReadBuf},
-  net::{TcpListener, ToSocketAddrs},
+  net::TcpListener,
   sync::mpsc,
   task::JoinSet,
 };
 
 use crate::{
-  inbound::{Inbound, InboundError},
-  primitives::{SocketDestination, SocketDestinationHost},
+  inbound::{Error, Inbound, InboundUdpPacketStream},
+  primitives::{BidiStream, SocketDestination, SocketDestinationHost},
   udp_forwarder::OutgoingUdpPacket,
 };
 
+#[derive(Debug)]
 pub struct Socks5Inbound {
   listen_address: SocketAddr,
   tcp_connect_receiver:
@@ -33,9 +34,13 @@ pub struct Socks5Inbound {
   _join_set: JoinSet<()>,
 }
 
+pub struct Socks5InboundOptions {
+  pub listen: SocketAddr,
+}
+
 impl Socks5Inbound {
-  pub async fn new(listen_address: impl ToSocketAddrs) -> Result<Self, InboundError> {
-    let tcp_listener = TcpListener::bind(listen_address).await?;
+  pub async fn new(options: Socks5InboundOptions) -> Result<Self, Error> {
+    let tcp_listener = TcpListener::bind(options.listen).await?;
 
     let listen_address = tcp_listener.local_addr()?;
 
@@ -48,12 +53,12 @@ impl Socks5Inbound {
       tcp_connect_receiver: tokio::sync::Mutex::new(tcp_connect_receiver),
       _join_set: tokio_join_set!(async move {
         loop {
-          let (connection, _) = server.accept().await.unwrap();
+          let (connection, peer_address) = server.accept().await.unwrap();
 
           let tcp_connect_sender = tcp_connect_sender.clone();
 
-          tokio::spawn(async {
-            handle_incoming_connection(connection, tcp_connect_sender)
+          tokio::spawn(async move {
+            handle_incoming_connection(connection, peer_address, tcp_connect_sender)
               .await
               .inspect_err(|error| {
                 log::error!("error handling incoming connection: {}", error);
@@ -73,19 +78,17 @@ impl Socks5Inbound {
 
 #[async_trait]
 impl Inbound for Socks5Inbound {
-  type TcpStream = Socks5TcpStream;
-  type UdpPacketStream = Socks5UdpPacketStream;
-
-  async fn accept_tcp_connect(&self) -> Result<(SocketDestination, Self::TcpStream), InboundError> {
+  async fn accept_tcp_connect(&self) -> Result<(SocketDestination, Box<dyn BidiStream>), Error> {
     let mut tcp_connect_receiver = self.tcp_connect_receiver.lock().await;
 
     tcp_connect_receiver
       .recv()
       .await
-      .ok_or(InboundError::Closed)
+      .map(|(destination, stream)| (destination, Box::new(stream) as Box<dyn BidiStream>))
+      .ok_or(Error::Closed)
   }
 
-  async fn get_udp_packet_stream(&self) -> Result<Self::UdpPacketStream, InboundError> {
+  async fn get_udp_packet_stream(&self) -> Result<Box<dyn InboundUdpPacketStream>, Error> {
     todo!()
   }
 }
@@ -131,7 +134,7 @@ impl AsyncWrite for Socks5TcpStream {
 pub struct Socks5UdpPacketStream {}
 
 impl Sink<OutgoingUdpPacket> for Socks5UdpPacketStream {
-  type Error = InboundError;
+  type Error = Error;
 
   fn poll_ready(self: Pin<&mut Self>, context: &mut Context) -> Poll<Result<(), Self::Error>> {
     todo!()
@@ -160,12 +163,15 @@ impl Stream for Socks5UdpPacketStream {
 
 async fn handle_incoming_connection(
   connection: IncomingConnection<(), NeedAuthenticate>,
+  peer_address: SocketAddr,
   tcp_connect_sender: mpsc::UnboundedSender<(SocketDestination, Socks5TcpStream)>,
-) -> Result<(), InboundError> {
+) -> Result<(), Error> {
   let (connection, _) = connection.authenticate().await?;
 
   match connection.wait().await? {
     Command::Connect(connect_command, address) => {
+      log::debug!("[socks5] CONNECT {peer_address} -> {address}");
+
       let connect = connect_command
         .reply(Reply::Succeeded, Address::unspecified())
         .await?;
@@ -174,13 +180,13 @@ async fn handle_incoming_connection(
         .send((address.into(), Socks5TcpStream { stream: connect }))
         .unwrap()
     }
-    Command::Bind(bind_command, _address) => {
-      bind_command
+    Command::Associate(associate_command, _address) => {
+      associate_command
         .reply(Reply::CommandNotSupported, Address::unspecified())
         .await?;
     }
-    Command::Associate(associate_command, _address) => {
-      associate_command
+    Command::Bind(bind_command, _address) => {
+      bind_command
         .reply(Reply::CommandNotSupported, Address::unspecified())
         .await?;
     }
@@ -204,15 +210,15 @@ impl From<socks5_server::proto::Address> for SocketDestination {
   }
 }
 
-impl<T> From<(std::io::Error, T)> for InboundError {
+impl<T> From<(std::io::Error, T)> for Error {
   fn from((error, _): (std::io::Error, T)) -> Self {
-    InboundError::Io(error)
+    Error::Io(error)
   }
 }
 
-impl<T> From<(socks5_server::proto::Error, T)> for InboundError {
+impl<T> From<(socks5_server::proto::Error, T)> for Error {
   fn from((error, _): (socks5_server::proto::Error, T)) -> Self {
-    InboundError::Io(error.into())
+    Error::Io(error.into())
   }
 }
 
@@ -225,13 +231,18 @@ mod tests {
   };
 
   use crate::{
-    inbound::{Inbound, Socks5Inbound},
+    inbound::Inbound,
     primitives::{SocketDestination, SocketDestinationHost},
   };
 
+  use super::*;
+
   #[tokio::test]
   async fn accept_tcp_connect_returns_destination_and_stream() -> anyhow::Result<()> {
-    let inbound = Socks5Inbound::new("127.0.0.1:0").await?;
+    let inbound = Socks5Inbound::new(Socks5InboundOptions {
+      listen: "127.0.0.1:0".parse()?,
+    })
+    .await?;
     let listen_address = inbound.listen_address();
     let (accept_result_sender, accept_result_receiver) = oneshot::channel();
 

@@ -8,16 +8,30 @@ pub enum OutExit {
   Any,
 }
 
-impl From<String> for OutExit {
-  fn from(value: String) -> Self {
-    match value.as_str() {
+impl<T> From<T> for OutExit
+where
+  T: AsRef<str>,
+{
+  fn from(value: T) -> Self {
+    let value = value.as_ref();
+
+    match value {
       "DIRECT" => OutExit::Direct,
       "PROXY" => OutExit::Proxy,
       "ANY" => OutExit::Any,
-      _ => OutExit::Tag(OutExitTag(value)),
+      _ => OutExit::Tag(OutExitTag(value.to_owned())),
     }
   }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
 pub struct OutExitTag(pub String);
+
+impl<T> From<T> for OutExitTag
+where
+  T: AsRef<str>,
+{
+  fn from(value: T) -> Self {
+    OutExitTag(value.as_ref().to_owned())
+  }
+}

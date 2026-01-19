@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::primitives::{BidiStream, OutExit, SocketDestination};
+use crate::{
+  node::Error,
+  primitives::{BidiStream, OutExit, SocketDestination},
+};
 
 #[async_trait]
 pub trait OutDispatcher: Send + Sync {
@@ -11,10 +14,4 @@ pub trait OutDispatcher: Send + Sync {
     exit: OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn BidiStream>, Error>;
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-  #[error("I/O error: {0}")]
-  Io(#[from] std::io::Error),
 }
