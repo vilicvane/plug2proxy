@@ -14,11 +14,14 @@ pub enum SerdeOneOrMany<T> {
   Many(Vec<T>),
 }
 
-impl<T> From<SerdeOneOrMany<T>> for Vec<T> {
-  fn from(value: SerdeOneOrMany<T>) -> Self {
+impl<T, TFrom> From<SerdeOneOrMany<TFrom>> for Vec<T>
+where
+  TFrom: Into<T>,
+{
+  fn from(value: SerdeOneOrMany<TFrom>) -> Self {
     match value {
-      SerdeOneOrMany::One(value) => vec![value],
-      SerdeOneOrMany::Many(values) => values,
+      SerdeOneOrMany::One(value) => vec![value.into()],
+      SerdeOneOrMany::Many(values) => values.into_iter().map(|value| value.into()).collect(),
     }
   }
 }

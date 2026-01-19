@@ -17,9 +17,9 @@ use crate::{
     DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut,
     NodeOutDispatcher, OutDispatcher,
   },
-  primitives::{OutExit, OutExitTag},
+  primitives::OutExitTag,
   quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
-  route::{FallbackRule, GeoLite2, Router},
+  route::Router,
   utils::postcard::{postcard_read_stream, postcard_read_stream_to_end},
 };
 
@@ -39,23 +39,14 @@ pub struct HubOptions {
 }
 
 impl Hub {
-  pub fn new(tcp_listener: TcpListener, inbounds: Vec<AnyInbound>, options: HubOptions) -> Self {
-    let id = NodeId::new();
-
-    let router = Router::new(GeoLite2::new(options.context_dir.join("geolite2.mmdb")));
-
-    router.register_rules(
-      id,
-      vec![
-        FallbackRule {
-          exits: vec![OutExit::Any],
-        }
-        .into(),
-      ],
-    );
-
+  pub fn new(
+    tcp_listener: TcpListener,
+    inbounds: Vec<AnyInbound>,
+    router: Router,
+    options: HubOptions,
+  ) -> Self {
     Self {
-      id,
+      id: NodeId::new(),
       direct_out_dispatcher: DirectOutDispatcher::new(options.tags).arc(),
       connected_out_dispatcher_map: HashMap::new().mutex(),
       mt_connections_listener: MtConnectionsListener::new(tcp_listener).tokio_mutex(),

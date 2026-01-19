@@ -16,15 +16,21 @@ use super::{rule::AnyRule, rule::Rule};
 
 pub struct Router {
   geolite2: GeoLite2,
-  remote_rules_map: Mutex<HashMap<NodeId, Vec<Arc<AnyRule>>>>,
+  rules_map: Mutex<HashMap<RulesKey, Vec<Arc<AnyRule>>>>,
   merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, derive_more::From)]
+enum RulesKey {
+  Node(NodeId),
+  Local,
 }
 
 impl Router {
   pub fn new(geolite2: GeoLite2) -> Self {
     Self {
       geolite2,
-      remote_rules_map: HashMap::new().mutex(),
+      rules_map: HashMap::new().mutex(),
       merged_rules_cache: Vec::new().mutex(),
     }
   }
@@ -55,26 +61,34 @@ impl Router {
       .collect_vec()
   }
 
-  pub fn register_rules(&self, node_id: NodeId, rules: Vec<AnyRule>) {
+  pub fn register_local_rules(&self, rules: Vec<AnyRule>) {
+    self.register_rules(RulesKey::Local, rules);
+  }
+
+  pub fn register_node_rules(&self, node_id: NodeId, rules: Vec<AnyRule>) {
+    self.register_rules(node_id.into(), rules);
+  }
+
+  fn register_rules(&self, key: RulesKey, rules: Vec<AnyRule>) {
     self
-      .remote_rules_map
+      .rules_map
       .lock()
       .unwrap()
-      .entry(node_id)
+      .entry(key)
       .insert_entry(rules.into_iter().map(|rule| rule.arc()).collect());
 
     self.update_rules_cache();
   }
 
   pub fn unregister_rules(&self, node_id: NodeId) {
-    self.remote_rules_map.lock().unwrap().remove(&node_id);
+    self.rules_map.lock().unwrap().remove(&node_id.into());
 
     self.update_rules_cache();
   }
 
   fn update_rules_cache(&self) {
     let mut rules = self
-      .remote_rules_map
+      .rules_map
       .lock()
       .unwrap()
       .values()

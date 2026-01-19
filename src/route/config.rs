@@ -1,12 +1,8 @@
-use std::sync::Arc;
-
-use itertools::Itertools;
 use lowkit::SerdeRegex;
 use serde::Deserialize;
 
 use crate::{
   out::OutExitConfig,
-  primitives::OutExit,
   route::{
     AnyRule,
     rule::{AddressRule, DomainPatternRule, DomainRule, FallbackRule, GeoIpRule},
@@ -15,8 +11,25 @@ use crate::{
 };
 
 #[derive(Clone, Deserialize)]
+pub struct RouteConfig {
+  pub rules: Vec<RouteRuleConfig>,
+  pub priority: Option<i64>,
+}
+
+impl From<RouteConfig> for Vec<AnyRule> {
+  fn from(RouteConfig { rules, priority }: RouteConfig) -> Self {
+    let priority = priority.unwrap_or(i64::MAX);
+
+    rules
+      .into_iter()
+      .map(|rule| rule.into_rule(priority))
+      .collect()
+  }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type")]
-pub enum RuleConfig {
+pub enum RouteRuleConfig {
   #[serde(rename = "geoip")]
   GeoIp(GeoIpRuleConfig),
   #[serde(rename = "address")]
@@ -29,65 +42,44 @@ pub enum RuleConfig {
   Fallback(FallbackRuleConfig),
 }
 
-impl RuleConfig {
-  pub fn into_rule(self, default_exits: Vec<OutExit>, priority: i64) -> Arc<AnyRule> {
+impl RouteRuleConfig {
+  pub fn into_rule(self, priority_default: i64) -> AnyRule {
     match self {
-      RuleConfig::GeoIp(config) => Arc::new(
-        GeoIpRule {
-          matches: config.r#match.into(),
-          priority: config.priority.unwrap_or(priority),
-          negate: config.negate,
-          exits: merge_exits(default_exits, config.exit),
-        }
-        .into(),
-      ),
-      RuleConfig::Address(config) => Arc::new(
-        AddressRule {
-          match_ips: config.match_ip.map(|ip_nets| {
-            let ip_nets: Vec<SerdeIpNet> = ip_nets.into();
-            ip_nets.into_iter().map_into().collect()
-          }),
-          match_ports: config.match_port.map(|match_port| match_port.into()),
-          priority: config.priority.unwrap_or(priority),
-          negate: config.negate,
-          exits: merge_exits(default_exits, config.exit),
-        }
-        .into(),
-      ),
-      RuleConfig::Domain(config) => Arc::new(
-        DomainRule {
-          matches: config.r#match.into(),
-          priority: config.priority.unwrap_or(priority),
-          negate: config.negate,
-          exits: merge_exits(default_exits, config.exit),
-        }
-        .into(),
-      ),
-      RuleConfig::DomainPattern(config) => Arc::new(
-        DomainPatternRule {
-          matches: config.r#match.into(),
-          priority: config.priority.unwrap_or(priority),
-          negate: config.negate,
-          exits: merge_exits(default_exits, config.exit),
-        }
-        .into(),
-      ),
-      RuleConfig::Fallback(config) => Arc::new(
-        FallbackRule {
-          exits: merge_exits(default_exits, config.exit),
-        }
-        .into(),
-      ),
+      RouteRuleConfig::GeoIp(config) => GeoIpRule {
+        matches: config.r#match.into(),
+        priority: config.priority.unwrap_or(priority_default),
+        negate: config.negate,
+        exits: config.exit.into(),
+      }
+      .into(),
+      RouteRuleConfig::Address(config) => AddressRule {
+        match_ips: config.match_ip.map(|ip_nets| ip_nets.into()),
+        match_ports: config.match_port.map(|match_port| match_port.into()),
+        priority: config.priority.unwrap_or(priority_default),
+        negate: config.negate,
+        exits: config.exit.into(),
+      }
+      .into(),
+      RouteRuleConfig::Domain(config) => DomainRule {
+        matches: config.r#match.into(),
+        priority: config.priority.unwrap_or(priority_default),
+        negate: config.negate,
+        exits: config.exit.into(),
+      }
+      .into(),
+      RouteRuleConfig::DomainPattern(config) => DomainPatternRule {
+        matches: config.r#match.into(),
+        priority: config.priority.unwrap_or(priority_default),
+        negate: config.negate,
+        exits: config.exit.into(),
+      }
+      .into(),
+      RouteRuleConfig::Fallback(config) => FallbackRule {
+        exits: config.exit.into(),
+      }
+      .into(),
     }
   }
-}
-
-fn merge_exits(default_exits: Vec<OutExit>, exits: SerdeOneOrMany<OutExitConfig>) -> Vec<OutExit> {
-  default_exits
-    .clone()
-    .into_iter()
-    .chain(Vec::from(exits).into_iter().map_into())
-    .collect()
 }
 
 #[derive(Clone, Deserialize)]

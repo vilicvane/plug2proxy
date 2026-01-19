@@ -3,6 +3,8 @@ use crate::{
   hub::{Hub, HubOptions},
   inbound::{Socks5Inbound, Socks5InboundOptions},
   out::{Out, OutHubOptions, OutOptions},
+  primitives::OutExit,
+  route::{FallbackRule, GeoLite2, Router},
   test::{get_free_local_tcp_address, test_dir},
 };
 use lits::duration;
@@ -37,9 +39,19 @@ async fn test_hub_out() -> anyhow::Result<()> {
     async {
       let inbounds = vec![socks5_inbound.into()];
 
+      let router = Router::new(GeoLite2::new(hub_dir.join("geolite2.mmdb")));
+
+      router.register_local_rules(vec![
+        FallbackRule {
+          exits: vec![OutExit::Any],
+        }
+        .into(),
+      ]);
+
       let hub = Hub::new(
         hub_tcp_listener,
         inbounds,
+        router,
         HubOptions {
           tags: None,
           context_dir: hub_dir,
