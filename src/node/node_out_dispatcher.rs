@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lowkit::SelfWrapExt;
@@ -11,16 +11,20 @@ use crate::{
 };
 
 pub struct NodeOutDispatcher {
-  tags: Vec<OutExitTag>,
+  tags: Mutex<Vec<OutExitTag>>,
   qomt_connection: Arc<QuicConnection>,
 }
 
 impl NodeOutDispatcher {
   pub fn new(tags: Vec<OutExitTag>, qomt_connection: Arc<QuicConnection>) -> Self {
     Self {
-      tags,
+      tags: tags.mutex(),
       qomt_connection,
     }
+  }
+
+  pub fn update_tags(&self, tags: Vec<OutExitTag>) {
+    *self.tags.lock().unwrap() = tags;
   }
 }
 
@@ -31,7 +35,7 @@ impl OutDispatcher for NodeOutDispatcher {
       OutExit::Direct => false,
       OutExit::Proxy => true,
       OutExit::Any => true,
-      OutExit::Tag(route_tag) => self.tags.iter().any(|tag| tag == route_tag),
+      OutExit::Tag(route_tag) => self.tags.lock().unwrap().iter().any(|tag| tag == route_tag),
     }
   }
 

@@ -6,30 +6,35 @@ use std::{
 
 use colored::Colorize;
 use futures::StreamExt;
+use itertools::Itertools;
 use lowkit::SelfWrapExt;
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinSet};
 
 use crate::{
   cert::{CA_PEM_FILE_NAME, NODE_PEM_FILE_NAME, generate_ca_pem_file, generate_node_pem_file},
   hub::HubConfig,
   r#in::InLike,
-  inbound::{AnyInbound, Inbound, Socks5Inbound},
+  inbound::AnyInbound,
   mt_connections::MtConnectionsListener,
   node::{
-    DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut,
-    NodeOutDispatcher, OutDispatcher,
+    DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToIn,
+    NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
   },
+  out::DirectOut,
   primitives::OutExitTag,
-  quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
+  quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
   route::{GeoLite2, Router},
   utils::postcard::{postcard_read_stream, postcard_read_stream_to_end},
 };
 
 pub struct Hub {
   id: NodeId,
+  tags: Vec<OutExitTag>,
+  mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
   direct_out_dispatcher: Arc<dyn OutDispatcher>,
   connected_out_dispatcher_map: Mutex<HashMap<NodeId, Arc<dyn OutDispatcher>>>,
-  mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
+  in_qomt_connection_map: Mutex<HashMap<NodeId, Arc<QuicConnection>>>,
+  out_map: Mutex<HashMap<NodeId, (Vec<OutExitTag>, Option<DirectOut>)>>,
   router: Router,
   inbounds: Vec<Arc<AnyInbound>>,
   context_dir: PathBuf,
@@ -45,23 +50,26 @@ impl Hub {
     tcp_listener: TcpListener,
     inbounds: Vec<AnyInbound>,
     router: Router,
-    options: HubOptions,
+    HubOptions { tags, context_dir }: HubOptions,
   ) -> Self {
     Self {
       id: NodeId::new(),
-      direct_out_dispatcher: DirectOutDispatcher::new(options.tags).arc(),
-      connected_out_dispatcher_map: HashMap::new().mutex(),
+      tags: tags.clone().unwrap_or_default(),
       mt_connections_listener: MtConnectionsListener::new(tcp_listener).tokio_mutex(),
+      direct_out_dispatcher: DirectOutDispatcher::new(tags).arc(),
+      connected_out_dispatcher_map: HashMap::new().mutex(),
+      in_qomt_connection_map: HashMap::new().mutex(),
+      out_map: HashMap::new().mutex(),
       router,
       inbounds: inbounds.into_iter().map(|inbound| inbound.arc()).collect(),
-      context_dir: options.context_dir,
+      context_dir,
     }
   }
 
   pub async fn run(self) -> anyhow::Result<()> {
-    let hub = self.arc();
+    let this = self.arc();
 
-    tokio::try_join!(hub.clone().run_hub(), hub.run_inbounds())?;
+    tokio::try_join!(this.clone().run_hub(), this.run_inbounds())?;
 
     Ok(())
   }
@@ -88,7 +96,7 @@ impl Hub {
       let qomt_connection =
         QuicConnection::accept(&connection_id, &mut quiche_config, mt_connections);
 
-      let hub = self.clone();
+      let this = self.clone();
 
       join_set.spawn(async move {
         async {
@@ -101,6 +109,12 @@ impl Hub {
 
           let hello = postcard_read_stream_to_end::<NodeHello>(&mut stream).await?;
 
+          let hello_ack = NodeHelloAck(this.id);
+
+          stream
+            .write_all(&postcard::to_allocvec(&hello_ack).unwrap())
+            .await?;
+
           let node_type = match hello {
             NodeHello::In(_) => "IN",
             NodeHello::Out(_) => "OUT",
@@ -110,10 +124,13 @@ impl Hub {
 
           match hello {
             NodeHello::In(node_id) => {
-              hub.clone().handle_in_node(node_id, qomt_connection).await?;
+              this
+                .clone()
+                .handle_in_node(node_id, stream, qomt_connection)
+                .await;
             }
             NodeHello::Out(hello) => {
-              hub.clone().handle_out_node(hello, qomt_connection).await?;
+              this.clone().handle_out_node(hello, qomt_connection).await;
             }
           }
 
@@ -133,16 +150,48 @@ impl Hub {
   async fn handle_in_node(
     self: Arc<Self>,
     node_id: NodeId,
+    mut stream: QuicStream,
     qomt_connection: QuicConnection,
-  ) -> anyhow::Result<()> {
+  ) {
+    {
+      let update = self.build_in_update();
+
+      if async {
+        stream.write_all(&update).await?;
+        stream.shutdown().await?;
+
+        log::info!("sent initial IN update to {node_id}.");
+
+        anyhow::Ok(())
+      }
+      .await
+      .inspect_err(|error| {
+        log::error!("error sending initial IN update to {node_id}: {error}");
+      })
+      .is_err()
+      {
+        return;
+      }
+    }
+
+    let qomt_connection = qomt_connection.arc();
+
+    self
+      .in_qomt_connection_map
+      .lock()
+      .unwrap()
+      .insert(node_id, qomt_connection.clone());
+
     let mut join_set = JoinSet::new();
 
     loop {
-      let Some(mut stream) = qomt_connection.accept_stream().await? else {
+      let Ok(Some(mut stream)) = qomt_connection.accept_stream().await.inspect_err(|error| {
+        log::error!("error accepting IN node stream: {}", error);
+      }) else {
         break;
       };
 
-      let hub = self.clone();
+      let this = self.clone();
 
       join_set.spawn(async move {
         async {
@@ -150,7 +199,7 @@ impl Hub {
 
           match message {
             NodeMessageToOut::Connect(exit, destination) => {
-              hub
+              this
                 .tcp_connect(vec![exit], destination, stream.wrap_box())
                 .await?;
             }
@@ -167,7 +216,7 @@ impl Hub {
       });
     }
 
-    Ok(())
+    self.in_qomt_connection_map.lock().unwrap().remove(&node_id);
   }
 
   async fn handle_out_node(
@@ -178,7 +227,13 @@ impl Hub {
       tags,
     }: NodeHelloOut,
     qomt_connection: QuicConnection,
-  ) -> anyhow::Result<()> {
+  ) {
+    self
+      .out_map
+      .lock()
+      .unwrap()
+      .insert(id, (tags.clone(), direct_out));
+
     let qomt_connection = qomt_connection.arc();
 
     let out_dispatcher = NodeOutDispatcher::new(tags, qomt_connection.clone());
@@ -189,6 +244,8 @@ impl Hub {
       .unwrap()
       .insert(id, out_dispatcher.arc());
 
+    self.send_in_update().await;
+
     while qomt_connection
       .accept_stream()
       .await
@@ -198,48 +255,64 @@ impl Hub {
       .is_ok_and(|stream| stream.is_some())
     {}
 
+    self.out_map.lock().unwrap().remove(&id);
+
     self
       .connected_out_dispatcher_map
       .lock()
       .unwrap()
       .remove(&id);
-
-    Ok(())
   }
 
-  async fn run_inbounds(self: Arc<Self>) -> anyhow::Result<()> {
-    let mut join_set = JoinSet::new();
+  fn build_in_update(&self) -> Vec<u8> {
+    let update = {
+      let out_map = self.out_map.lock().unwrap();
 
-    for inbound in self.inbounds.iter() {
-      join_set.spawn(self.clone().run_inbound(inbound.clone()));
-    }
-
-    let Some(result) = join_set.join_next().await else {
-      return Ok(());
+      NodeMessageToIn::Update(NodeMessageToInUpdate {
+        tags: self
+          .tags
+          .iter()
+          .chain(out_map.values().flat_map(|(tags, _)| tags))
+          .unique()
+          .cloned()
+          .collect(),
+        direct_outs: out_map
+          .values()
+          .flat_map(|(_, direct_out)| direct_out)
+          .cloned()
+          .collect(),
+        route_rules: self.router.build_rules(),
+      })
     };
 
-    result??;
-
-    unreachable!();
+    postcard::to_allocvec(&update).unwrap()
   }
 
-  async fn run_inbound(self: Arc<Self>, inbound: Arc<AnyInbound>) -> anyhow::Result<()> {
-    let mut join_set = JoinSet::new();
+  async fn send_in_update(&self) {
+    let update = self.build_in_update();
 
-    loop {
-      let (destination, stream) = inbound.accept_tcp_connect().await?;
+    let in_nodes = self
+      .in_qomt_connection_map
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|(node_id, qomt_connection)| (*node_id, qomt_connection.clone()))
+      .collect_vec();
 
-      let hub = self.clone();
+    for (node_id, qomt_connection) in in_nodes {
+      let mut stream = qomt_connection.open_stream();
 
-      join_set.spawn(async move {
-        hub
-          .in_tcp_connect(destination, stream)
-          .await
-          .inspect_err(|error| {
-            log::warn!("error handling inbound TCP connect: {}", error);
-          })
-          .ok();
-      });
+      async {
+        stream.write_all(&update).await?;
+        stream.shutdown().await?;
+
+        anyhow::Ok(())
+      }
+      .await
+      .inspect_err(|error| {
+        log::error!("error sending IN update to {node_id}: {}", error);
+      })
+      .ok();
     }
   }
 }
@@ -268,6 +341,10 @@ impl Node for Hub {
 impl InLike for Hub {
   fn router(&self) -> &Router {
     &self.router
+  }
+
+  fn inbounds(&self) -> &[Arc<AnyInbound>] {
+    &self.inbounds
   }
 }
 
@@ -301,13 +378,11 @@ pub async fn run_hub(
     tcp_listener.local_addr()?.to_string().yellow()
   );
 
-  let mut inbounds = vec![];
-
-  if let Some(inbounds_config) = inbounds_config {
-    if let Some(socks5_config) = inbounds_config.socks5 {
-      inbounds.push(Socks5Inbound::new(socks5_config.into()).await?.into());
-    }
-  }
+  let inbounds = if let Some(inbounds_config) = inbounds_config {
+    inbounds_config.into_inbounds().await?
+  } else {
+    vec![]
+  };
 
   let router = Router::new(GeoLite2::new(context_dir));
 

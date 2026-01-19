@@ -4,6 +4,7 @@ use colored::Colorize;
 use plug2proxy::{
   cert::generate_node_pem_file,
   hub::{HubConfig, run_hub},
+  r#in::{InConfig, run_in},
   out::{OutConfig, run_out},
 };
 use serde::Deserialize;
@@ -22,6 +23,8 @@ enum Config {
   Hub(HubConfig),
   #[serde(rename = "out")]
   Out(OutConfig),
+  #[serde(rename = "in")]
+  In(InConfig),
 }
 
 #[tokio::main]
@@ -49,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
       }
       Config::Out(out_config) => {
         run_out("", out_config).await?;
+      }
+      Config::In(in_config) => {
+        run_in("", in_config).await?;
       }
     }
   }

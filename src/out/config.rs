@@ -15,7 +15,7 @@ pub struct OutConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct OutHubConfig {
   pub address: SerdeSocketAddress,
-  pub connections: usize,
+  pub connections: Option<usize>,
 }
 
 impl From<OutHubConfig> for OutHubOptions {
@@ -27,7 +27,7 @@ impl From<OutHubConfig> for OutHubOptions {
   ) -> Self {
     OutHubOptions {
       address: address.into(),
-      connections,
+      connections: connections.unwrap_or(4),
     }
   }
 }

@@ -4,8 +4,6 @@ use std::{
   sync::Arc,
 };
 
-use anyhow::Context;
-use futures::SinkExt;
 use lits::duration;
 use lowkit::SelfWrapExt;
 use serde::{Deserialize, Serialize};
@@ -13,13 +11,13 @@ use tokio::{io::AsyncWriteExt, task::JoinSet, time::sleep};
 
 use crate::{
   cert::NODE_PEM_FILE_NAME,
-  mt_connections::mt_connections_connect,
   node::{
     DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut, OutDispatcher,
   },
   out::OutConfig,
   primitives::OutExitTag,
-  quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
+  qomt::qomt_connect,
+  quic_connection::{QuicConnection, create_quiche_config},
   utils::postcard::postcard_read_stream,
 };
 
@@ -60,40 +58,27 @@ impl Out {
   }
 
   pub async fn run(self) -> anyhow::Result<()> {
-    let out = self.arc();
+    let mut quiche_config = create_quiche_config(self.context_dir.join(NODE_PEM_FILE_NAME))?;
 
-    let mut quiche_config = create_quiche_config(out.context_dir.join(NODE_PEM_FILE_NAME))?;
+    let this = self.arc();
 
     loop {
-      let out = out.clone();
-
       async {
-        let (mut mt_connections, extend_signal_sender) = mt_connections_connect::<QuicBytesPacket>(
-          out.hub_options.address,
-          out.hub_options.connections,
+        let qomt_connection = qomt_connect(
+          &mut quiche_config,
+          this.hub_options.address,
+          this.hub_options.connections,
         )
-        .await
-        .context("failed to create mTCP connections.")?;
-
-        let connection_id = QuicConnection::generate_connection_id();
-
-        mt_connections.send(connection_id.to_vec().into()).await?;
-
-        let qomt_connection =
-          QuicConnection::connect(&connection_id, &mut quiche_config, mt_connections);
-
-        qomt_connection.established().await?;
+        .await?;
 
         log::info!("connection to HUB established.");
-
-        extend_signal_sender.send(()).ok();
 
         let mut stream = qomt_connection.open_stream();
 
         let hello = NodeHello::Out(NodeHelloOut {
-          id: out.id,
+          id: this.id,
           direct_out: None,
-          tags: out.tags.clone(),
+          tags: this.tags.clone(),
         });
 
         stream
@@ -102,7 +87,7 @@ impl Out {
 
         stream.shutdown().await?;
 
-        out.handle_hub_node(qomt_connection).await?;
+        this.clone().handle_hub_node(qomt_connection).await?;
 
         anyhow::Ok(())
       }
@@ -124,7 +109,7 @@ impl Out {
         break;
       };
 
-      let out = self.clone();
+      let this = self.clone();
 
       join_set.spawn(async move {
         async {
@@ -132,7 +117,7 @@ impl Out {
 
           match message {
             NodeMessageToOut::Connect(exit, destination) => {
-              out
+              this
                 .tcp_connect(vec![exit], destination, stream.wrap_box())
                 .await?;
             }
@@ -165,7 +150,7 @@ impl Node for Out {
   }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DirectOut {
   pub tags: Vec<OutExitTag>,
   pub address: SocketAddr,

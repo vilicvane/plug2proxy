@@ -1,8 +1,13 @@
-use std::ops::Deref;
+use std::{net::SocketAddr, ops::Deref};
 
+use anyhow::Context;
+use futures::SinkExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{mt_connections::MtConnectionsPacket, quic_connection::QuicBytesPacket};
+use crate::{
+  mt_connections::{MtConnectionsPacket, mt_connections_connect},
+  quic_connection::{QuicBytesPacket, QuicConnection},
+};
 
 impl MtConnectionsPacket for QuicBytesPacket {
   fn len(&self) -> usize {
@@ -34,4 +39,27 @@ impl MtConnectionsPacket for QuicBytesPacket {
     stream.write_all(packet.deref()).await?;
     Ok(())
   }
+}
+
+pub async fn qomt_connect(
+  quiche_config: &mut quiche::Config,
+  address: SocketAddr,
+  connections: usize,
+) -> anyhow::Result<QuicConnection> {
+  let (mut mt_connections, extend_signal_sender) =
+    mt_connections_connect::<QuicBytesPacket>(address, connections)
+      .await
+      .context("failed to create mTCP connections.")?;
+
+  let connection_id = QuicConnection::generate_connection_id();
+
+  mt_connections.send(connection_id.to_vec().into()).await?;
+
+  let qomt_connection = QuicConnection::connect(&connection_id, quiche_config, mt_connections);
+
+  qomt_connection.established().await?;
+
+  extend_signal_sender.send(()).ok();
+
+  Ok(qomt_connection)
 }

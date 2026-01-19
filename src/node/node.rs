@@ -65,8 +65,9 @@ pub trait Node {
   }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, derive_more::Display)]
 #[serde(transparent)]
+#[display("{}", _0.hyphenated().to_string().split_once("-").unwrap().0)]
 pub struct NodeId(#[serde(with = "uuid::serde::compact")] pub Uuid);
 
 impl NodeId {
@@ -81,18 +82,21 @@ impl Default for NodeId {
   }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum NodeHello {
   In(NodeId),
   Out(NodeHelloOut),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct NodeHelloOut {
   pub id: NodeId,
-  pub direct_out: Option<DirectOut>,
   pub tags: Vec<OutExitTag>,
+  pub direct_out: Option<DirectOut>,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeHelloAck(pub NodeId);
 
 #[derive(Serialize, Deserialize)]
 pub enum NodeMessageToOut {
@@ -100,10 +104,16 @@ pub enum NodeMessageToOut {
   Associate(OutExit, SocketDestination),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum NodeMessageToIn {
-  RouteRules(Vec<AnyRule>),
-  DirectOuts(Vec<DirectOut>),
+  Update(NodeMessageToInUpdate),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeMessageToInUpdate {
+  pub tags: Vec<OutExitTag>,
+  pub direct_outs: Vec<DirectOut>,
+  pub route_rules: Vec<AnyRule>,
 }
 
 #[derive(thiserror::Error, Debug)]

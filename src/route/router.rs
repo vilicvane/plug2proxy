@@ -35,6 +35,17 @@ impl Router {
     }
   }
 
+  pub fn build_rules(&self) -> Vec<AnyRule> {
+    self
+      .merged_rules_cache
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|rule| rule.as_ref().clone())
+      .filter(|rule| !matches!(rule, AnyRule::Fallback(_)))
+      .collect()
+  }
+
   pub async fn match_exits(&self, socket_destination: &SocketDestination) -> Vec<OutExit> {
     let address = socket_destination
       .resolve()
@@ -87,7 +98,7 @@ impl Router {
     self.update_rules_cache();
   }
 
-  pub fn unregister_rules(&self, node_id: NodeId) {
+  pub fn unregister_node_rules(&self, node_id: NodeId) {
     self.rules_map.lock().unwrap().remove(&node_id.into());
 
     self.update_rules_cache();
