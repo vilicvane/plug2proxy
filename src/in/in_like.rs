@@ -57,7 +57,7 @@ pub trait InLike: Node + 'static {
           .in_tcp_connect(destination, stream)
           .await
           .inspect_err(|error| {
-            log::warn!("error handling inbound TCP connect: {}", error);
+            log::warn!("inbound TCP connection error: {}", error);
           })
           .ok();
       });

@@ -262,6 +262,8 @@ impl Hub {
       .lock()
       .unwrap()
       .remove(&id);
+
+    self.send_in_update().await;
   }
 
   fn build_in_update(&self) -> Vec<u8> {

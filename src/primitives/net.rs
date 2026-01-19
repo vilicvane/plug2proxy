@@ -6,7 +6,7 @@ use tokio::net::lookup_host;
 
 use crate::utils::net::SocketAddressExt;
 
-#[derive(Serialize, Deserialize, Debug, derive_more::Display)]
+#[derive(Serialize, Deserialize, Debug, derive_more::Display, Hash, Eq, PartialEq, Clone)]
 #[display("{host}:{port}")]
 pub struct SocketDestination {
   pub host: SocketDestinationHost,

@@ -4,7 +4,9 @@ use std::{
 };
 
 use itertools::Itertools as _;
+use lits::duration;
 use lowkit::SelfWrapExt;
+use moka::sync::Cache;
 
 use crate::{
   node::NodeId,
@@ -18,6 +20,7 @@ pub struct Router {
   geolite2: GeoLite2,
   rules_map: Mutex<HashMap<RulesKey, Vec<Arc<AnyRule>>>>,
   merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
+  cache: Cache<SocketDestination, Vec<OutExit>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, derive_more::From)]
@@ -32,6 +35,7 @@ impl Router {
       geolite2,
       rules_map: HashMap::new().mutex(),
       merged_rules_cache: Vec::new().mutex(),
+      cache: Cache::builder().time_to_live(duration!("1h")).build(),
     }
   }
 
@@ -47,6 +51,10 @@ impl Router {
   }
 
   pub async fn match_exits(&self, socket_destination: &SocketDestination) -> Vec<OutExit> {
+    if let Some(exits) = self.cache.get(socket_destination) {
+      return exits;
+    }
+
     let address = socket_destination
       .resolve()
       .await
@@ -63,7 +71,7 @@ impl Router {
       None
     };
 
-    rules
+    let exits = rules
       .iter()
       .filter(|rule| rule.test(&address, &domain, &region_codes))
       .fold(Vec::new(), |mut exits, rule| {
@@ -76,7 +84,11 @@ impl Router {
       })
       .into_iter()
       .unique()
-      .collect_vec()
+      .collect_vec();
+
+    self.cache.insert(socket_destination.clone(), exits.clone());
+
+    exits
   }
 
   pub fn register_local_rules(&self, rules: Vec<AnyRule>) {
