@@ -1,5 +1,10 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+  net::SocketAddr,
+  path::{Path, PathBuf},
+  sync::Arc,
+};
 
+use anyhow::Context;
 use futures::SinkExt;
 use lits::duration;
 use lowkit::SelfWrapExt;
@@ -12,6 +17,7 @@ use crate::{
   node::{
     DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut, OutDispatcher,
   },
+  out::OutConfig,
   primitives::OutExitTag,
   quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
   utils::postcard::postcard_read_stream,
@@ -66,7 +72,8 @@ impl Out {
           out.hub_options.address,
           out.hub_options.connections,
         )
-        .await?;
+        .await
+        .context("failed to create mTCP connections.")?;
 
         let connection_id = QuicConnection::generate_connection_id();
 
@@ -76,6 +83,8 @@ impl Out {
           QuicConnection::connect(&connection_id, &mut quiche_config, mt_connections);
 
         qomt_connection.established().await?;
+
+        log::info!("connection to HUB established.");
 
         extend_signal_sender.send(()).ok();
 
@@ -99,7 +108,7 @@ impl Out {
       }
       .await
       .inspect_err(|error| {
-        log::error!("error hub connection error: {}", error);
+        log::error!("HUB connection error: {}", error);
       })
       .ok();
 
@@ -134,11 +143,13 @@ impl Out {
         }
         .await
         .inspect_err(|error| {
-          log::error!("error handling CONNECT stream: {}", error);
+          log::error!("error handling TCP stream: {}", error);
         })
         .ok();
       });
     }
+
+    log::info!("connection to HUB closed.");
 
     Ok(())
   }
@@ -158,4 +169,19 @@ impl Node for Out {
 pub struct DirectOut {
   pub tags: Vec<OutExitTag>,
   pub address: SocketAddr,
+}
+
+pub async fn run_out(
+  context_dir: impl AsRef<Path>,
+  OutConfig { hub, tags }: OutConfig,
+) -> anyhow::Result<()> {
+  let context_dir = context_dir.as_ref();
+
+  let out = Out::new(OutOptions {
+    tags: tags.unwrap_or_default(),
+    hub: hub.into(),
+    context_dir: context_dir.to_owned(),
+  });
+
+  out.run().await
 }

@@ -55,9 +55,16 @@ impl Router {
     rules
       .iter()
       .filter(|rule| rule.test(&address, &domain, &region_codes))
-      .flat_map(|rule| rule.exits())
+      .fold(Vec::new(), |mut exits, rule| {
+        if matches!(**rule, AnyRule::Fallback(_)) && !exits.is_empty() {
+          return exits;
+        }
+
+        exits.extend(rule.exits().iter().cloned());
+        exits
+      })
+      .into_iter()
       .unique()
-      .cloned()
       .collect_vec()
   }
 

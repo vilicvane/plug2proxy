@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use colored::Colorize;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tokio::io::copy_bidirectional;
 use uuid::Uuid;
@@ -24,19 +26,38 @@ pub trait Node {
     destination: SocketDestination,
     mut stream: Box<dyn BidiStream>,
   ) -> Result<(), Error> {
+    if exits.is_empty() {
+      log::info!("TCP {destination} no exit matched.");
+      return Ok(());
+    }
+
     let out_dispatchers = self.get_out_dispatchers();
 
-    let (exit, out_dispatcher) = exits
-      .into_iter()
-      .find_map(|route| {
-        out_dispatchers
-          .iter()
-          .find(|dispatcher| dispatcher.match_exit(&route))
-          .map(|dispatcher| (route, dispatcher))
-      })
-      .ok_or(Error::OutDispatcherNotMatched)?;
+    let Some((matched_exit, out_dispatcher)) = exits.iter().find_map(|route| {
+      out_dispatchers
+        .iter()
+        .find(|dispatcher| dispatcher.match_exit(route))
+        .map(|dispatcher| (route, dispatcher))
+    }) else {
+      log::info!("TCP {destination} no out dispatcher matched.");
+      return Ok(());
+    };
 
-    let mut out_stream = out_dispatcher.connect(exit, destination).await?;
+    log::info!(
+      "TCP {destination} -> {}",
+      exits
+        .iter()
+        .map(|exit| if exit == matched_exit {
+          exit.to_string().cyan().to_string()
+        } else {
+          exit.to_string()
+        })
+        .join(",")
+    );
+
+    let mut out_stream = out_dispatcher
+      .connect(matched_exit.clone(), destination)
+      .await?;
 
     copy_bidirectional(&mut stream, &mut out_stream).await?;
 

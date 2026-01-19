@@ -177,7 +177,7 @@ async fn handle_incoming_connection(
 
   match connection.wait().await? {
     Command::Connect(connect_command, address) => {
-      log::debug!("[socks5] CONNECT {peer_address} -> {address}");
+      log::debug!("[socks5] connect {peer_address} -> {address}");
 
       let connect = connect_command
         .reply(Reply::Succeeded, Address::unspecified())

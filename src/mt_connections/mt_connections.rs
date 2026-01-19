@@ -1,4 +1,5 @@
 use std::{
+  net::SocketAddr,
   pin::Pin,
   sync::{
     Arc,
@@ -24,6 +25,7 @@ pub struct MtConnections<TPacket>
 where
   TPacket: 'static,
 {
+  peer_address: SocketAddr,
   packet_sink: flume::r#async::SendSink<'static, TPacket>,
   packet_stream: flume::r#async::RecvStream<'static, TPacket>,
   connection_count: Arc<AtomicUsize>,
@@ -42,6 +44,8 @@ where
     mpsc::UnboundedSender<TcpStream>,
     mpsc::UnboundedReceiver<()>,
   ) {
+    let peer_address = initial_tcp_stream.peer_addr().unwrap();
+
     let (tcp_stream_sender, mut tcp_stream_receiver) = mpsc::unbounded_channel();
     let (tcp_stream_close_sender, tcp_stream_close_receiver) = mpsc::unbounded_channel();
 
@@ -51,6 +55,7 @@ where
     let connection_count = Arc::new(AtomicUsize::new(0));
 
     let mt_connections = Self {
+      peer_address,
       packet_sink: external_packet_sender.into_sink(),
       packet_stream: external_packet_receiver.into_stream(),
       connection_count: connection_count.clone(),
@@ -135,6 +140,10 @@ where
     };
 
     (mt_connections, tcp_stream_sender, tcp_stream_close_receiver)
+  }
+
+  pub fn peer_address(&self) -> SocketAddr {
+    self.peer_address
   }
 
   pub fn spawn(&mut self, task: impl Future<Output = ()> + Send + 'static) {

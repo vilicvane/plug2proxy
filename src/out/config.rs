@@ -1,7 +1,36 @@
-use lowkit::SelfWrapExt;
+use lowkit::{SelfWrapExt, SerdeSocketAddress};
 use serde::{Deserialize, Deserializer};
 
-use crate::primitives::{OutExit, OutExitTag};
+use crate::{
+  out::OutHubOptions,
+  primitives::{OutExit, OutExitTag},
+};
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OutConfig {
+  pub hub: OutHubConfig,
+  pub tags: Option<Vec<OutExitTag>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OutHubConfig {
+  pub address: SerdeSocketAddress,
+  pub connections: usize,
+}
+
+impl From<OutHubConfig> for OutHubOptions {
+  fn from(
+    OutHubConfig {
+      address,
+      connections,
+    }: OutHubConfig,
+  ) -> Self {
+    OutHubOptions {
+      address: address.into(),
+      connections,
+    }
+  }
+}
 
 #[derive(Clone, Debug)]
 pub struct OutExitConfig(pub OutExit);

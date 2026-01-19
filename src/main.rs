@@ -4,6 +4,7 @@ use colored::Colorize;
 use plug2proxy::{
   cert::generate_node_pem_file,
   hub::{HubConfig, run_hub},
+  out::{OutConfig, run_out},
 };
 use serde::Deserialize;
 use tokio::fs::read_to_string;
@@ -19,11 +20,16 @@ struct Args {
 enum Config {
   #[serde(rename = "hub")]
   Hub(HubConfig),
+  #[serde(rename = "out")]
+  Out(OutConfig),
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+  env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    .format_timestamp(None)
+    .format_target(false)
+    .init();
 
   let Args {
     node_cert: node_cert_common_name,
@@ -40,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
     match config {
       Config::Hub(hub_config) => {
         run_hub("", hub_config).await?;
+      }
+      Config::Out(out_config) => {
+        run_out("", out_config).await?;
       }
     }
   }

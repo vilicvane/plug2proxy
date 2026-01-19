@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, derive_more::From)]
+#[derive(
+  Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, derive_more::From, derive_more::Display,
+)]
 pub enum OutExit {
+  #[display("DIRECT")]
   Direct,
   Tag(#[from] OutExitTag),
+  #[display("PROXY")]
   Proxy,
+  #[display("ANY")]
   Any,
 }
 
@@ -24,7 +29,7 @@ where
   }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Hash, Eq, PartialEq, derive_more::Display)]
 pub struct OutExitTag(pub String);
 
 impl<T> From<T> for OutExitTag

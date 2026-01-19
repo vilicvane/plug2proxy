@@ -17,10 +17,6 @@ pub trait InLike: Node {
   ) -> Result<(), Error> {
     let exits = self.router().match_exits(&destination).await;
 
-    if exits.is_empty() {
-      return Err(Error::ExitNotMatched);
-    }
-
     self.tcp_connect(exits, destination, stream).await?;
 
     Ok(())
@@ -35,6 +31,4 @@ pub enum Error {
   Io(#[from] std::io::Error),
   #[error("node error: {0}")]
   Node(#[from] node::Error),
-  #[error("exit not matched")]
-  ExitNotMatched,
 }

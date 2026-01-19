@@ -76,6 +76,8 @@ impl Hub {
     loop {
       let mut mt_connections = mt_connections_listener.accept().await?;
 
+      let peer_address = mt_connections.peer_address();
+
       let Some(first_packet) = mt_connections.next().await else {
         log::warn!("missing first packet (connection_id) in incoming mTCP connections.");
         continue;
@@ -99,6 +101,13 @@ impl Hub {
 
           let hello = postcard_read_stream_to_end::<NodeHello>(&mut stream).await?;
 
+          let node_type = match hello {
+            NodeHello::In(_) => "IN",
+            NodeHello::Out(_) => "OUT",
+          };
+
+          log::info!("connection from {node_type} {peer_address} established.");
+
           match hello {
             NodeHello::In(node_id) => {
               hub.clone().handle_in_node(node_id, qomt_connection).await?;
@@ -108,11 +117,13 @@ impl Hub {
             }
           }
 
+          log::info!("connection from {node_type} {peer_address} closed.");
+
           anyhow::Ok(())
         }
         .await
         .inspect_err(|error| {
-          log::error!("error accepting qomt connection: {}", error);
+          log::error!("error accepting node connection: {}", error);
         })
         .ok();
       });
