@@ -5,7 +5,9 @@ use crate::{
   out::{Out, OutHubOptions, OutOptions},
   test::{get_free_local_tcp_address, test_dir},
 };
-use tokio::net::TcpListener;
+use lits::duration;
+use lowkit::{UserInterruptExt, user_interrupt};
+use tokio::{net::TcpListener, time::sleep};
 
 #[tokio::test]
 #[test_log::test]
@@ -61,8 +63,30 @@ async fn test_hub_out() -> anyhow::Result<()> {
       out.run().await?;
 
       anyhow::Ok(())
+    },
+    async {
+      sleep(duration!("200ms")).await;
+
+      let proxy = reqwest::Proxy::all(format!("socks5://{}", socks5_listen_address))?;
+
+      let client = reqwest::Client::builder().proxy(proxy).build()?;
+
+      let response = client
+        .get("http://httpbin.org/ip")
+        .send()
+        .await?
+        .error_for_status()?;
+
+      let body = response.text().await?;
+
+      log::debug!("response: {}", body);
+
+      user_interrupt()?;
+
+      anyhow::Ok(())
     }
-  )?;
+  )
+  .user_interrupt_ok()?;
 
   Ok(())
 }

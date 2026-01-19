@@ -34,7 +34,7 @@ quiche = "0.24.7"
 rand = "0.9.2"
 rcgen = { version = "0.14.6", features = ["pem", "x509-parser"] }
 regex = "1.12.2"
-reqwest = "0.13.1"
+reqwest = { version = "0.13.1", features = ["socks"] }
 serde = "1.0.228"
 socks5-server = "0.10.1"
 thiserror = "2.0.17"
