@@ -58,27 +58,43 @@ impl Out {
   }
 
   pub async fn run(self) -> anyhow::Result<()> {
-    let mut quiche_config = create_quiche_config(self.context_dir.join(NODE_PEM_FILE_NAME))?;
-
     let this = self.arc();
+    let connection_count = this.hub_options.connections.max(1);
+    let mut join_set = JoinSet::new();
+
+    for index in 0..connection_count {
+      let this = this.clone();
+      let node_id = if index == 0 { this.id } else { NodeId::new() };
+
+      join_set.spawn(async move { this.run_hub_connection(node_id, index).await });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+      result??;
+    }
+
+    anyhow::bail!("all OUT connection pool tasks stopped")
+  }
+
+  async fn run_hub_connection(
+    self: Arc<Self>,
+    node_id: NodeId,
+    index: usize,
+  ) -> anyhow::Result<()> {
+    let mut quiche_config = create_quiche_config(self.context_dir.join(NODE_PEM_FILE_NAME))?;
 
     loop {
       async {
-        let qomt_connection = qomt_connect(
-          &mut quiche_config,
-          this.hub_options.address,
-          this.hub_options.connections,
-        )
-        .await?;
+        let qomt_connection = qomt_connect(&mut quiche_config, self.hub_options.address, 1).await?;
 
-        log::info!("connection to HUB established.");
+        log::info!("connection pool slot {index} to HUB established.");
 
         let mut stream = qomt_connection.open_stream();
 
         let hello = NodeHello::Out(NodeHelloOut {
-          id: this.id,
+          id: node_id,
           direct_out: None,
-          tags: this.tags.clone(),
+          tags: self.tags.clone(),
         });
 
         stream
@@ -87,13 +103,13 @@ impl Out {
 
         stream.shutdown().await?;
 
-        this.clone().handle_hub_node(qomt_connection).await?;
+        self.clone().handle_hub_node(qomt_connection).await?;
 
         anyhow::Ok(())
       }
       .await
       .inspect_err(|error| {
-        log::error!("HUB connection error: {}", error);
+        log::error!("HUB connection pool slot {index} error: {error}");
       })
       .ok();
 

@@ -6,6 +6,7 @@ use std::{
     atomic::{self, AtomicUsize},
   },
   task::{Context, Poll},
+  time::Duration,
 };
 
 use futures::{Sink, Stream};
@@ -16,10 +17,14 @@ use tokio::{
   net::TcpStream,
   sync::mpsc,
   task::JoinSet,
+  time::timeout,
 };
 use uuid::{Uuid, serde::compact};
 
 use crate::primitives::ConnectionSide;
+
+pub const MT_CONNECTIONS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MT_CONNECTIONS_PACKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct MtConnections<TPacket>
 where
@@ -83,24 +88,27 @@ where
 
             connection_count.fetch_add(1, atomic::Ordering::Relaxed);
 
-            tokio::try_join!(
-              async move {
+            let copy_result = tokio::select! {
+              result = async move {
                 loop {
                   match packet_receiver.recv_async().await {
                     Ok(packet) => {
-                      TPacket::write_packet(&mut tcp_write, packet).await?;
+                      timeout(
+                        MT_CONNECTIONS_PACKET_WRITE_TIMEOUT,
+                        TPacket::write_packet(&mut tcp_write, packet),
+                      )
+                      .await
+                      .map_err(|_| anyhow::anyhow!("timed out writing packet to TCP stream"))??;
                     }
-                    Err(flume::RecvError::Disconnected) => {
-                      break;
-                    }
+                    Err(flume::RecvError::Disconnected) => break,
                   }
                 }
 
                 log::debug!("{side} write tcp stream loop ended");
 
                 anyhow::Ok(())
-              },
-              async move {
+              } => result,
+              result = async move {
                 while let Some(packet) = TPacket::read_next_packet(&mut tcp_read).await? {
                   packet_sender.send_async(packet).await?;
                 }
@@ -108,12 +116,14 @@ where
                 log::debug!("{side} read tcp stream loop ended");
 
                 anyhow::Ok(())
-              },
-            )
-            .inspect_err(|error| {
-              log::warn!("error copying bidirectional packet stream: {}", error);
-            })
-            .ok();
+              } => result,
+            };
+
+            copy_result
+              .inspect_err(|error| {
+                log::warn!("error copying bidirectional packet stream: {}", error);
+              })
+              .ok();
 
             let all_connections_closed =
               connection_count.fetch_sub(1, atomic::Ordering::Relaxed) == 1;

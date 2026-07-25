@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+  Arc,
+  atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use colored::Colorize;
@@ -13,6 +16,8 @@ use crate::{
   primitives::{BidiStream, OutExit, OutExitTag, SocketDestination},
   route::AnyRule,
 };
+
+static NEXT_PROXY_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
 
 #[async_trait]
 pub trait Node {
@@ -34,10 +39,25 @@ pub trait Node {
     let out_dispatchers = self.get_out_dispatchers();
 
     let Some((matched_exit, out_dispatcher)) = exits.iter().find_map(|route| {
-      out_dispatchers
+      let matching_dispatchers = out_dispatchers
         .iter()
-        .find(|dispatcher| dispatcher.match_exit(route))
-        .map(|dispatcher| (route, dispatcher))
+        .filter(|dispatcher| dispatcher.match_exit(route))
+        .collect_vec();
+
+      if matching_dispatchers.is_empty() {
+        return None;
+      }
+
+      // Preserve the established DIRECT-first behavior for ANY. Explicit
+      // proxy/tag routes are spread across equivalent OUT connections so each
+      // one has an independent QUIC and TCP congestion window.
+      let index = if *route == OutExit::Any {
+        0
+      } else {
+        NEXT_PROXY_DISPATCHER.fetch_add(1, Ordering::Relaxed) % matching_dispatchers.len()
+      };
+
+      Some((route, matching_dispatchers[index].clone()))
     }) else {
       log::info!("TCP {destination} no out dispatcher matched.");
       return Ok(());

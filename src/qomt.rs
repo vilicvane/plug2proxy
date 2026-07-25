@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
   mt_connections::{MtConnectionsPacket, mt_connections_connect},
-  quic_connection::{QuicBytesPacket, QuicConnection},
+  quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicConnection},
 };
 
 impl MtConnectionsPacket for QuicBytesPacket {
@@ -18,8 +18,16 @@ impl MtConnectionsPacket for QuicBytesPacket {
     stream: &mut (dyn AsyncRead + Unpin + Send),
   ) -> Result<Option<Self>, std::io::Error> {
     async {
-      let length = stream.read_u32().await?;
-      let mut buffer = vec![0; length as usize];
+      let length = stream.read_u32().await? as usize;
+
+      if length > MAX_DATAGRAM_SIZE {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          format!("QUIC packet length {length} exceeds maximum"),
+        ));
+      }
+
+      let mut buffer = vec![0; length];
       stream.read_exact(&mut buffer).await?;
 
       Ok(Some(buffer.into()))

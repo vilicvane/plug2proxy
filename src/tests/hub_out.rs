@@ -9,12 +9,16 @@ use crate::{
 };
 use lits::duration;
 use lowkit::{UserInterruptExt, user_interrupt};
-use tokio::{net::TcpListener, time::sleep};
+use tokio::{
+  io::{AsyncReadExt, AsyncWriteExt},
+  net::TcpListener,
+  time::sleep,
+};
 
 #[tokio::test]
 #[test_log::test]
 async fn test_hub_out() -> anyhow::Result<()> {
-  let test_dir = test_dir();
+  let test_dir = test_dir().join("hub_out");
 
   let hub_dir = test_dir.join("hub");
   let out_dir = test_dir.join("out");
@@ -27,6 +31,9 @@ async fn test_hub_out() -> anyhow::Result<()> {
   let hub_tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
 
   let hub_address = hub_tcp_listener.local_addr()?;
+
+  let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+  let http_address = http_listener.local_addr()?;
 
   let socks5_listen_address = get_free_local_tcp_address();
 
@@ -77,6 +84,28 @@ async fn test_hub_out() -> anyhow::Result<()> {
       anyhow::Ok(())
     },
     async {
+      let http_server = tokio::spawn(async move {
+        let (mut stream, _) = http_listener.accept().await?;
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+          let length = stream.read(&mut buffer).await?;
+
+          if length == 0 {
+            anyhow::bail!("HTTP client closed before completing its request");
+          }
+
+          request.extend_from_slice(&buffer[..length]);
+        }
+
+        stream
+          .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nproxied")
+          .await?;
+
+        anyhow::Ok(())
+      });
+
       sleep(duration!("200ms")).await;
 
       let proxy = reqwest::Proxy::all(format!("socks5://{}", socks5_listen_address))?;
@@ -84,14 +113,16 @@ async fn test_hub_out() -> anyhow::Result<()> {
       let client = reqwest::Client::builder().proxy(proxy).build()?;
 
       let response = client
-        .get("http://httpbin.org/ip")
+        .get(format!("http://{http_address}/"))
         .send()
         .await?
         .error_for_status()?;
 
       let body = response.text().await?;
 
-      log::debug!("response: {}", body);
+      assert_eq!(body, "proxied");
+
+      http_server.await??;
 
       user_interrupt()?;
 

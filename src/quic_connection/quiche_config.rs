@@ -8,7 +8,8 @@ use lits::{bytes, duration};
 
 pub const MAX_DATAGRAM_SIZE: usize = bytes!("64 KiB") as usize;
 
-pub const MAX_DATA_BUFFER_SIZE: u64 = bytes!("64 MiB");
+pub const MAX_DATA_BUFFER_SIZE_PER_STREAM: u64 = bytes!("64 MiB");
+pub const MAX_DATA_BUFFER_SIZE: u64 = MAX_DATA_BUFFER_SIZE_PER_STREAM * 8;
 
 pub static UNSPECIFIED_SOCKET_ADDRESS: LazyLock<SocketAddr> =
   LazyLock::new(|| SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)));
@@ -23,12 +24,16 @@ pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche
   config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
   config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
   config.set_initial_max_data(MAX_DATA_BUFFER_SIZE);
-  config.set_initial_max_stream_data_bidi_local(MAX_DATA_BUFFER_SIZE);
-  config.set_initial_max_stream_data_bidi_remote(MAX_DATA_BUFFER_SIZE);
-  config.set_initial_max_stream_data_uni(MAX_DATA_BUFFER_SIZE);
+  config.set_initial_max_stream_data_bidi_local(MAX_DATA_BUFFER_SIZE_PER_STREAM);
+  config.set_initial_max_stream_data_bidi_remote(MAX_DATA_BUFFER_SIZE_PER_STREAM);
+  config.set_initial_max_stream_data_uni(MAX_DATA_BUFFER_SIZE_PER_STREAM);
   config.set_initial_max_streams_bidi(1024);
   config.set_initial_max_streams_uni(1024);
   config.set_disable_active_migration(true);
+  // QomT is carried by TCP, whose kernel congestion control already paces
+  // writes. QUIC pacing here would throttle the same bytes a second time and
+  // prevent independent TCP-backed QUIC connections from filling their paths.
+  config.enable_pacing(false);
 
   config.load_cert_chain_from_pem_file(pem_path)?;
   config.load_priv_key_from_pem_file(pem_path)?;

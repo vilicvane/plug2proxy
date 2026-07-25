@@ -10,9 +10,9 @@ use tokio::{
 
 use crate::{
   mt_connections::{
-    MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsMagic,
-    MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
-    MtConnectionsResponseHead, MtConnectionsResponseHeadData,
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections,
+    MtConnectionsMagic, MtConnectionsPacket, MtConnectionsRequestHead,
+    MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
   primitives::ConnectionSide,
   utils::postcard::{PostcardStreamError, postcard_read_stream},
@@ -25,14 +25,29 @@ pub async fn mt_connections_connect<TPacket>(
 where
   TPacket: MtConnectionsPacket,
 {
-  let mut tcp_stream = TcpStream::connect(address).await?;
+  let mut tcp_stream = timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    TcpStream::connect(address),
+  )
+  .await
+  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
   tcp_stream.set_nodelay(true)?;
 
-  send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create).await?;
+  timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create),
+  )
+  .await
+  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
   let id = {
-    let response_head = postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
+    let response_head = timeout(
+      MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+      postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream),
+    )
+    .await
+    .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
     match response_head.data {
       MtConnectionsResponseHeadData::Created(id) => id,
@@ -49,12 +64,28 @@ where
     let add_tcp_stream = || async {
       let tcp_stream = loop {
         if let Ok(tcp_stream) = async {
-          let mut tcp_stream = TcpStream::connect(address).await?;
+          let mut tcp_stream = timeout(
+            MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+            TcpStream::connect(address),
+          )
+          .await
+          .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
-          send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Extend(id)).await?;
+          tcp_stream.set_nodelay(true)?;
 
-          let response_head =
-            postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream).await?;
+          timeout(
+            MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+            send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Extend(id)),
+          )
+          .await
+          .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
+
+          let response_head = timeout(
+            MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+            postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream),
+          )
+          .await
+          .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
           match response_head.data {
             MtConnectionsResponseHeadData::Extended => Ok(tcp_stream),
@@ -111,30 +142,12 @@ where
         }
       }
 
-      for _ in 1..connections_to_extend {
-        let tcp_stream = loop {
-          if let Ok(tcp_stream) = TcpStream::connect(address).await.inspect_err(|error| {
-            log::warn!("error connecting to address {}: {}", address, error);
-          }) {
-            break tcp_stream;
-          }
-
-          sleep(duration!("5s")).await;
-        };
-
+      for _ in 0..connections_to_extend {
         if tcp_stream_close_receiver.is_closed() {
           break 'outer;
         }
 
-        tcp_stream.set_nodelay(true).unwrap();
-
-        if tcp_stream_sender
-          .send(tcp_stream)
-          .inspect_err(|error| {
-            log::warn!("error extending tcp stream to mt connections: {}", error);
-          })
-          .is_err()
-        {
+        if !add_tcp_stream().await {
           break 'outer;
         }
       }
@@ -150,6 +163,8 @@ pub enum MtConnectionsConnectError {
   Io(#[from] std::io::Error),
   #[error("Postcard deserialization error: {0}")]
   PostcardDeserialization(postcard::Error),
+  #[error("mTCP handshake timed out")]
+  HandshakeTimeout,
   #[error("Invalid response head")]
   InvalidResponseHead,
 }

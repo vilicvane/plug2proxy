@@ -1,13 +1,13 @@
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use lowkit::SelfWrapExt;
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
+use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc, time::timeout};
 
 use crate::{
   mt_connections::{
-    MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsId, MtConnectionsMagic,
-    MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
-    MtConnectionsResponseHead, MtConnectionsResponseHeadData,
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections,
+    MtConnectionsId, MtConnectionsMagic, MtConnectionsPacket, MtConnectionsRequestHead,
+    MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
   },
   primitives::ConnectionSide,
   utils::postcard::{PostcardStreamError, postcard_read_stream},
@@ -38,13 +38,40 @@ where
     loop {
       let (mut stream, _) = self.listener.accept().await?;
 
-      let request_head = postcard_read_stream::<MtConnectionsRequestHead>(&mut stream).await?;
+      let Ok(request_head_result) = timeout(
+        MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+        postcard_read_stream::<MtConnectionsRequestHead>(&mut stream),
+      )
+      .await
+      else {
+        log::warn!("timed out reading request head from incoming mTCP connection");
+        continue;
+      };
+
+      let Ok(request_head) = request_head_result.inspect_err(|error| {
+        log::warn!("error reading request head from incoming mTCP connections: {error}")
+      }) else {
+        continue;
+      };
 
       match request_head.data {
         MtConnectionsRequestHeadData::Create => {
           let id = MtConnectionsId::new();
 
-          send_response_head(&mut stream, MtConnectionsResponseHeadData::Created(id)).await?;
+          if send_response_head_with_timeout(
+            &mut stream,
+            MtConnectionsResponseHeadData::Created(id),
+          )
+          .await
+          .inspect_err(|error| {
+            log::warn!(
+              "error sending response head (created) to incoming mTCP connections: {error}"
+            )
+          })
+          .is_err()
+          {
+            continue;
+          }
 
           let (mt_connections, tcp_stream_sender, _) =
             MtConnections::new(stream, ConnectionSide::Server);
@@ -59,11 +86,34 @@ where
         }
         MtConnectionsRequestHeadData::Extend(id) => {
           if let Some(tcp_stream_sender) = self.tcp_stream_sender_map.get(&id) {
-            send_response_head(&mut stream, MtConnectionsResponseHeadData::Extended).await?;
+            if send_response_head_with_timeout(&mut stream, MtConnectionsResponseHeadData::Extended)
+              .await
+              .inspect_err(|error| {
+                log::warn!(
+                  "error sending response head (extended) to incoming mTCP connections: {error}"
+                )
+              })
+              .is_err()
+            {
+              continue;
+            }
 
             tcp_stream_sender.send(stream).ok();
           } else {
-            send_response_head(&mut stream, MtConnectionsResponseHeadData::AlreadyClosed).await?;
+            if send_response_head_with_timeout(
+              &mut stream,
+              MtConnectionsResponseHeadData::AlreadyClosed,
+            )
+            .await
+            .inspect_err(|error| {
+              log::warn!(
+                "error sending response head (already closed) to incoming mTCP connections: {error}"
+              )
+            })
+            .is_err()
+            {
+              continue;
+            }
           }
         }
       }
@@ -77,6 +127,8 @@ pub enum MtConnectionsListenerError {
   Io(#[from] std::io::Error),
   #[error("Postcard deserialization error: {0}")]
   PostcardDeserialization(postcard::Error),
+  #[error("mTCP handshake timed out")]
+  HandshakeTimeout,
 }
 
 impl From<PostcardStreamError> for MtConnectionsListenerError {
@@ -102,4 +154,16 @@ async fn send_response_head(
   stream.write_all(&bytes).await?;
 
   Ok(())
+}
+
+async fn send_response_head_with_timeout(
+  stream: &mut TcpStream,
+  data: MtConnectionsResponseHeadData,
+) -> Result<(), MtConnectionsListenerError> {
+  timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    send_response_head(stream, data),
+  )
+  .await
+  .map_err(|_| MtConnectionsListenerError::HandshakeTimeout)?
 }

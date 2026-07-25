@@ -1,13 +1,18 @@
-use std::{path::PathBuf, sync::LazyLock};
+use std::{
+  path::PathBuf,
+  sync::{Arc, LazyLock},
+};
 
 use futures::{SinkExt, StreamExt};
-use lits::bytes;
+use lits::{bytes, duration};
 use lowkit::SelfWrapExt;
 use rand::Rng;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
   net::TcpListener,
   sync::oneshot,
+  task::JoinSet,
+  time::{sleep, timeout},
 };
 
 use crate::{
@@ -343,7 +348,7 @@ async fn test_client_verification() -> anyhow::Result<()> {
     out_to_hub_packet_receiver.into_stream(),
   );
 
-  let (complete_sender, complete_receiver) = oneshot::channel();
+  let (hub_rejected_sender, hub_rejected_receiver) = oneshot::channel();
 
   tokio::try_join!(
     async {
@@ -361,15 +366,22 @@ async fn test_client_verification() -> anyhow::Result<()> {
         })
       ));
 
-      complete_receiver.await?;
+      hub_rejected_sender.send(()).unwrap();
 
       anyhow::Ok(())
     },
     async {
-      let error = out_quic_connection
-        .established()
-        .await
-        .expect_err("Should fail to establish connection");
+      let established_result = out_quic_connection.established().await;
+
+      hub_rejected_receiver.await?;
+
+      let error = match established_result {
+        Err(error) => error,
+        Ok(()) => out_quic_connection
+          .accept_stream()
+          .await
+          .expect_err("peer certificate rejection should close the connection"),
+      };
 
       assert!(matches!(
         error,
@@ -380,11 +392,236 @@ async fn test_client_verification() -> anyhow::Result<()> {
         })
       ));
 
-      complete_sender.send(()).unwrap();
-
       anyhow::Ok(())
     },
   )?;
 
   Ok(())
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn transport_close_wakes_stream_waiters() -> anyhow::Result<()> {
+  timeout(duration!("5s"), async {
+    let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+    let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
+    let connection_id = QuicConnection::generate_connection_id();
+
+    let out_quic_connection = QuicConnection::connect_with_sink_and_stream(
+      &connection_id,
+      &mut out_quiche_config,
+      out_to_hub_packet_sender.into_sink(),
+      hub_to_out_packet_receiver.into_stream(),
+    );
+
+    let hub_quic_connection = QuicConnection::accept_with_sink_and_stream(
+      out_quic_connection.id(),
+      &mut hub_quiche_config,
+      hub_to_out_packet_sender.into_sink(),
+      out_to_hub_packet_receiver.into_stream(),
+    );
+
+    tokio::try_join!(
+      out_quic_connection.established(),
+      hub_quic_connection.established()
+    )?;
+
+    drop(hub_quic_connection);
+
+    let error = timeout(duration!("1s"), out_quic_connection.accept_stream())
+      .await
+      .map_err(|_| anyhow::anyhow!("stream waiter was not woken after transport close"))?
+      .expect_err("transport close should be reported as an error");
+
+    assert!(matches!(
+      error,
+      QuicConnectionError::UnderlyingTransportClosed
+    ));
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn locally_opened_stream_can_wait_before_first_send() -> anyhow::Result<()> {
+  timeout(duration!("5s"), async {
+    let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+    let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
+    let connection_id = QuicConnection::generate_connection_id();
+
+    let out_quic_connection = QuicConnection::connect_with_sink_and_stream(
+      &connection_id,
+      &mut out_quiche_config,
+      out_to_hub_packet_sender.into_sink(),
+      hub_to_out_packet_receiver.into_stream(),
+    );
+
+    let hub_quic_connection = QuicConnection::accept_with_sink_and_stream(
+      out_quic_connection.id(),
+      &mut hub_quiche_config,
+      hub_to_out_packet_sender.into_sink(),
+      out_to_hub_packet_receiver.into_stream(),
+    );
+
+    tokio::try_join!(
+      async {
+        out_quic_connection.established().await?;
+
+        let mut stream = out_quic_connection.open_stream();
+
+        // Let the receive task run before stream_send() creates the stream in
+        // quiche. This used to race into InvalidStreamState or a lost wakeup.
+        tokio::task::yield_now().await;
+
+        stream.write_all(b"request").await?;
+        stream.shutdown().await?;
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        assert_eq!(response, b"response");
+
+        anyhow::Ok(())
+      },
+      async {
+        hub_quic_connection.established().await?;
+
+        let mut stream = hub_quic_connection
+          .accept_stream()
+          .await?
+          .ok_or_else(|| anyhow::anyhow!("missing peer stream"))?;
+
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).await?;
+        assert_eq!(request, b"request");
+
+        sleep(duration!("20ms")).await;
+        stream.write_all(b"response").await?;
+        stream.shutdown().await?;
+
+        anyhow::Ok(())
+      },
+    )?;
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()> {
+  const STREAM_COUNT: u8 = 32;
+
+  timeout(duration!("30s"), async {
+    let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+    let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
+    let delayed_hub_packets = hub_to_out_packet_receiver
+      .into_stream()
+      .then(|packet| async move {
+        sleep(duration!("20ms")).await;
+        packet
+      });
+    let delayed_out_packets = out_to_hub_packet_receiver
+      .into_stream()
+      .then(|packet| async move {
+        sleep(duration!("20ms")).await;
+        packet
+      });
+
+    let connection_id = QuicConnection::generate_connection_id();
+
+    let out_quic_connection = Arc::new(QuicConnection::connect_with_sink_and_stream(
+      &connection_id,
+      &mut out_quiche_config,
+      out_to_hub_packet_sender.into_sink(),
+      Box::pin(delayed_hub_packets),
+    ));
+
+    let hub_quic_connection = Arc::new(QuicConnection::accept_with_sink_and_stream(
+      out_quic_connection.id(),
+      &mut hub_quiche_config,
+      hub_to_out_packet_sender.into_sink(),
+      Box::pin(delayed_out_packets),
+    ));
+
+    tokio::try_join!(
+      out_quic_connection.established(),
+      hub_quic_connection.established()
+    )?;
+
+    tokio::try_join!(
+      async {
+        let mut tasks = JoinSet::new();
+
+        for value in 0..STREAM_COUNT {
+          let connection = out_quic_connection.clone();
+
+          tasks.spawn(async move {
+            let mut stream = connection.open_stream();
+            stream.write_all(&[value]).await?;
+            stream.shutdown().await?;
+
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            anyhow::ensure!(response == vec![value; 32]);
+
+            anyhow::Ok(())
+          });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+          result??;
+        }
+
+        anyhow::Ok(())
+      },
+      async {
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..STREAM_COUNT {
+          let mut stream = hub_quic_connection
+            .accept_stream()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing peer stream"))?;
+
+          tasks.spawn(async move {
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).await?;
+            anyhow::ensure!(request.len() == 1);
+
+            stream.write_all(&vec![request[0]; 32]).await?;
+            stream.shutdown().await?;
+
+            anyhow::Ok(())
+          });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+          result??;
+        }
+
+        anyhow::Ok(())
+      },
+    )?;
+
+    anyhow::Ok(())
+  })
+  .await?
 }
