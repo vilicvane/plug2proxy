@@ -1884,6 +1884,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_yaml",
+ "socket2",
  "socks5-server",
  "test-log",
  "thiserror 2.0.17",

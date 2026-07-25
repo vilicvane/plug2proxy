@@ -4,6 +4,7 @@ use futures::{SinkExt, StreamExt};
 use lits::duration;
 use lowkit::SelfWrapExt;
 use rand::Rng;
+use socket2::SockRef;
 use tokio::{
   io::copy_bidirectional,
   net::{TcpListener, TcpStream},
@@ -27,6 +28,38 @@ static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
   rand::rng().fill(&mut random_data[..]);
   random_data
 });
+
+#[tokio::test]
+async fn configures_tcp_liveness_detection() -> anyhow::Result<()> {
+  let listener = TcpListener::bind("127.0.0.1:0").await?;
+  let address = listener.local_addr()?;
+
+  let connect = TcpStream::connect(address);
+  let accept = listener.accept();
+  let (client_stream, _) = tokio::try_join!(connect, accept)?;
+
+  configure_mt_tcp_stream(&client_stream)?;
+
+  let socket = SockRef::from(&client_stream);
+  assert!(socket.keepalive()?);
+  assert_eq!(socket.tcp_keepalive_time()?, MT_CONNECTIONS_KEEPALIVE_TIME);
+  assert_eq!(
+    socket.tcp_keepalive_interval()?,
+    MT_CONNECTIONS_KEEPALIVE_INTERVAL
+  );
+  assert_eq!(
+    socket.tcp_keepalive_retries()?,
+    MT_CONNECTIONS_KEEPALIVE_RETRIES
+  );
+
+  #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+  assert_eq!(
+    socket.tcp_user_timeout()?,
+    Some(MT_CONNECTIONS_TCP_USER_TIMEOUT)
+  );
+
+  Ok(())
+}
 
 #[tokio::test]
 #[test_log::test]

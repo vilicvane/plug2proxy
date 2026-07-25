@@ -12,6 +12,7 @@ use std::{
 use futures::{Sink, Stream};
 use lowkit::{SelfWrapExt, TurnArcWeak, tokio_join_set};
 use serde::{Deserialize, Serialize};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::{
   io::{AsyncRead, AsyncWrite},
   net::TcpStream,
@@ -25,6 +26,27 @@ use crate::primitives::ConnectionSide;
 
 pub const MT_CONNECTIONS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MT_CONNECTIONS_PACKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MT_CONNECTIONS_KEEPALIVE_TIME: Duration = Duration::from_secs(30);
+pub const MT_CONNECTIONS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+pub const MT_CONNECTIONS_KEEPALIVE_RETRIES: u32 = 3;
+pub const MT_CONNECTIONS_TCP_USER_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub(crate) fn configure_mt_tcp_stream(tcp_stream: &TcpStream) -> std::io::Result<()> {
+  tcp_stream.set_nodelay(true)?;
+
+  let socket = SockRef::from(tcp_stream);
+  socket.set_tcp_keepalive(
+    &TcpKeepalive::new()
+      .with_time(MT_CONNECTIONS_KEEPALIVE_TIME)
+      .with_interval(MT_CONNECTIONS_KEEPALIVE_INTERVAL)
+      .with_retries(MT_CONNECTIONS_KEEPALIVE_RETRIES),
+  )?;
+
+  #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+  socket.set_tcp_user_timeout(Some(MT_CONNECTIONS_TCP_USER_TIMEOUT))?;
+
+  Ok(())
+}
 
 pub struct MtConnections<TPacket>
 where

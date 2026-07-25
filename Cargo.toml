@@ -43,6 +43,7 @@ reqwest = { version = "0.13.1", features = ["socks"] }
 serde = "1.0.228"
 serde_yaml = "0.9.34"
 socks5-server = "0.10.1"
+socket2 = { version = "0.6.1", features = ["all"] }
 thiserror = "2.0.17"
 time = "0.3.45"
 tokio = { version = "1.49.0", features = ["full"] }

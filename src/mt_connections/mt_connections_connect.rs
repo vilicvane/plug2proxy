@@ -13,6 +13,7 @@ use crate::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections,
     MtConnectionsMagic, MtConnectionsPacket, MtConnectionsRequestHead,
     MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
+    configure_mt_tcp_stream,
   },
   primitives::ConnectionSide,
   utils::postcard::{PostcardStreamError, postcard_read_stream},
@@ -32,7 +33,7 @@ where
   .await
   .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
-  tcp_stream.set_nodelay(true)?;
+  configure_mt_tcp_stream(&tcp_stream)?;
 
   timeout(
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
@@ -71,7 +72,7 @@ where
           .await
           .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
-          tcp_stream.set_nodelay(true)?;
+          configure_mt_tcp_stream(&tcp_stream)?;
 
           timeout(
             MT_CONNECTIONS_HANDSHAKE_TIMEOUT,

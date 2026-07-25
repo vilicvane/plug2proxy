@@ -8,6 +8,7 @@ use crate::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections,
     MtConnectionsId, MtConnectionsMagic, MtConnectionsPacket, MtConnectionsRequestHead,
     MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
+    configure_mt_tcp_stream,
   },
   primitives::ConnectionSide,
   utils::postcard::{PostcardStreamError, postcard_read_stream},
@@ -37,6 +38,15 @@ where
   pub async fn accept(&mut self) -> Result<MtConnections<TPacket>, MtConnectionsListenerError> {
     loop {
       let (mut stream, _) = self.listener.accept().await?;
+
+      if configure_mt_tcp_stream(&stream)
+        .inspect_err(|error| {
+          log::warn!("error configuring incoming mTCP connection: {error}");
+        })
+        .is_err()
+      {
+        continue;
+      }
 
       let Ok(request_head_result) = timeout(
         MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
