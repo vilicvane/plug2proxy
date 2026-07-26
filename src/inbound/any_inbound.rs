@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 
 use crate::{
-  inbound::{Error, Inbound, InboundUdpPacketStream, Socks5Inbound},
+  inbound::{Error, Inbound, Socks5Inbound},
   primitives::{BidiStream, SocketDestination},
+  udp_forwarder::InboundUdpPacketStream,
 };
 
 #[derive(derive_more::From, Debug)]

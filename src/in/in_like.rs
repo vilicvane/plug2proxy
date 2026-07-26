@@ -8,6 +8,7 @@ use crate::{
   node::{self, Node},
   primitives::{BidiStream, SocketDestination},
   route::Router,
+  udp_forwarder::InboundUdpPacketStream,
   utils::task::reap_finished_tasks,
 };
 
@@ -46,6 +47,15 @@ pub trait InLike: Node + 'static {
   }
 
   async fn run_inbound(self: Arc<Self>, inbound: Arc<AnyInbound>) -> anyhow::Result<()> {
+    tokio::try_join!(
+      self.clone().run_inbound_tcp(inbound.clone()),
+      self.run_inbound_udp(inbound),
+    )?;
+
+    Ok(())
+  }
+
+  async fn run_inbound_tcp(self: Arc<Self>, inbound: Arc<AnyInbound>) -> anyhow::Result<()> {
     let mut join_set = JoinSet::new();
 
     loop {
@@ -65,6 +75,14 @@ pub trait InLike: Node + 'static {
           .ok();
       });
     }
+  }
+
+  async fn run_inbound_udp(self: Arc<Self>, inbound: Arc<AnyInbound>) -> anyhow::Result<()> {
+    let packet_stream: Box<dyn InboundUdpPacketStream> = inbound.get_udp_packet_stream().await?;
+
+    self.route_udp(self.router(), packet_stream).await?;
+
+    Ok(())
   }
 }
 

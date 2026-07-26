@@ -16,6 +16,7 @@ use crate::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
   },
   quic_connection::{QuicConnection, State as QuicConnectionState},
+  udp_forwarder::{IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket, UdpPacketStream},
 };
 
 pub struct NodeOutDispatcher {
@@ -154,5 +155,34 @@ impl OutDispatcher for NodeOutDispatcher {
     }
 
     Ok(stream.wrap_box())
+  }
+
+  async fn associate(&self, exit: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return Err(Error::OutDispatcherUnavailable);
+    }
+
+    let mut stream = self.qomt_connection.open_stream();
+    let message = NodeMessageToOut::Associate(exit);
+
+    if let Err(error) = stream
+      .write_all(&postcard::to_allocvec(&message).unwrap())
+      .await
+    {
+      if self.qomt_connection.state() != QuicConnectionState::Established {
+        return Err(Error::OutDispatcherUnavailable);
+      }
+
+      return Err(error.into());
+    }
+
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return Err(Error::OutDispatcherUnavailable);
+    }
+
+    Ok(Box::new(UdpPacketStream::<
+      OutgoingUdpPacket,
+      IncomingUdpPacket,
+    >::new(Box::new(stream))))
   }
 }

@@ -10,11 +10,13 @@ use futures::{Sink, Stream};
 use lits::duration;
 use lowkit::{SelfWrapExt, tokio_join_set};
 use moka::sync::Cache;
+#[cfg(target_os = "linux")]
+use socket2::SockRef;
 use tokio::{net::UdpSocket, task::JoinSet};
 
 use crate::{
   primitives::SocketDestinationHost,
-  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource},
+  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource, UdpPacketStreamError},
   utils::net::SocketAddressExt,
 };
 
@@ -26,6 +28,10 @@ pub struct UdpForwarder {
 
 impl UdpForwarder {
   pub fn new() -> Self {
+    Self::with_interface(None)
+  }
+
+  pub fn with_interface(interface: Option<String>) -> Self {
     let (external_packet_sender, packet_receiver) = flume::unbounded();
     let (packet_sender, external_packet_receiver) = flume::unbounded();
 
@@ -46,12 +52,17 @@ impl UdpForwarder {
             break;
           };
 
-          Self::send_outgoing_packet(sockets.clone(), packet_sender.clone(), packet)
-            .await
-            .inspect_err(|error| {
-              log::error!("error sending outgoing packet: {}", error);
-            })
-            .ok();
+          Self::send_outgoing_packet(
+            sockets.clone(),
+            packet_sender.clone(),
+            interface.as_deref(),
+            packet,
+          )
+          .await
+          .inspect_err(|error| {
+            log::error!("error sending outgoing packet: {}", error);
+          })
+          .ok();
         }
       }),
     }
@@ -60,6 +71,7 @@ impl UdpForwarder {
   async fn send_outgoing_packet(
     sockets: Cache<UdpPacketSource, SocketTuple>,
     packet_sender: flume::Sender<IncomingUdpPacket>,
+    interface: Option<&str>,
     OutgoingUdpPacket {
       source,
       destination,
@@ -98,7 +110,9 @@ impl UdpForwarder {
             std::io::Error::other("Unable to resolve connectable destination socket address")
           })?;
 
-        let socket = UdpSocket::bind(source.address.unspecified()).await?.arc();
+        let socket = UdpSocket::bind(source.address.unspecified()).await?;
+        bind_socket_to_interface(&socket, interface)?;
+        let socket = socket.arc();
 
         let mut destination_map = HashMap::new();
 
@@ -132,7 +146,7 @@ impl UdpForwarder {
     source: UdpPacketSource,
     socket: Arc<UdpSocket>,
   ) {
-    let mut buffer = vec![0; 1500];
+    let mut buffer = vec![0; u16::MAX as usize];
 
     loop {
       let Ok((length, source_socket_address)) =
@@ -165,22 +179,30 @@ type SocketTuple = (
 );
 
 impl Sink<OutgoingUdpPacket> for UdpForwarder {
-  type Error = flume::SendError<OutgoingUdpPacket>;
+  type Error = UdpPacketStreamError;
 
   fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Pin::new(&mut self.packet_sink).poll_ready(cx)
+    Pin::new(&mut self.packet_sink)
+      .poll_ready(cx)
+      .map_err(|_| UdpPacketStreamError::Closed)
   }
 
   fn start_send(mut self: Pin<&mut Self>, item: OutgoingUdpPacket) -> Result<(), Self::Error> {
-    Pin::new(&mut self.packet_sink).start_send(item)
+    Pin::new(&mut self.packet_sink)
+      .start_send(item)
+      .map_err(|_| UdpPacketStreamError::Closed)
   }
 
   fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Pin::new(&mut self.packet_sink).poll_flush(cx)
+    Pin::new(&mut self.packet_sink)
+      .poll_flush(cx)
+      .map_err(|_| UdpPacketStreamError::Closed)
   }
 
   fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Pin::new(&mut self.packet_sink).poll_close(cx)
+    Pin::new(&mut self.packet_sink)
+      .poll_close(cx)
+      .map_err(|_| UdpPacketStreamError::Closed)
   }
 }
 
@@ -196,6 +218,27 @@ impl Default for UdpForwarder {
   fn default() -> Self {
     Self::new()
   }
+}
+
+#[cfg(target_os = "linux")]
+fn bind_socket_to_interface(socket: &UdpSocket, interface: Option<&str>) -> std::io::Result<()> {
+  if let Some(interface) = interface {
+    SockRef::from(socket).bind_device(Some(interface.as_bytes()))?;
+  }
+
+  Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bind_socket_to_interface(_: &UdpSocket, interface: Option<&str>) -> std::io::Result<()> {
+  if interface.is_some() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::Unsupported,
+      "bind.interface is only supported on Linux",
+    ));
+  }
+
+  Ok(())
 }
 
 #[cfg(test)]
@@ -265,6 +308,36 @@ mod tests {
     assert_eq!(incoming_packet.payload, payload);
     assert_eq!(incoming_packet.destination, server_address);
     assert_eq!(incoming_packet.source.address, source_address);
+  }
+
+  #[tokio::test]
+  async fn test_packet_larger_than_ethernet_mtu() {
+    let server_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+    let server_address = server_socket.local_addr().unwrap();
+    let payload = vec![0x5a; 4096];
+    let expected_payload = payload.clone();
+    let server_handle = tokio::spawn(async move {
+      let mut buffer = vec![0; 8192];
+      let (length, source) = server_socket.recv_from(&mut buffer).await.unwrap();
+      server_socket
+        .send_to(&buffer[..length], source)
+        .await
+        .unwrap();
+    });
+    let mut forwarder = UdpForwarder::new();
+
+    forwarder
+      .send(OutgoingUdpPacket {
+        source: create_source("[::1]:12349".parse().unwrap()),
+        destination: create_destination(server_address),
+        payload,
+      })
+      .await
+      .unwrap();
+
+    server_handle.await.unwrap();
+    let incoming = forwarder.next().await.unwrap();
+    assert_eq!(incoming.payload, expected_payload);
   }
 
   #[tokio::test]

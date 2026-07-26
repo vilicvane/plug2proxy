@@ -11,9 +11,13 @@ use crate::{
 };
 use lits::duration;
 use lowkit::{UserInterruptExt, user_interrupt};
+use socks5_server::{
+  AssociatedUdpSocket,
+  proto::{Address, Reply, UdpHeader},
+};
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
-  net::TcpListener,
+  net::{TcpListener, TcpStream, UdpSocket},
   time::{sleep, timeout},
 };
 
@@ -38,6 +42,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
 
   let http_listener = TcpListener::bind("127.0.0.1:0").await?;
   let http_address = http_listener.local_addr()?;
+  let udp_echo_socket = UdpSocket::bind(http_address).await?;
 
   let socks5_listen_address = get_free_local_tcp_address();
 
@@ -161,6 +166,48 @@ async fn test_hub_out() -> anyhow::Result<()> {
       assert_eq!(body, "proxied");
 
       http_server.await??;
+
+      let udp_echo_server = tokio::spawn(async move {
+        let mut buffer = [0; 1500];
+        let (length, source) = udp_echo_socket.recv_from(&mut buffer).await?;
+        udp_echo_socket.send_to(&buffer[..length], source).await?;
+
+        std::io::Result::Ok(())
+      });
+      let mut control_stream = TcpStream::connect(socks5_listen_address).await?;
+      let handshake_request = socks5_server::proto::handshake::Request::new(vec![
+        socks5_server::proto::handshake::Method::NONE,
+      ]);
+      handshake_request.write_to(&mut control_stream).await?;
+      socks5_server::proto::handshake::Response::read_from(&mut control_stream).await?;
+      let udp_socket = UdpSocket::bind("127.0.0.1:0").await?;
+      let associate_request = socks5_server::proto::Request::new(
+        socks5_server::proto::Command::Associate,
+        Address::SocketAddress(udp_socket.local_addr()?),
+      );
+      associate_request.write_to(&mut control_stream).await?;
+      let associate_response =
+        socks5_server::proto::Response::read_from(&mut control_stream).await?;
+      assert!(matches!(associate_response.reply, Reply::Succeeded));
+      let Address::SocketAddress(udp_relay_address) = associate_response.address else {
+        anyhow::bail!("expected SOCKS5 UDP relay socket address");
+      };
+      let udp_socket = AssociatedUdpSocket::new(udp_socket, u16::MAX as usize);
+
+      udp_socket
+        .send_to(
+          b"udp proxied",
+          &UdpHeader::new(0, Address::SocketAddress(http_address)),
+          udp_relay_address,
+        )
+        .await?;
+
+      let (payload, header, _) = timeout(duration!("5s"), udp_socket.recv_from())
+        .await?
+        .map_err(|(error, _)| std::io::Error::from(error))?;
+      assert_eq!(&payload[..], b"udp proxied");
+      assert_eq!(header.address, Address::SocketAddress(http_address));
+      udp_echo_server.await??;
 
       user_interrupt()?;
 

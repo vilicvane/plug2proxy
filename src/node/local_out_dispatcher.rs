@@ -12,6 +12,7 @@ use crate::{
     BidiStream, OutExit, OutExitMatch, OutExitTag, OutExits, SocketDestination,
     SocketDestinationHost,
   },
+  udp_forwarder::{OutboundUdpPacketStream, UdpForwarder},
 };
 
 const MAX_LINUX_INTERFACE_NAME_LENGTH: usize = 15;
@@ -92,6 +93,12 @@ impl OutDispatcher for LocalOutDispatcher {
     };
 
     Ok(tcp_stream.wrap_box())
+  }
+
+  async fn associate(&self, _: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
+    Ok(Box::new(UdpForwarder::with_interface(
+      self.interface.clone(),
+    )))
   }
 }
 

@@ -27,6 +27,7 @@ use crate::{
   primitives::OutExits,
   qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept, qomt_connect},
   quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
+  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
     task::reap_finished_tasks,
@@ -265,14 +266,18 @@ impl Out {
                 .tcp_connect(vec![exit], destination, stream.wrap_box())
                 .await?;
             }
-            NodeMessageToOut::Associate(exit, destination) => todo!(),
+            NodeMessageToOut::Associate(exit) => {
+              let packet_stream =
+                UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
+              this.relay_udp(exit, Box::new(packet_stream)).await?;
+            }
           }
 
           anyhow::Ok(())
         }
         .await
         .inspect_err(|error| {
-          log::error!("error handling TCP stream: {}", error);
+          log::error!("error handling node stream: {}", error);
         })
         .ok();
       });
@@ -336,11 +341,12 @@ pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow
 
 #[cfg(test)]
 mod tests {
+  use futures::{SinkExt, StreamExt};
   use lits::duration;
   use lowkit::SelfWrapExt;
   use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     time::timeout,
   };
 
@@ -350,6 +356,7 @@ mod tests {
     node::DefaultLocalExit,
     primitives::{OutExit, OutExitTag, SocketDestination, SocketDestinationHost},
     test::test_dir,
+    udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource, UdpPacketStream},
   };
 
   #[test]
@@ -390,7 +397,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn peer_listener_accepts_in_and_forwards_tagged_tcp() -> anyhow::Result<()> {
+  async fn peer_listener_accepts_in_and_forwards_tagged_tcp_and_udp() -> anyhow::Result<()> {
     timeout(duration!("15s"), async {
       let test_dir = test_dir().join(format!("peer_out_{}", uuid::Uuid::new_v4()));
       let in_dir = test_dir.join("in");
@@ -404,6 +411,7 @@ mod tests {
       let peer_endpoint = peer_listener.local_addr()?;
       let target_listener = TcpListener::bind("127.0.0.1:0").await?;
       let target_address = target_listener.local_addr()?;
+      let udp_target = UdpSocket::bind(target_address).await?;
 
       let out = Out::new(OutOptions {
         local_out_dispatchers: vec![LocalOutDispatcher::new_default(
@@ -465,6 +473,47 @@ mod tests {
       stream.shutdown().await?;
 
       target_task.await??;
+
+      let udp_target_task = tokio::spawn(async move {
+        let mut buffer = [0; 1500];
+        let (length, source) = udp_target.recv_from(&mut buffer).await?;
+        udp_target.send_to(&buffer[..length], source).await?;
+
+        std::io::Result::Ok(())
+      });
+      let mut stream = qomt_connection.open_stream();
+      stream
+        .write_all(
+          &postcard::to_allocvec(&NodeMessageToOut::Associate(OutExit::from("system"))).unwrap(),
+        )
+        .await?;
+      let mut udp_stream =
+        UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(stream));
+      let source = UdpPacketSource {
+        via: vec![],
+        address: "127.0.0.1:12345".parse()?,
+      };
+
+      udp_stream
+        .send(OutgoingUdpPacket {
+          source: source.clone(),
+          destination: SocketDestination {
+            host: SocketDestinationHost::IpAddress(target_address.ip()),
+            port: target_address.port(),
+          },
+          payload: b"udp ping".to_vec(),
+        })
+        .await?;
+
+      let response = udp_stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("peer UDP stream closed before response"))?;
+      assert_eq!(response.source, source);
+      assert_eq!(response.destination, target_address);
+      assert_eq!(response.payload, b"udp ping");
+      udp_target_task.await??;
+
       peer_listener_task.abort();
 
       anyhow::Ok(())

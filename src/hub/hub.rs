@@ -32,6 +32,7 @@ use crate::{
   qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept},
   quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
   route::{GeoLite2, Router},
+  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
     task::reap_finished_tasks,
@@ -266,14 +267,18 @@ impl Hub {
                 .tcp_connect(vec![exit], destination, stream.wrap_box())
                 .await?;
             }
-            NodeMessageToOut::Associate(exit, destination) => todo!(),
+            NodeMessageToOut::Associate(exit) => {
+              let packet_stream =
+                UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
+              this.relay_udp(exit, Box::new(packet_stream)).await?;
+            }
           }
 
           anyhow::Ok(())
         }
         .await
         .inspect_err(|error| {
-          log::error!("error handling CONNECT stream: {}", error);
+          log::error!("error handling IN node stream: {}", error);
         })
         .ok();
       });

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::{
   node::Error,
   primitives::{BidiStream, OutExit, OutExitMatch, SocketDestination},
+  udp_forwarder::OutboundUdpPacketStream,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,4 +32,14 @@ pub trait OutDispatcher: Send + Sync {
     exit: OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn BidiStream>, Error>;
+
+  async fn associate(&self, _exit: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
+    Err(
+      std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "UDP is not supported by this dispatcher",
+      )
+      .into(),
+    )
+  }
 }

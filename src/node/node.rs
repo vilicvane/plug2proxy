@@ -1,4 +1,5 @@
 use std::{
+  collections::HashMap,
   net::SocketAddr,
   sync::{
     Arc,
@@ -9,9 +10,10 @@ use std::{
 
 use async_trait::async_trait;
 use colored::Colorize;
+use futures::{SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use tokio::io::copy_bidirectional;
+use tokio::{io::copy_bidirectional, sync::mpsc, task::JoinSet};
 use uuid::Uuid;
 
 use crate::{
@@ -20,7 +22,11 @@ use crate::{
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
   },
-  route::AnyRule,
+  route::{AnyRule, Router},
+  udp_forwarder::{
+    InboundUdpPacketStream, IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket,
+    UdpPacketStreamError,
+  },
 };
 
 static NEXT_OUT_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
@@ -112,6 +118,205 @@ pub trait Node {
       return Ok(());
     }
   }
+
+  async fn route_udp(
+    &self,
+    router: &Router,
+    packet_stream: Box<dyn InboundUdpPacketStream>,
+  ) -> Result<(), Error> {
+    forward_udp(self, UdpRoute::Router(router), packet_stream).await
+  }
+
+  async fn relay_udp(
+    &self,
+    exit: OutExit,
+    packet_stream: Box<dyn InboundUdpPacketStream>,
+  ) -> Result<(), Error> {
+    forward_udp(self, UdpRoute::Fixed(exit), packet_stream).await
+  }
+}
+
+enum UdpRoute<'a> {
+  Router(&'a Router),
+  Fixed(OutExit),
+}
+
+impl UdpRoute<'_> {
+  async fn match_exits(&self, destination: &SocketDestination) -> Vec<OutExit> {
+    match self {
+      UdpRoute::Router(router) => router.match_exits(destination).await,
+      UdpRoute::Fixed(exit) => vec![exit.clone()],
+    }
+  }
+}
+
+async fn forward_udp(
+  node: &(impl Node + ?Sized),
+  route: UdpRoute<'_>,
+  mut packet_stream: Box<dyn InboundUdpPacketStream>,
+) -> Result<(), Error> {
+  let (incoming_sender, mut incoming_receiver) = mpsc::unbounded_channel();
+  let mut association_senders = HashMap::<OutExit, mpsc::UnboundedSender<OutgoingUdpPacket>>::new();
+  let mut association_tasks = JoinSet::new();
+
+  loop {
+    tokio::select! {
+      outgoing = packet_stream.next() => {
+        let Some(outgoing) = outgoing else {
+          break;
+        };
+        let exits = route.match_exits(&outgoing.destination).await;
+
+        if exits.is_empty() {
+          log::debug!("UDP {} no exit matched.", outgoing.destination);
+          continue;
+        }
+
+        let mut selected_association = None;
+
+        for requested_exit in &exits {
+          if let Some(sender) = association_senders
+            .get(requested_exit)
+            .filter(|sender| !sender.is_closed())
+          {
+            selected_association = Some((requested_exit.clone(), sender.clone()));
+            break;
+          }
+
+          let Some((matched_exit, outbound)) = open_udp_association(
+            node,
+            std::slice::from_ref(requested_exit),
+            &outgoing.destination,
+          )
+          .await?
+          else {
+            continue;
+          };
+          let (association_sender, association_receiver) = mpsc::unbounded_channel();
+
+          association_tasks.spawn(run_udp_association(
+            matched_exit.clone(),
+            outbound,
+            association_receiver,
+            incoming_sender.clone(),
+          ));
+          association_senders.insert(matched_exit.clone(), association_sender.clone());
+
+          log::info!(
+            "UDP {} -> {}",
+            outgoing.destination,
+            exits
+              .iter()
+              .map(|exit| if exit == &matched_exit {
+                exit.to_string().cyan().to_string()
+              } else {
+                exit.to_string()
+              })
+              .join(",")
+          );
+
+          selected_association = Some((matched_exit, association_sender));
+          break;
+        }
+
+        let Some((matched_exit, association_sender)) = selected_association else {
+          log::debug!("UDP {} no out dispatcher matched.", outgoing.destination);
+          continue;
+        };
+
+        if association_sender.send(outgoing).is_err() {
+          association_senders.remove(&matched_exit);
+        }
+      }
+      Some(incoming) = incoming_receiver.recv() => {
+        packet_stream.send(incoming).await?;
+      }
+      Some(result) = association_tasks.join_next(), if !association_tasks.is_empty() => {
+        let (exit, result) = result.expect("UDP association task panicked");
+
+        if association_senders
+          .get(&exit)
+          .is_some_and(mpsc::UnboundedSender::is_closed)
+        {
+          association_senders.remove(&exit);
+        }
+
+        if let Err(error) = result {
+          log::debug!("UDP association {exit} stopped: {error}");
+        }
+      }
+    }
+  }
+
+  Ok(())
+}
+
+async fn open_udp_association(
+  node: &(impl Node + ?Sized),
+  exits: &[OutExit],
+  destination: &SocketDestination,
+) -> Result<Option<(OutExit, Box<dyn OutboundUdpPacketStream>)>, Error> {
+  let mut may_retry_peer_unavailable = true;
+
+  loop {
+    let out_dispatchers = node.get_out_dispatchers();
+    let Some((matched_exit, matched, out_dispatcher)) =
+      select_out_dispatcher(exits, &out_dispatchers)
+    else {
+      return Ok(None);
+    };
+    drop(out_dispatchers);
+    let priority = matched.priority;
+
+    match out_dispatcher.associate(matched.resolved_exit).await {
+      Ok(outbound) => return Ok(Some((matched_exit, outbound))),
+      Err(Error::OutDispatcherUnavailable)
+        if may_retry_peer_unavailable && priority == OutExitMatchPriority::PeerProvider =>
+      {
+        may_retry_peer_unavailable = false;
+        log::debug!(
+          "peer OUT for UDP {destination} became unavailable before opening an association; \
+           selecting again."
+        );
+      }
+      Err(error) => return Err(error),
+    }
+  }
+}
+
+async fn run_udp_association(
+  exit: OutExit,
+  mut outbound: Box<dyn OutboundUdpPacketStream>,
+  mut outgoing_receiver: mpsc::UnboundedReceiver<OutgoingUdpPacket>,
+  incoming_sender: mpsc::UnboundedSender<IncomingUdpPacket>,
+) -> (OutExit, Result<(), Error>) {
+  let result = async {
+    loop {
+      tokio::select! {
+        outgoing = outgoing_receiver.recv() => {
+          let Some(outgoing) = outgoing else {
+            break;
+          };
+
+          outbound.send(outgoing).await?;
+        }
+        incoming = outbound.next() => {
+          let Some(incoming) = incoming else {
+            break;
+          };
+
+          if incoming_sender.send(incoming).is_err() {
+            break;
+          }
+        }
+      }
+    }
+
+    Ok(())
+  }
+  .await;
+
+  (exit, result)
 }
 
 fn select_out_dispatcher(
@@ -236,7 +441,7 @@ pub struct NodeHelloAck(pub NodeId);
 #[derive(Serialize, Deserialize)]
 pub enum NodeMessageToOut {
   Connect(OutExit, SocketDestination),
-  Associate(OutExit, SocketDestination),
+  Associate(OutExit),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -259,19 +464,24 @@ pub enum Error {
   OutDispatcherNotMatched,
   #[error("Out dispatcher is unavailable")]
   OutDispatcherUnavailable,
+  #[error("UDP packet stream error: {0}")]
+  UdpPacketStream(#[from] UdpPacketStreamError),
 }
 
 #[cfg(test)]
 mod tests {
   use std::{
     collections::VecDeque,
+    pin::Pin,
     sync::{Mutex, atomic::AtomicUsize},
+    task::{Context, Poll},
   };
 
+  use futures::{Sink, Stream};
   use tokio::{
     io::{DuplexStream, duplex},
     sync::oneshot,
-    time::timeout,
+    time::{Duration, sleep, timeout},
   };
 
   use super::*;
@@ -287,6 +497,20 @@ mod tests {
 
     fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
       self.dispatchers.lock().unwrap().take().unwrap()
+    }
+  }
+
+  struct StaticTestNode {
+    dispatchers: Vec<Arc<dyn OutDispatcher>>,
+  }
+
+  impl Node for StaticTestNode {
+    fn id(&self) -> NodeId {
+      NodeId::new()
+    }
+
+    fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
+      self.dispatchers.clone()
     }
   }
 
@@ -373,6 +597,7 @@ mod tests {
     match_priority: OutExitMatchPriority,
     load: OutDispatcherLoad,
     connected_exits: Mutex<Vec<OutExit>>,
+    associated_exits: Mutex<Vec<OutExit>>,
   }
 
   impl RecordingTestDispatcher {
@@ -382,6 +607,7 @@ mod tests {
         match_priority: OutExitMatchPriority::Provider,
         load: OutDispatcherLoad::default(),
         connected_exits: Mutex::new(vec![]),
+        associated_exits: Mutex::new(vec![]),
       }
     }
 
@@ -399,6 +625,10 @@ mod tests {
 
     fn connected_exits(&self) -> Vec<OutExit> {
       self.connected_exits.lock().unwrap().clone()
+    }
+
+    fn associated_exits(&self) -> Vec<OutExit> {
+      self.associated_exits.lock().unwrap().clone()
     }
   }
 
@@ -429,6 +659,23 @@ mod tests {
 
       Ok(Box::new(stream))
     }
+
+    async fn associate(&self, exit: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
+      self.associated_exits.lock().unwrap().push(exit);
+
+      let (stream, peer) = duplex(4096);
+      let outbound =
+        crate::udp_forwarder::UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(
+          Box::new(stream),
+        );
+      let mut peer =
+        crate::udp_forwarder::UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(
+          Box::new(peer),
+        );
+      tokio::spawn(async move { while peer.next().await.is_some() {} });
+
+      Ok(Box::new(outbound))
+    }
   }
 
   #[derive(Clone, Copy)]
@@ -440,6 +687,75 @@ mod tests {
   struct FailingPeerTestDispatcher {
     failure: TestConnectFailure,
     connect_attempts: AtomicUsize,
+  }
+
+  struct FailingUdpPacketStream;
+
+  impl Sink<OutgoingUdpPacket> for FailingUdpPacketStream {
+    type Error = UdpPacketStreamError;
+
+    fn poll_ready(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _packet: OutgoingUdpPacket) -> Result<(), Self::Error> {
+      Err(UdpPacketStreamError::Closed)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+  }
+
+  impl Stream for FailingUdpPacketStream {
+    type Item = IncomingUdpPacket;
+
+    fn poll_next(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Option<Self::Item>> {
+      Poll::Pending
+    }
+  }
+
+  struct RecoveringUdpTestDispatcher {
+    exit: OutExit,
+    association_attempts: AtomicUsize,
+  }
+
+  #[async_trait]
+  impl OutDispatcher for RecoveringUdpTestDispatcher {
+    fn match_exit(&self, exit: &OutExit) -> Option<OutExitMatch> {
+      OutExits::new([OutExit::Proxy, self.exit.clone()]).match_exit(exit)
+    }
+
+    async fn connect(
+      &self,
+      _exit: OutExit,
+      _destination: SocketDestination,
+    ) -> Result<Box<dyn BidiStream>, Error> {
+      unreachable!("this dispatcher is only used for UDP")
+    }
+
+    async fn associate(&self, _exit: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
+      if self.association_attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+        return Ok(Box::new(FailingUdpPacketStream));
+      }
+
+      let (stream, peer) = duplex(4096);
+      let outbound =
+        crate::udp_forwarder::UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(
+          Box::new(stream),
+        );
+      let mut peer =
+        crate::udp_forwarder::UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(
+          Box::new(peer),
+        );
+      tokio::spawn(async move { while peer.next().await.is_some() {} });
+
+      Ok(Box::new(outbound))
+    }
   }
 
   impl FailingPeerTestDispatcher {
@@ -710,6 +1026,150 @@ mod tests {
 
     assert_eq!(provider.connected_exits(), vec![OutExit::Proxy]);
     assert!(default_local.connected_exits().is_empty());
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn udp_selector_order_precedes_an_existing_lower_priority_association() -> anyhow::Result<()>
+  {
+    use crate::{
+      route::{AddressRule, FallbackRule, GeoLite2},
+      test::test_dir,
+      udp_forwarder::{UdpPacketSource, UdpPacketStream},
+    };
+
+    let us = OutExit::from("us");
+    let okx = OutExit::from("okx");
+    let dispatcher = Arc::new(RecordingTestDispatcher::new(vec![
+      OutExit::Proxy,
+      us.clone(),
+      okx.clone(),
+    ]));
+    let node = Arc::new(StaticTestNode {
+      dispatchers: vec![dispatcher.clone()],
+    });
+    let router = Arc::new(Router::new(GeoLite2::new(test_dir())));
+    router.register_local_rules(vec![
+      AddressRule {
+        match_ips: None,
+        match_ports: Some(vec![1000]),
+        priority: 0,
+        negate: false,
+        exits: vec![us.clone()],
+      }
+      .into(),
+      FallbackRule {
+        exits: vec![okx.clone(), us.clone()],
+      }
+      .into(),
+    ]);
+
+    let (node_stream, client_stream) = duplex(4096);
+    let node_packets =
+      UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(node_stream));
+    let mut client_packets =
+      UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(client_stream));
+    let route_task = tokio::spawn({
+      let node = node.clone();
+      let router = router.clone();
+      async move { node.route_udp(&router, Box::new(node_packets)).await }
+    });
+    let source = UdpPacketSource {
+      via: vec![],
+      address: "127.0.0.1:50000".parse()?,
+    };
+
+    client_packets
+      .send(OutgoingUdpPacket {
+        source: source.clone(),
+        destination: SocketDestination {
+          host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
+          port: 1000,
+        },
+        payload: vec![1],
+      })
+      .await?;
+    timeout(std::time::Duration::from_secs(1), async {
+      while dispatcher.associated_exits().is_empty() {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await?;
+
+    client_packets
+      .send(OutgoingUdpPacket {
+        source,
+        destination: SocketDestination {
+          host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
+          port: 2000,
+        },
+        payload: vec![2],
+      })
+      .await?;
+    timeout(std::time::Duration::from_secs(1), async {
+      while dispatcher.associated_exits().len() < 2 {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await?;
+
+    assert_eq!(dispatcher.associated_exits(), vec![us, okx]);
+
+    route_task.abort();
+    route_task.await.unwrap_err();
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn udp_association_failure_does_not_stop_the_inbound() -> anyhow::Result<()> {
+    use crate::{
+      route::{FallbackRule, GeoLite2},
+      test::test_dir,
+      udp_forwarder::{UdpPacketSource, UdpPacketStream},
+    };
+
+    let exit = OutExit::from("us");
+    let dispatcher = Arc::new(RecoveringUdpTestDispatcher {
+      exit: exit.clone(),
+      association_attempts: AtomicUsize::new(0),
+    });
+    let node = Arc::new(StaticTestNode {
+      dispatchers: vec![dispatcher.clone()],
+    });
+    let router = Arc::new(Router::new(GeoLite2::new(test_dir())));
+    router.register_local_rules(vec![FallbackRule { exits: vec![exit] }.into()]);
+    let (node_stream, client_stream) = duplex(4096);
+    let node_packets =
+      UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(node_stream));
+    let mut client_packets =
+      UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(client_stream));
+    let route_task = tokio::spawn({
+      let node = node.clone();
+      let router = router.clone();
+      async move { node.route_udp(&router, Box::new(node_packets)).await }
+    });
+    let packet = OutgoingUdpPacket {
+      source: UdpPacketSource {
+        via: vec![],
+        address: "127.0.0.1:50000".parse()?,
+      },
+      destination: test_destination(),
+      payload: vec![1],
+    };
+
+    timeout(Duration::from_secs(1), async {
+      while dispatcher.association_attempts.load(Ordering::Relaxed) < 2 {
+        client_packets.send(packet.clone()).await.unwrap();
+        sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await?;
+
+    assert!(!route_task.is_finished());
+    route_task.abort();
+    route_task.await.unwrap_err();
 
     Ok(())
   }
