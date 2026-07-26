@@ -71,6 +71,12 @@ pub trait Node {
       return Ok(());
     };
 
+    // A transfer only needs the dispatcher that opened its stream. Keeping
+    // the full routing snapshot here pins every QUIC connection that was
+    // present when the transfer started, even after its dispatcher is
+    // withdrawn or replaced.
+    drop(out_dispatchers);
+
     log::info!(
       "TCP {destination} -> {}",
       exits
@@ -211,7 +217,76 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Mutex;
+
+  use tokio::{
+    io::{DuplexStream, duplex},
+    sync::oneshot,
+    time::timeout,
+  };
+
   use super::*;
+
+  struct TakingTestNode {
+    dispatchers: Mutex<Option<Vec<Arc<dyn OutDispatcher>>>>,
+  }
+
+  impl Node for TakingTestNode {
+    fn id(&self) -> NodeId {
+      NodeId::new()
+    }
+
+    fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
+      self.dispatchers.lock().unwrap().take().unwrap()
+    }
+  }
+
+  struct BlockingTestDispatcher {
+    peer_sender: Mutex<Option<oneshot::Sender<DuplexStream>>>,
+  }
+
+  #[async_trait]
+  impl OutDispatcher for BlockingTestDispatcher {
+    fn match_exit(&self, exit: &OutExit) -> bool {
+      exit == &OutExit::Any
+    }
+
+    async fn connect(
+      &self,
+      _exit: OutExit,
+      _destination: SocketDestination,
+    ) -> Result<Box<dyn BidiStream>, Error> {
+      let (stream, peer) = duplex(64);
+
+      self
+        .peer_sender
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .send(peer)
+        .map_err(|_| std::io::Error::other("test peer receiver was dropped"))?;
+
+      Ok(Box::new(stream))
+    }
+  }
+
+  struct UnmatchedTestDispatcher;
+
+  #[async_trait]
+  impl OutDispatcher for UnmatchedTestDispatcher {
+    fn match_exit(&self, _exit: &OutExit) -> bool {
+      false
+    }
+
+    async fn connect(
+      &self,
+      _exit: OutExit,
+      _destination: SocketDestination,
+    ) -> Result<Box<dyn BidiStream>, Error> {
+      unreachable!("unmatched dispatcher must not be connected")
+    }
+  }
 
   fn adaptive_load(goodput: Option<u64>, active_transfers: usize) -> OutDispatcherLoad {
     OutDispatcherLoad {
@@ -262,5 +337,54 @@ mod tests {
     ];
 
     assert_eq!(select_dispatcher_index(&loads, 3), 1);
+  }
+
+  #[tokio::test]
+  async fn active_transfer_releases_unmatched_dispatchers() -> anyhow::Result<()> {
+    let (outbound_peer_sender, outbound_peer_receiver) = oneshot::channel();
+    let selected_dispatcher: Arc<dyn OutDispatcher> = Arc::new(BlockingTestDispatcher {
+      peer_sender: Mutex::new(Some(outbound_peer_sender)),
+    });
+    let selected_dispatcher_weak = Arc::downgrade(&selected_dispatcher);
+    let unmatched_dispatcher: Arc<dyn OutDispatcher> = Arc::new(UnmatchedTestDispatcher);
+    let unmatched_dispatcher_weak = Arc::downgrade(&unmatched_dispatcher);
+
+    let node = TakingTestNode {
+      dispatchers: Mutex::new(Some(vec![selected_dispatcher, unmatched_dispatcher])),
+    };
+    let destination = SocketDestination {
+      host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
+      port: 80,
+    };
+    let (node_stream, client_stream) = duplex(64);
+
+    let transfer = tokio::spawn(async move {
+      node
+        .tcp_connect(vec![OutExit::Any], destination, Box::new(node_stream))
+        .await
+    });
+
+    let outbound_peer =
+      timeout(std::time::Duration::from_secs(1), outbound_peer_receiver).await??;
+
+    tokio::task::yield_now().await;
+    assert!(
+      unmatched_dispatcher_weak.upgrade().is_none(),
+      "an active transfer retained an unrelated dispatcher"
+    );
+    assert!(
+      selected_dispatcher_weak.upgrade().is_some(),
+      "an active transfer released its selected dispatcher"
+    );
+
+    drop(client_stream);
+    drop(outbound_peer);
+    transfer.await??;
+    assert!(
+      selected_dispatcher_weak.upgrade().is_none(),
+      "the selected dispatcher remained after its transfer finished"
+    );
+
+    Ok(())
   }
 }
