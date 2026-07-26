@@ -12,10 +12,9 @@ use tokio::{io::AsyncWriteExt, task::JoinSet, time::sleep};
 use crate::{
   cert::NODE_PEM_FILE_NAME,
   node::{
-    DefaultLocalExit, DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut,
-    OutDispatcher,
+    LocalOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut, OutDispatcher,
   },
-  out::OutConfig,
+  out::{OutConfig, build_local_out_dispatchers},
   primitives::{OutExitTag, OutExits},
   qomt::qomt_connect,
   quic_connection::{QuicConnection, create_quiche_config},
@@ -25,13 +24,13 @@ use crate::{
 pub struct Out {
   id: NodeId,
   exits: OutExits,
-  direct_out_dispatcher: Arc<dyn OutDispatcher>,
+  local_out_dispatchers: Vec<Arc<dyn OutDispatcher>>,
   hub_options: OutHubOptions,
   context_dir: PathBuf,
 }
 
 pub struct OutOptions {
-  pub default_local_exit: DefaultLocalExit,
+  pub local_out_dispatchers: Vec<LocalOutDispatcher>,
   pub hub: OutHubOptions,
   pub context_dir: PathBuf,
 }
@@ -44,18 +43,25 @@ pub struct OutHubOptions {
 impl Out {
   pub fn new(
     OutOptions {
-      default_local_exit,
+      local_out_dispatchers,
       hub: hub_options,
       context_dir,
     }: OutOptions,
   ) -> Self {
-    let direct_out_dispatcher = DirectOutDispatcher::new(default_local_exit);
-    let exits = direct_out_dispatcher.exits().for_advertising();
+    let exits = local_out_dispatchers
+      .iter()
+      .flat_map(|dispatcher| dispatcher.exits().iter().cloned())
+      .collect::<OutExits>()
+      .for_advertising();
+    let local_out_dispatchers = local_out_dispatchers
+      .into_iter()
+      .map(|dispatcher| -> Arc<dyn OutDispatcher> { dispatcher.arc() })
+      .collect();
 
     Self {
       id: NodeId::new(),
       exits,
-      direct_out_dispatcher: direct_out_dispatcher.arc(),
+      local_out_dispatchers,
       hub_options,
       context_dir,
     }
@@ -168,7 +174,7 @@ impl Node for Out {
   }
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
-    vec![self.direct_out_dispatcher.clone()]
+    self.local_out_dispatchers.clone()
   }
 }
 
@@ -180,20 +186,50 @@ pub struct DirectOut {
 
 pub async fn run_out(
   context_dir: impl AsRef<Path>,
-  OutConfig { hub, tags }: OutConfig,
+  OutConfig { hub, exits }: OutConfig,
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
-
-  let default_local_exit = match tags {
-    None => DefaultLocalExit::Private,
-    Some(tags) => DefaultLocalExit::Advertised { tags },
-  };
+  let local_out_dispatchers = build_local_out_dispatchers(exits)?;
 
   let out = Out::new(OutOptions {
-    default_local_exit,
+    local_out_dispatchers,
     hub: hub.into(),
     context_dir: context_dir.to_owned(),
   });
 
   out.run().await
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::node::DefaultLocalExit;
+
+  #[test]
+  fn advertises_union_of_explicit_local_exits() {
+    let out = Out::new(OutOptions {
+      local_out_dispatchers: vec![
+        LocalOutDispatcher::new_default(DefaultLocalExit::Private),
+        LocalOutDispatcher::new_bound(
+          vec![OutExitTag::from("us"), OutExitTag::from("netflix")],
+          "wg0".to_owned(),
+        )
+        .unwrap(),
+      ],
+      hub: OutHubOptions {
+        address: "127.0.0.1:1122".parse().unwrap(),
+        connections: 1,
+      },
+      context_dir: PathBuf::new(),
+    });
+
+    assert_eq!(
+      out.exits.as_slice(),
+      &[
+        crate::primitives::OutExit::Proxy,
+        crate::primitives::OutExit::from("us"),
+        crate::primitives::OutExit::from("netflix"),
+      ]
+    );
+  }
 }

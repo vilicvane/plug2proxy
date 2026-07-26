@@ -3,7 +3,7 @@ use crate::{
   hub::{Hub, HubOptions},
   r#in::{In, InHubOptions, InOptions},
   inbound::{Socks5Inbound, Socks5InboundOptions},
-  node::DefaultLocalExit,
+  node::{DefaultLocalExit, LocalOutDispatcher},
   out::{Out, OutHubOptions, OutOptions},
   primitives::OutExit,
   route::{AddressRule, GeoLite2, Router},
@@ -56,7 +56,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
           match_ports: Some(vec![http_address.port()]),
           priority: 0,
           negate: false,
-          exits: vec![OutExit::Proxy],
+          exits: vec![OutExit::from("system")],
         }
         .into(),
       ]);
@@ -66,7 +66,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
         vec![],
         router,
         HubOptions {
-          default_local_exit: DefaultLocalExit::Private,
+          local_out_dispatchers: vec![LocalOutDispatcher::new_default(DefaultLocalExit::Private)],
           context_dir: hub_dir,
         },
       );
@@ -95,11 +95,15 @@ async fn test_hub_out() -> anyhow::Result<()> {
     },
     async {
       // Force the IN to consume an initial snapshot without provider exits,
-      // then verify the later OUT update enables PROXY.
+      // then verify the later OUT update enables the tagged local exit.
       sleep(duration!("500ms")).await;
 
       let out = Out::new(OutOptions {
-        default_local_exit: DefaultLocalExit::Advertised { tags: vec![] },
+        local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+          DefaultLocalExit::Advertised {
+            tags: vec!["system".into()],
+          },
+        )],
         context_dir: out_dir,
         hub: OutHubOptions {
           address: hub_address,

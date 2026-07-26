@@ -1,12 +1,13 @@
 use lowkit::SerdeSocketAddress;
 use serde::Deserialize;
 
-use crate::{inbound::InboundsConfig, primitives::OutExitTag, route::RouteConfig};
+use crate::{inbound::InboundsConfig, out::ExitConfig, route::RouteConfig};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct HubConfig {
   pub listen: SerdeSocketAddress,
-  pub tags: Option<Vec<OutExitTag>>,
+  #[serde(default)]
+  pub exits: Vec<ExitConfig>,
   pub route: Option<RouteConfig>,
   pub inbounds: Option<InboundsConfig>,
 }

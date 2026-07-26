@@ -15,7 +15,7 @@ use crate::{
   r#in::{InConfig, InLike},
   inbound::AnyInbound,
   node::{
-    DefaultLocalExit, DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeId, NodeMessageToIn,
+    DefaultLocalExit, LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeId, NodeMessageToIn,
     NodeMessageToInUpdate, NodeOutDispatcher, OutDispatcher,
   },
   primitives::OutExits,
@@ -29,7 +29,7 @@ pub struct In {
   id: NodeId,
   inbounds: Vec<Arc<AnyInbound>>,
   router: Router,
-  direct_out_dispatcher: Arc<dyn OutDispatcher>,
+  default_local_out_dispatcher: Arc<dyn OutDispatcher>,
   connected_out_dispatcher_map: Mutex<HashMap<NodeId, Arc<dyn OutDispatcher>>>,
   hub_options: InHubOptions,
   context_dir: PathBuf,
@@ -58,7 +58,8 @@ impl In {
       id: NodeId::new(),
       inbounds: inbounds.into_iter().map(|inbound| inbound.arc()).collect(),
       router,
-      direct_out_dispatcher: DirectOutDispatcher::new(DefaultLocalExit::Private).arc(),
+      default_local_out_dispatcher: LocalOutDispatcher::new_default(DefaultLocalExit::Private)
+        .arc(),
       connected_out_dispatcher_map: HashMap::new().mutex(),
       hub_options,
       context_dir,
@@ -218,7 +219,7 @@ impl Node for In {
   }
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
-    let mut dispatchers = vec![self.direct_out_dispatcher.clone()];
+    let mut dispatchers = vec![self.default_local_out_dispatcher.clone()];
 
     dispatchers.extend(
       self

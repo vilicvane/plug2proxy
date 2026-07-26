@@ -17,10 +17,10 @@ use crate::{
   inbound::AnyInbound,
   mt_connections::MtConnectionsListener,
   node::{
-    DefaultLocalExit, DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId,
-    NodeMessageToIn, NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
+    LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToIn,
+    NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
   },
-  out::DirectOut,
+  out::{DirectOut, build_local_out_dispatchers},
   primitives::OutExits,
   quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
   route::{GeoLite2, Router},
@@ -34,7 +34,7 @@ pub struct Hub {
   id: NodeId,
   exits: OutExits,
   mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
-  direct_out_dispatcher: Arc<dyn OutDispatcher>,
+  local_out_dispatchers: Vec<Arc<dyn OutDispatcher>>,
   connected_out_dispatcher_map: Mutex<HashMap<NodeId, Arc<dyn OutDispatcher>>>,
   in_update_sender_map: Mutex<HashMap<NodeId, Arc<mpsc::UnboundedSender<Vec<u8>>>>>,
   in_update_lock: tokio::sync::Mutex<()>,
@@ -52,7 +52,7 @@ struct HubOutState {
 }
 
 pub struct HubOptions {
-  pub default_local_exit: DefaultLocalExit,
+  pub local_out_dispatchers: Vec<LocalOutDispatcher>,
   pub context_dir: PathBuf,
 }
 
@@ -62,18 +62,25 @@ impl Hub {
     inbounds: Vec<AnyInbound>,
     router: Router,
     HubOptions {
-      default_local_exit,
+      local_out_dispatchers,
       context_dir,
     }: HubOptions,
   ) -> Self {
-    let direct_out_dispatcher = DirectOutDispatcher::new(default_local_exit);
-    let exits = direct_out_dispatcher.exits().for_advertising();
+    let exits = local_out_dispatchers
+      .iter()
+      .flat_map(|dispatcher| dispatcher.exits().iter().cloned())
+      .collect::<OutExits>()
+      .for_advertising();
+    let local_out_dispatchers = local_out_dispatchers
+      .into_iter()
+      .map(|dispatcher| -> Arc<dyn OutDispatcher> { dispatcher.arc() })
+      .collect();
 
     Self {
       id: NodeId::new(),
       exits,
       mt_connections_listener: MtConnectionsListener::new(tcp_listener).tokio_mutex(),
-      direct_out_dispatcher: direct_out_dispatcher.arc(),
+      local_out_dispatchers,
       connected_out_dispatcher_map: HashMap::new().mutex(),
       in_update_sender_map: HashMap::new().mutex(),
       in_update_lock: tokio::sync::Mutex::new(()),
@@ -373,7 +380,7 @@ impl Node for Hub {
   }
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
-    let mut dispatchers = vec![self.direct_out_dispatcher.clone()];
+    let mut dispatchers = self.local_out_dispatchers.clone();
 
     dispatchers.extend(
       self
@@ -402,7 +409,7 @@ pub async fn run_hub(
   context_dir: impl AsRef<Path>,
   HubConfig {
     listen,
-    tags,
+    exits,
     route: route_config,
     inbounds: inbounds_config,
   }: HubConfig,
@@ -440,17 +447,14 @@ pub async fn run_hub(
     router.register_local_rules(route_config.into());
   }
 
-  let default_local_exit = match tags {
-    None => DefaultLocalExit::Private,
-    Some(tags) => DefaultLocalExit::Advertised { tags },
-  };
+  let local_out_dispatchers = build_local_out_dispatchers(exits)?;
 
   let hub = Hub::new(
     tcp_listener,
     inbounds,
     router,
     HubOptions {
-      default_local_exit,
+      local_out_dispatchers,
       context_dir: context_dir.to_path_buf(),
     },
   );
