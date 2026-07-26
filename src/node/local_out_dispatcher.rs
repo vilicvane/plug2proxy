@@ -208,7 +208,7 @@ mod tests {
   }
 
   #[test]
-  fn bound_local_exit_is_a_provider_but_not_direct() {
+  fn bound_local_exit_is_a_provider_but_not_default_local() {
     let bound = LocalOutDispatcher::new_bound(
       vec![
         OutExitTag::from("us"),

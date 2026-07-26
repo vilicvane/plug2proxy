@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
   Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, derive_more::From, derive_more::Display,
 )]
 pub enum OutExit {
+  /// The current node's default local exit, independent of peer/relay paths.
   #[display("DIRECT")]
   Direct,
   Tag(#[from] OutExitTag),
@@ -93,13 +94,13 @@ impl OutExits {
   }
 
   pub fn match_exit(&self, requested: &OutExit) -> Option<OutExitMatch> {
-    let has_direct = self.0.contains(&OutExit::Direct);
+    let has_default_local = self.0.contains(&OutExit::Direct);
     let has_proxy = self.0.contains(&OutExit::Proxy);
 
     let (priority, resolved_exit) = match requested {
-      OutExit::Direct if has_direct => (OutExitMatchPriority::DefaultLocal, OutExit::Direct),
+      OutExit::Direct if has_default_local => (OutExitMatchPriority::DefaultLocal, OutExit::Direct),
       OutExit::Proxy if has_proxy => (OutExitMatchPriority::Provider, OutExit::Proxy),
-      OutExit::Any if has_direct => (OutExitMatchPriority::DefaultLocal, OutExit::Direct),
+      OutExit::Any if has_default_local => (OutExitMatchPriority::DefaultLocal, OutExit::Direct),
       OutExit::Any if has_proxy => (OutExitMatchPriority::Provider, OutExit::Proxy),
       OutExit::Tag(_) if has_proxy && self.0.contains(requested) => {
         (OutExitMatchPriority::Provider, requested.clone())
@@ -141,6 +142,8 @@ impl<'de> Deserialize<'de> for OutExits {
 pub enum OutExitMatchPriority {
   /// The current inbound node's default local exit.
   DefaultLocal,
+  /// An explicitly published exit reached through a maintained peer path.
+  PeerProvider,
   /// An explicitly published exit, reached locally or through another node.
   Provider,
 }

@@ -1,27 +1,35 @@
 use std::{
   collections::HashMap,
+  net::SocketAddr,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
   time::Duration,
 };
 
+use anyhow::Context;
 use colored::Colorize;
-use futures::StreamExt;
 use lowkit::SelfWrapExt;
-use tokio::{io::AsyncWriteExt, net::TcpListener, sync::mpsc, task::JoinSet, time::timeout};
+use tokio::{
+  io::AsyncWriteExt,
+  net::TcpListener,
+  sync::{Semaphore, mpsc},
+  task::JoinSet,
+  time::timeout,
+};
 
 use crate::{
   cert::{CA_PEM_FILE_NAME, NODE_PEM_FILE_NAME, generate_ca_pem_file, generate_node_pem_file},
   hub::HubConfig,
   r#in::InLike,
   inbound::AnyInbound,
-  mt_connections::MtConnectionsListener,
+  mt_connections::{MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener},
   node::{
     LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToIn,
     NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
   },
-  out::{DirectOut, build_local_out_dispatchers},
+  out::{PeerOut, build_local_out_dispatchers},
   primitives::OutExits,
+  qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept},
   quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
   route::{GeoLite2, Router},
   utils::{
@@ -47,8 +55,9 @@ pub struct Hub {
 const IN_UPDATE_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct HubOutState {
+  provider_id: NodeId,
   exits: OutExits,
-  direct_out: Option<DirectOut>,
+  peer_endpoint: Option<SocketAddr>,
 }
 
 pub struct HubOptions {
@@ -103,23 +112,15 @@ impl Hub {
     let mut mt_connections_listener = self.mt_connections_listener.lock().await;
 
     let mut join_set = JoinSet::new();
-
-    let mut quiche_config = create_quiche_config(self.context_dir.join(NODE_PEM_FILE_NAME))?;
+    let pending_handshakes = Arc::new(Semaphore::new(MAX_PENDING_QOMT_HANDSHAKES));
 
     loop {
-      let mut mt_connections = mt_connections_listener.accept().await?;
-
+      let mt_connections = mt_connections_listener.accept().await?;
       let peer_address = mt_connections.peer_address();
-
-      let Some(first_packet) = mt_connections.next().await else {
-        log::warn!("missing first packet (connection_id) in incoming mTCP connections.");
+      let Ok(handshake_permit) = pending_handshakes.clone().try_acquire_owned() else {
+        log::warn!("too many pending node handshakes; rejecting {peer_address}.");
         continue;
       };
-
-      let connection_id = quiche::ConnectionId::from_vec(first_packet.to_vec());
-
-      let qomt_connection =
-        QuicConnection::accept(&connection_id, &mut quiche_config, mt_connections);
 
       let this = self.clone();
 
@@ -127,20 +128,30 @@ impl Hub {
 
       join_set.spawn(async move {
         async {
-          qomt_connection.established().await?;
+          let mut quiche_config = create_quiche_config(this.context_dir.join(NODE_PEM_FILE_NAME))?;
+          let qomt_connection = qomt_accept(&mut quiche_config, mt_connections).await?;
 
-          let mut stream = qomt_connection
-            .accept_stream()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("expecting hello stream"))?;
+          let (hello, stream) = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
+            let mut stream = qomt_connection
+              .accept_stream()
+              .await?
+              .ok_or_else(|| anyhow::anyhow!("expecting hello stream"))?;
+            let hello = postcard_read_stream_to_end::<NodeHello>(&mut stream).await?;
 
-          let hello = postcard_read_stream_to_end::<NodeHello>(&mut stream).await?;
+            stream
+              .write_all(&postcard::to_allocvec(&NodeHelloAck(this.id)).unwrap())
+              .await?;
 
-          let hello_ack = NodeHelloAck(this.id);
+            if matches!(hello, NodeHello::Out(_)) {
+              stream.shutdown().await?;
+            }
 
-          stream
-            .write_all(&postcard::to_allocvec(&hello_ack).unwrap())
-            .await?;
+            anyhow::Ok((hello, stream))
+          })
+          .await
+          .context("timed out waiting for node hello")??;
+
+          drop(handshake_permit);
 
           let node_type = match hello {
             NodeHello::In(_) => "IN",
@@ -157,7 +168,10 @@ impl Hub {
                 .await;
             }
             NodeHello::Out(hello) => {
-              this.clone().handle_out_node(hello, qomt_connection).await;
+              this
+                .clone()
+                .handle_out_node(hello, NodeId::new(), peer_address, qomt_connection)
+                .await;
             }
           }
 
@@ -279,31 +293,50 @@ impl Hub {
   async fn handle_out_node(
     self: Arc<Self>,
     NodeHelloOut {
-      id,
+      id: provider_id,
       exits,
-      direct_out,
+      peer_endpoint,
     }: NodeHelloOut,
+    session_id: NodeId,
+    remote_address: SocketAddr,
     qomt_connection: QuicConnection,
   ) {
     let exits = exits.for_advertising();
+    let peer_endpoint =
+      peer_endpoint.map(|endpoint| complete_peer_endpoint(endpoint, remote_address));
     let qomt_connection = qomt_connection.arc();
     let out_dispatcher = NodeOutDispatcher::new(exits.clone(), qomt_connection.clone()).arc();
     let registered_out_dispatcher: Arc<dyn OutDispatcher> = out_dispatcher.clone();
 
     {
       let _update_guard = self.in_update_lock.lock().await;
-
-      self
+      let provider_is_consistent = self
         .out_map
         .lock()
         .unwrap()
-        .insert(id, HubOutState { exits, direct_out });
+        .values()
+        .filter(|state| state.provider_id == provider_id)
+        .all(|state| state.exits == exits);
+
+      assert!(
+        provider_is_consistent,
+        "one OUT provider advertised inconsistent exits"
+      );
+
+      self.out_map.lock().unwrap().insert(
+        session_id,
+        HubOutState {
+          provider_id,
+          exits,
+          peer_endpoint,
+        },
+      );
 
       self
         .connected_out_dispatcher_map
         .lock()
         .unwrap()
-        .insert(id, registered_out_dispatcher.clone());
+        .insert(session_id, registered_out_dispatcher.clone());
 
       self.queue_in_update();
     }
@@ -321,12 +354,12 @@ impl Hub {
     let mut dispatcher_map = self.connected_out_dispatcher_map.lock().unwrap();
 
     if dispatcher_map
-      .get(&id)
+      .get(&session_id)
       .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
     {
-      dispatcher_map.remove(&id);
+      dispatcher_map.remove(&session_id);
       drop(dispatcher_map);
-      self.out_map.lock().unwrap().remove(&id);
+      self.out_map.lock().unwrap().remove(&session_id);
       self.queue_in_update();
     }
   }
@@ -343,11 +376,7 @@ impl Hub {
 
       NodeMessageToIn::Update(NodeMessageToInUpdate {
         exits,
-        direct_outs: out_map
-          .values()
-          .flat_map(|out| &out.direct_out)
-          .cloned()
-          .collect(),
+        peer_outs: build_peer_outs(out_map.values()),
         route_rules: self.router.build_rules(),
       })
     };
@@ -372,6 +401,49 @@ impl Hub {
           .is_ok()
       });
   }
+}
+
+fn complete_peer_endpoint(endpoint: SocketAddr, remote_address: SocketAddr) -> SocketAddr {
+  assert_ne!(
+    endpoint.port(),
+    0,
+    "peer OUT advertise port must not be zero"
+  );
+
+  if endpoint.ip().is_unspecified() {
+    SocketAddr::new(remote_address.ip(), endpoint.port())
+  } else {
+    endpoint
+  }
+}
+
+fn build_peer_outs<'a>(out_states: impl IntoIterator<Item = &'a HubOutState>) -> Vec<PeerOut> {
+  let mut peer_outs = Vec::<PeerOut>::new();
+
+  for state in out_states {
+    let Some(address) = state.peer_endpoint else {
+      continue;
+    };
+
+    if let Some(existing) = peer_outs
+      .iter()
+      .find(|peer_out| peer_out.provider_id == state.provider_id && peer_out.address == address)
+    {
+      assert_eq!(
+        existing.exits, state.exits,
+        "one peer OUT provider advertised inconsistent exits"
+      );
+      continue;
+    }
+
+    peer_outs.push(PeerOut {
+      provider_id: state.provider_id,
+      exits: state.exits.clone(),
+      address,
+    });
+  }
+
+  peer_outs
 }
 
 impl Node for Hub {
@@ -460,4 +532,189 @@ pub async fn run_hub(
   );
 
   hub.run().await
+}
+
+#[cfg(test)]
+mod tests {
+  use lits::duration;
+  use lowkit::SelfWrapExt;
+  use tokio::{io::AsyncWriteExt, net::TcpListener, time::timeout};
+
+  use crate::{
+    cert::{generate_ca_pem_file, generate_node_pem_file},
+    node::NodeMessageToIn,
+    primitives::OutExit,
+    qomt::qomt_connect,
+    test::test_dir,
+  };
+
+  use super::*;
+
+  fn test_out_state(provider_id: NodeId, peer_endpoint: Option<SocketAddr>) -> HubOutState {
+    HubOutState {
+      provider_id,
+      exits: OutExits::new([OutExit::Proxy, OutExit::from("us")]),
+      peer_endpoint,
+    }
+  }
+
+  #[test]
+  fn completes_unspecified_peer_endpoints_with_remote_ip() {
+    assert_eq!(
+      complete_peer_endpoint(
+        "0.0.0.0:2233".parse().unwrap(),
+        "[2001:db8::7]:49152".parse().unwrap(),
+      ),
+      "[2001:db8::7]:2233".parse().unwrap(),
+    );
+    assert_eq!(
+      complete_peer_endpoint(
+        "[::]:3344".parse().unwrap(),
+        "198.51.100.7:49153".parse().unwrap(),
+      ),
+      "198.51.100.7:3344".parse().unwrap(),
+    );
+  }
+
+  #[test]
+  fn keeps_explicit_peer_endpoint_unchanged() {
+    let advertised_address = "203.0.113.8:2233".parse().unwrap();
+
+    assert_eq!(
+      complete_peer_endpoint(advertised_address, "[2001:db8::7]:49152".parse().unwrap()),
+      advertised_address,
+    );
+  }
+
+  #[test]
+  fn deduplicates_peer_out_sessions_for_one_provider_and_address() {
+    let provider_id = NodeId::new();
+    let address = "203.0.113.8:2233".parse().unwrap();
+    let first_session = test_out_state(provider_id, Some(address));
+    let second_session = test_out_state(provider_id, Some(address));
+
+    assert_eq!(
+      build_peer_outs([&first_session, &second_session]),
+      vec![PeerOut {
+        provider_id,
+        exits: first_session.exits.clone(),
+        address,
+      }],
+    );
+  }
+
+  #[test]
+  fn keeps_different_peer_out_providers_at_the_same_address() {
+    let first_provider_id = NodeId::new();
+    let second_provider_id = NodeId::new();
+    let address = "203.0.113.8:2233".parse().unwrap();
+    let first_provider = test_out_state(first_provider_id, Some(address));
+    let second_provider = test_out_state(second_provider_id, Some(address));
+
+    let peer_outs = build_peer_outs([&first_provider, &second_provider]);
+
+    assert_eq!(peer_outs.len(), 2);
+    assert!(
+      peer_outs
+        .iter()
+        .any(|peer_out| peer_out.provider_id == first_provider_id)
+    );
+    assert!(
+      peer_outs
+        .iter()
+        .any(|peer_out| peer_out.provider_id == second_provider_id)
+    );
+  }
+
+  #[test]
+  fn peer_out_disappears_only_after_its_last_session_is_removed() {
+    let provider_id = NodeId::new();
+    let address = "203.0.113.8:2233".parse().unwrap();
+    let first_session = test_out_state(provider_id, Some(address));
+    let second_session = test_out_state(provider_id, Some(address));
+
+    assert_eq!(build_peer_outs([&first_session, &second_session]).len(), 1);
+    assert_eq!(build_peer_outs([&second_session]).len(), 1);
+    assert!(build_peer_outs(std::iter::empty::<&HubOutState>()).is_empty());
+  }
+
+  #[tokio::test]
+  async fn hub_announces_completed_peer_out_snapshot() -> anyhow::Result<()> {
+    timeout(duration!("15s"), async {
+      let test_dir = test_dir().join(format!("hub_peer_{}", uuid::Uuid::new_v4()));
+      let hub_dir = test_dir.join("hub");
+      let in_dir = test_dir.join("in");
+      let out_dir = test_dir.join("out");
+
+      generate_ca_pem_file(&test_dir).await?;
+      generate_node_pem_file(&test_dir, "hub", true).await?;
+      generate_node_pem_file(&test_dir, "in", true).await?;
+      generate_node_pem_file(&test_dir, "out", true).await?;
+
+      let hub_listener = TcpListener::bind("127.0.0.1:0").await?;
+      let hub_address = hub_listener.local_addr()?;
+      let hub = Hub::new(
+        hub_listener,
+        vec![],
+        Router::new(GeoLite2::new(&hub_dir)),
+        HubOptions {
+          local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+            crate::node::DefaultLocalExit::Private,
+          )],
+          context_dir: hub_dir,
+        },
+      )
+      .arc();
+      let hub_task = tokio::spawn(hub.run_hub());
+
+      let mut in_quiche_config = create_quiche_config(in_dir.join(NODE_PEM_FILE_NAME))?;
+      let in_connection = qomt_connect(&mut in_quiche_config, hub_address, 1).await?;
+      let mut in_update_stream = in_connection.open_stream();
+      in_update_stream
+        .write_all(&postcard::to_allocvec(&NodeHello::In(NodeId::new())).unwrap())
+        .await?;
+      in_update_stream.shutdown().await?;
+      let NodeHelloAck(_) = postcard_read_stream::<NodeHelloAck>(&mut in_update_stream).await?;
+      let NodeMessageToIn::Update(initial_update) =
+        postcard_read_stream::<NodeMessageToIn>(&mut in_update_stream).await?;
+      assert!(initial_update.peer_outs.is_empty());
+
+      let provider_id = NodeId::new();
+      let advertised_port = 2233;
+      let advertised_exits = OutExits::new([OutExit::Proxy]);
+      let mut out_quiche_config = create_quiche_config(out_dir.join(NODE_PEM_FILE_NAME))?;
+      let out_connection = qomt_connect(&mut out_quiche_config, hub_address, 1).await?;
+      let mut out_hello_stream = out_connection.open_stream();
+      out_hello_stream
+        .write_all(
+          &postcard::to_allocvec(&NodeHello::Out(NodeHelloOut {
+            id: provider_id,
+            exits: advertised_exits.clone(),
+            peer_endpoint: Some(([0, 0, 0, 0], advertised_port).into()),
+          }))
+          .unwrap(),
+        )
+        .await?;
+      out_hello_stream.shutdown().await?;
+      let NodeHelloAck(_) = postcard_read_stream::<NodeHelloAck>(&mut out_hello_stream).await?;
+
+      let NodeMessageToIn::Update(update) =
+        postcard_read_stream::<NodeMessageToIn>(&mut in_update_stream).await?;
+      assert_eq!(
+        update.peer_outs,
+        vec![PeerOut {
+          provider_id,
+          exits: advertised_exits,
+          address: ([127, 0, 0, 1], advertised_port).into(),
+        }]
+      );
+
+      hub_task.abort();
+
+      anyhow::Ok(())
+    })
+    .await??;
+
+    Ok(())
+  }
 }

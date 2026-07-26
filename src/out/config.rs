@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use anyhow::Context;
 use lowkit::{SelfWrapExt, SerdeSocketAddress};
 use serde::{Deserialize, Deserializer};
@@ -13,6 +15,35 @@ pub struct OutConfig {
   pub hub: OutHubConfig,
   #[serde(default)]
   pub exits: Vec<ExitConfig>,
+  pub listen: Option<SerdeSocketAddress>,
+  pub advertise: Option<SerdeSocketAddress>,
+}
+
+impl OutConfig {
+  /// Returns the configured peer listener and optional address override.
+  ///
+  /// A missing advertise address is intentionally left unresolved: the
+  /// unspecified address sent to the HUB needs the listener's actual port
+  /// after binding.
+  pub fn peer_addresses(&self) -> anyhow::Result<Option<(SocketAddr, Option<SocketAddr>)>> {
+    let Some(listen) = self.listen else {
+      anyhow::ensure!(
+        self.advertise.is_none(),
+        "OUT advertise requires a peer listener"
+      );
+
+      return Ok(None);
+    };
+
+    let advertise = self.advertise.map(SerdeSocketAddress::into_inner);
+
+    anyhow::ensure!(
+      advertise.is_none_or(|address| address.port() != 0),
+      "OUT advertise port must be non-zero"
+    );
+
+    Ok(Some((listen.into_inner(), advertise)))
+  }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -131,6 +162,58 @@ mod tests {
     assert_eq!(dispatchers.len(), 1);
     assert_eq!(dispatchers[0].exits().as_slice(), &[OutExit::Direct]);
     assert_eq!(dispatchers[0].interface(), None);
+  }
+
+  #[test]
+  fn rejects_advertise_without_peer_listener() {
+    let config: OutConfig = serde_yaml::from_str(
+      r#"
+hub:
+  address: 127.0.0.1:1122
+advertise: 203.0.113.10:2233
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+      config.peer_addresses().unwrap_err().to_string(),
+      "OUT advertise requires a peer listener"
+    );
+  }
+
+  #[test]
+  fn rejects_zero_advertise_port() {
+    let config: OutConfig = serde_yaml::from_str(
+      r#"
+hub:
+  address: 127.0.0.1:1122
+listen: 0.0.0.0:1122
+advertise: 0.0.0.0:0
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+      config.peer_addresses().unwrap_err().to_string(),
+      "OUT advertise port must be non-zero"
+    );
+  }
+
+  #[test]
+  fn leaves_omitted_advertise_unresolved_for_listener_port() {
+    let config: OutConfig = serde_yaml::from_str(
+      r#"
+hub:
+  address: 127.0.0.1:1122
+listen: 0.0.0.0:0
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+      config.peer_addresses().unwrap(),
+      Some(("0.0.0.0:0".parse().unwrap(), None))
+    );
   }
 
   #[test]

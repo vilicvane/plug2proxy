@@ -104,6 +104,8 @@ async fn test_hub_out() -> anyhow::Result<()> {
             tags: vec!["system".into()],
           },
         )],
+        listen: None,
+        advertise: None,
         context_dir: out_dir,
         hub: OutHubOptions {
           address: hub_address,

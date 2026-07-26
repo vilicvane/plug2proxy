@@ -1,26 +1,37 @@
-use std::collections::HashMap;
 use std::{
+  collections::HashMap,
+  future::Future,
   net::SocketAddr,
   path::{Path, PathBuf},
-  sync::{Arc, Mutex},
+  pin::Pin,
+  sync::{Arc, Mutex, Weak},
 };
 
+use anyhow::Context;
 use lits::duration;
 use lowkit::SelfWrapExt;
-use tokio::io::AsyncWriteExt;
-use tokio::time::sleep;
+use tokio::{
+  io::AsyncWriteExt,
+  sync::{mpsc, oneshot},
+  task::JoinSet,
+  time::{sleep, timeout},
+};
 
 use crate::{
   cert::NODE_PEM_FILE_NAME,
   r#in::{InConfig, InLike},
   inbound::AnyInbound,
+  mt_connections::MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
   node::{
     DefaultLocalExit, LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeId, NodeMessageToIn,
     NodeMessageToInUpdate, NodeOutDispatcher, OutDispatcher,
   },
+  out::PeerOut,
   primitives::OutExits,
   qomt::qomt_connect,
-  quic_connection::{QuicConnection, QuicStream, create_quiche_config},
+  quic_connection::{
+    QuicConnection, QuicStream, State as QuicConnectionState, create_quiche_config,
+  },
   route::{GeoLite2, Router},
   utils::postcard::postcard_read_stream,
 };
@@ -31,8 +42,52 @@ pub struct In {
   router: Router,
   default_local_out_dispatcher: Arc<dyn OutDispatcher>,
   connected_out_dispatcher_map: Mutex<HashMap<NodeId, Arc<dyn OutDispatcher>>>,
+  peer_out_dispatcher_map: Mutex<HashMap<PeerOutKey, (NodeId, Arc<dyn OutDispatcher>)>>,
+  peer_out_task_map: Mutex<HashMap<PeerOutKey, PeerOutTask>>,
+  peer_out_task_sender: mpsc::UnboundedSender<PeerOutTaskFuture>,
+  peer_out_task_receiver: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<PeerOutTaskFuture>>>,
   hub_options: InHubOptions,
   context_dir: PathBuf,
+}
+
+type PeerOutTaskFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct PeerOutKey {
+  provider_id: NodeId,
+  address: SocketAddr,
+}
+
+struct PeerOutTask {
+  exits: OutExits,
+  generation: NodeId,
+  cancel_sender: oneshot::Sender<()>,
+}
+
+struct PeerOutDispatcherRegistration {
+  in_node: Weak<In>,
+  key: PeerOutKey,
+  generation: NodeId,
+  dispatcher: Arc<dyn OutDispatcher>,
+}
+
+impl Drop for PeerOutDispatcherRegistration {
+  fn drop(&mut self) {
+    let Some(in_node) = self.in_node.upgrade() else {
+      return;
+    };
+
+    let mut dispatcher_map = in_node.peer_out_dispatcher_map.lock().unwrap();
+
+    if dispatcher_map
+      .get(&self.key)
+      .is_some_and(|(generation, current)| {
+        *generation == self.generation && Arc::ptr_eq(current, &self.dispatcher)
+      })
+    {
+      dispatcher_map.remove(&self.key);
+    }
+  }
 }
 
 pub struct InOptions {
@@ -54,6 +109,8 @@ impl In {
       context_dir,
     }: InOptions,
   ) -> Self {
+    let (peer_out_task_sender, peer_out_task_receiver) = mpsc::unbounded_channel();
+
     Self {
       id: NodeId::new(),
       inbounds: inbounds.into_iter().map(|inbound| inbound.arc()).collect(),
@@ -61,6 +118,10 @@ impl In {
       default_local_out_dispatcher: LocalOutDispatcher::new_default(DefaultLocalExit::Private)
         .arc(),
       connected_out_dispatcher_map: HashMap::new().mutex(),
+      peer_out_dispatcher_map: HashMap::new().mutex(),
+      peer_out_task_map: HashMap::new().mutex(),
+      peer_out_task_sender,
+      peer_out_task_receiver: Some(peer_out_task_receiver).tokio_mutex(),
       hub_options,
       context_dir,
     }
@@ -69,9 +130,37 @@ impl In {
   pub async fn run(self) -> anyhow::Result<()> {
     let this = self.arc();
 
-    tokio::try_join!(this.clone().run_inbounds(), this.run_in())?;
+    tokio::try_join!(
+      this.clone().run_inbounds(),
+      this.clone().run_in(),
+      this.run_peer_out_tasks(),
+    )?;
 
     Ok(())
+  }
+
+  async fn run_peer_out_tasks(self: Arc<Self>) -> anyhow::Result<()> {
+    let mut receiver = self
+      .peer_out_task_receiver
+      .lock()
+      .await
+      .take()
+      .expect("peer OUT task supervisor may only run once");
+    let mut join_set = JoinSet::new();
+
+    loop {
+      tokio::select! {
+        task = receiver.recv() => {
+          let task = task.expect("peer OUT task queue unexpectedly closed");
+          join_set.spawn(task);
+        }
+        result = join_set.join_next(), if !join_set.is_empty() => {
+          result
+            .expect("peer OUT task set unexpectedly became empty")
+            .expect("peer OUT task panicked");
+        }
+      }
+    }
   }
 
   async fn run_in(self: Arc<Self>) -> anyhow::Result<()> {
@@ -90,19 +179,23 @@ impl In {
         log::info!("connection to HUB established.");
 
         let hub_id_future = async {
-          let mut stream = qomt_connection.open_stream();
+          timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
+            let mut stream = qomt_connection.open_stream();
 
-          let hello = NodeHello::In(self.id);
+            let hello = NodeHello::In(self.id);
 
-          stream
-            .write_all(&postcard::to_allocvec(&hello).unwrap())
-            .await?;
+            stream
+              .write_all(&postcard::to_allocvec(&hello).unwrap())
+              .await?;
 
-          stream.shutdown().await?;
+            stream.shutdown().await?;
 
-          let NodeHelloAck(node_id) = postcard_read_stream(&mut stream).await?;
+            let NodeHelloAck(node_id) = postcard_read_stream(&mut stream).await?;
 
-          anyhow::Ok((node_id, stream))
+            anyhow::Ok((node_id, stream))
+          })
+          .await
+          .context("timed out waiting for HUB hello acknowledgement")?
         };
 
         async {
@@ -166,12 +259,22 @@ impl In {
         match message {
           NodeMessageToIn::Update(NodeMessageToInUpdate {
             exits,
-            direct_outs: _,
+            peer_outs,
             route_rules,
           }) => {
+            let dispatcher_map = self.connected_out_dispatcher_map.lock().unwrap();
+
+            if !dispatcher_map
+              .get(&node_id)
+              .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
+            {
+              break;
+            }
+
             log::info!("received update from HUB.");
 
             out_dispatcher.update_exits(exits);
+            self.update_peer_outs(peer_outs);
             self.router.register_node_rules(node_id, route_rules);
           }
         }
@@ -181,25 +284,254 @@ impl In {
     }
     .await;
 
-    let removed = {
-      let mut dispatcher_map = self.connected_out_dispatcher_map.lock().unwrap();
+    let mut dispatcher_map = self.connected_out_dispatcher_map.lock().unwrap();
 
-      if dispatcher_map
-        .get(&node_id)
-        .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
-      {
-        dispatcher_map.remove(&node_id);
-        true
-      } else {
-        false
-      }
-    };
-
-    if removed {
+    if dispatcher_map
+      .get(&node_id)
+      .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
+    {
+      dispatcher_map.remove(&node_id);
+      self.update_peer_outs(vec![]);
       self.router.unregister_node_rules(node_id);
     }
 
     update_result
+  }
+
+  fn update_peer_outs(self: &Arc<Self>, peer_outs: Vec<PeerOut>) {
+    let mut desired = HashMap::<PeerOutKey, OutExits>::new();
+
+    for PeerOut {
+      provider_id,
+      exits,
+      address,
+    } in peer_outs
+    {
+      let key = PeerOutKey {
+        provider_id,
+        address,
+      };
+
+      if let Some(existing) = desired.insert(key, exits.clone()) {
+        assert_eq!(
+          existing, exits,
+          "one peer OUT endpoint was declared with inconsistent exits"
+        );
+      }
+    }
+
+    let (removed_tasks, added_tasks) = {
+      let mut task_map = self.peer_out_task_map.lock().unwrap();
+      let removed_keys = task_map
+        .iter()
+        .filter_map(|(key, task)| {
+          desired
+            .get(key)
+            .is_none_or(|exits| exits != &task.exits)
+            .then_some(*key)
+        })
+        .collect::<Vec<_>>();
+      let removed_tasks = removed_keys
+        .into_iter()
+        .filter_map(|key| task_map.remove(&key).map(|task| (key, task)))
+        .collect::<Vec<_>>();
+      let mut added_tasks = Vec::new();
+
+      for (key, exits) in desired {
+        if task_map.contains_key(&key) {
+          continue;
+        }
+
+        let generation = NodeId::new();
+        let (cancel_sender, cancel_receiver) = oneshot::channel();
+
+        task_map.insert(
+          key,
+          PeerOutTask {
+            exits: exits.clone(),
+            generation,
+            cancel_sender,
+          },
+        );
+        added_tasks.push((key, exits, generation, cancel_receiver));
+      }
+
+      (removed_tasks, added_tasks)
+    };
+
+    for (key, task) in removed_tasks {
+      let mut dispatcher_map = self.peer_out_dispatcher_map.lock().unwrap();
+
+      if dispatcher_map
+        .get(&key)
+        .is_some_and(|(generation, _)| *generation == task.generation)
+      {
+        dispatcher_map.remove(&key);
+      }
+
+      drop(dispatcher_map);
+      task.cancel_sender.send(()).ok();
+    }
+
+    for (key, exits, generation, cancel_receiver) in added_tasks {
+      log::info!(
+        "peer OUT {} ({}) declared with exits {:?}.",
+        key.address,
+        key.provider_id,
+        exits
+      );
+
+      self
+        .peer_out_task_sender
+        .send(Box::pin(Self::run_peer_out(
+          Arc::downgrade(self),
+          key,
+          exits,
+          generation,
+          cancel_receiver,
+        )))
+        .expect("peer OUT task supervisor unexpectedly stopped");
+    }
+  }
+
+  async fn run_peer_out(
+    in_node: Weak<Self>,
+    key: PeerOutKey,
+    exits: OutExits,
+    generation: NodeId,
+    mut cancel_receiver: oneshot::Receiver<()>,
+  ) {
+    loop {
+      if in_node.upgrade().is_none() {
+        break;
+      }
+
+      let connection_result = tokio::select! {
+        _ = &mut cancel_receiver => break,
+        result = Self::run_peer_out_connection(
+          in_node.clone(),
+          key,
+          exits.clone(),
+          generation,
+        ) => result,
+      };
+
+      connection_result
+        .inspect_err(|error| {
+          log::warn!(
+            "peer OUT {} ({}) connection error: {error}",
+            key.address,
+            key.provider_id
+          );
+        })
+        .ok();
+
+      tokio::select! {
+        _ = &mut cancel_receiver => break,
+        _ = sleep(duration!("5s")) => {}
+      }
+    }
+
+    log::info!(
+      "peer OUT {} ({}) declaration removed.",
+      key.address,
+      key.provider_id
+    );
+  }
+
+  async fn run_peer_out_connection(
+    in_node: Weak<Self>,
+    key: PeerOutKey,
+    exits: OutExits,
+    generation: NodeId,
+  ) -> anyhow::Result<()> {
+    let Some(in_node_arc) = in_node.upgrade() else {
+      return Ok(());
+    };
+
+    let node_id = in_node_arc.id;
+    let connections = in_node_arc.hub_options.connections.max(1);
+    let pem_path = in_node_arc.context_dir.join(NODE_PEM_FILE_NAME);
+    drop(in_node_arc);
+
+    let mut quiche_config = create_quiche_config(pem_path)?;
+    let qomt_connection = qomt_connect(&mut quiche_config, key.address, connections).await?;
+    let qomt_connection = qomt_connection.arc();
+
+    let NodeHelloAck(provider_id) = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
+      let mut stream = qomt_connection.open_stream();
+
+      stream
+        .write_all(&postcard::to_allocvec(&NodeHello::In(node_id)).unwrap())
+        .await?;
+      stream.shutdown().await?;
+
+      let acknowledgement = postcard_read_stream(&mut stream).await?;
+
+      anyhow::Ok(acknowledgement)
+    })
+    .await
+    .context("timed out waiting for peer OUT hello acknowledgement")??;
+
+    assert_eq!(
+      provider_id, key.provider_id,
+      "peer OUT endpoint acknowledged an unexpected provider id"
+    );
+
+    if qomt_connection.state() != QuicConnectionState::Established {
+      return Ok(());
+    }
+
+    let Some(in_node_arc) = in_node.upgrade() else {
+      return Ok(());
+    };
+    let dispatcher = NodeOutDispatcher::new_peer(exits, qomt_connection.clone()).arc();
+    let registered_dispatcher: Arc<dyn OutDispatcher> = dispatcher;
+
+    {
+      let task_map = in_node_arc.peer_out_task_map.lock().unwrap();
+
+      if !task_map
+        .get(&key)
+        .is_some_and(|task| task.generation == generation)
+      {
+        return Ok(());
+      }
+
+      in_node_arc
+        .peer_out_dispatcher_map
+        .lock()
+        .unwrap()
+        .insert(key, (generation, registered_dispatcher.clone()));
+    }
+    drop(in_node_arc);
+
+    let _registration = PeerOutDispatcherRegistration {
+      in_node: in_node.clone(),
+      key,
+      generation,
+      dispatcher: registered_dispatcher,
+    };
+
+    log::info!(
+      "connection to peer OUT {} ({provider_id}) established.",
+      key.address
+    );
+
+    while let Some(_unexpected_stream) = qomt_connection.accept_stream().await? {
+      log::warn!(
+        "unexpected stream received from peer OUT {} ({}).",
+        key.address,
+        key.provider_id
+      );
+    }
+
+    log::info!(
+      "connection to peer OUT {} ({provider_id}) closed.",
+      key.address
+    );
+
+    Ok(())
   }
 }
 
@@ -220,6 +552,15 @@ impl Node for In {
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
     let mut dispatchers = vec![self.default_local_out_dispatcher.clone()];
+
+    dispatchers.extend(
+      self
+        .peer_out_dispatcher_map
+        .lock()
+        .unwrap()
+        .values()
+        .map(|(_, dispatcher)| dispatcher.clone()),
+    );
 
     dispatchers.extend(
       self
@@ -266,4 +607,299 @@ pub async fn run_in(
   );
 
   in_node.run().await
+}
+
+#[cfg(test)]
+mod tests {
+  use lits::duration;
+  use lowkit::SelfWrapExt;
+  use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, duplex},
+    net::TcpListener,
+    time::{sleep, timeout},
+  };
+
+  use super::*;
+  use crate::{
+    cert::{generate_ca_pem_file, generate_node_pem_file},
+    node::{DefaultLocalExit, LocalOutDispatcher},
+    out::{Out, OutHubOptions, OutOptions},
+    primitives::{
+      OutExit, OutExitMatchPriority, OutExitTag, SocketDestination, SocketDestinationHost,
+    },
+    test::test_dir,
+  };
+
+  #[tokio::test]
+  #[should_panic(expected = "peer OUT task panicked")]
+  async fn peer_task_supervisor_propagates_protocol_panics() {
+    let context_dir = test_dir().join(format!("peer_panic_{}", uuid::Uuid::new_v4()));
+    let in_node = In::new(
+      vec![],
+      Router::new(GeoLite2::new(&context_dir)),
+      InOptions {
+        hub: InHubOptions {
+          address: "127.0.0.1:1".parse().unwrap(),
+          connections: 1,
+        },
+        context_dir,
+      },
+    )
+    .arc();
+
+    in_node
+      .peer_out_task_sender
+      .send(Box::pin(async {
+        panic!("simulated peer OUT protocol error");
+      }))
+      .unwrap();
+
+    in_node.run_peer_out_tasks().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn equivalent_peer_snapshot_reuses_task_and_changed_exits_replace_it() {
+    let context_dir = test_dir().join(format!("peer_reconcile_{}", uuid::Uuid::new_v4()));
+    let in_node = In::new(
+      vec![],
+      Router::new(GeoLite2::new(&context_dir)),
+      InOptions {
+        hub: InHubOptions {
+          address: "127.0.0.1:1".parse().unwrap(),
+          connections: 1,
+        },
+        context_dir,
+      },
+    )
+    .arc();
+    let provider_id = NodeId::new();
+    let address = "127.0.0.1:2".parse().unwrap();
+    let key = PeerOutKey {
+      provider_id,
+      address,
+    };
+    let first_exits = OutExits::new([OutExit::Proxy, OutExit::from("system")]);
+    let first_snapshot = PeerOut {
+      provider_id,
+      exits: first_exits.clone(),
+      address,
+    };
+
+    in_node.update_peer_outs(vec![first_snapshot.clone()]);
+    let first_generation = in_node
+      .peer_out_task_map
+      .lock()
+      .unwrap()
+      .get(&key)
+      .unwrap()
+      .generation;
+
+    in_node.update_peer_outs(vec![first_snapshot]);
+    assert_eq!(
+      in_node
+        .peer_out_task_map
+        .lock()
+        .unwrap()
+        .get(&key)
+        .unwrap()
+        .generation,
+      first_generation
+    );
+
+    in_node.update_peer_outs(vec![PeerOut {
+      provider_id,
+      exits: OutExits::new([
+        OutExit::Proxy,
+        OutExit::from("system"),
+        OutExit::from("video"),
+      ]),
+      address,
+    }]);
+    assert_ne!(
+      in_node
+        .peer_out_task_map
+        .lock()
+        .unwrap()
+        .get(&key)
+        .unwrap()
+        .generation,
+      first_generation
+    );
+
+    in_node.update_peer_outs(vec![]);
+    assert!(in_node.peer_out_task_map.lock().unwrap().is_empty());
+    assert!(in_node.peer_out_dispatcher_map.lock().unwrap().is_empty());
+  }
+
+  #[tokio::test]
+  async fn peer_out_manager_connects_removes_and_reconnects() -> anyhow::Result<()> {
+    timeout(duration!("25s"), async {
+      let test_dir = test_dir().join(format!("peer_manager_{}", uuid::Uuid::new_v4()));
+      let in_dir = test_dir.join("in");
+      let out_dir = test_dir.join("out");
+
+      generate_ca_pem_file(&test_dir).await?;
+      generate_node_pem_file(&test_dir, "in", true).await?;
+      generate_node_pem_file(&test_dir, "out", true).await?;
+
+      let peer_listener = TcpListener::bind("127.0.0.1:0").await?;
+      let peer_endpoint = peer_listener.local_addr()?;
+      let target_listener = TcpListener::bind("127.0.0.1:0").await?;
+      let target_address = target_listener.local_addr()?;
+      let target_task = tokio::spawn(async move {
+        for _ in 0..2 {
+          let (mut stream, _) = target_listener.accept().await?;
+          let mut request = [0; 4];
+          stream.read_exact(&mut request).await?;
+          assert_eq!(&request, b"ping");
+          stream.write_all(b"pong").await?;
+        }
+
+        anyhow::Ok(())
+      });
+
+      let out = Out::new(OutOptions {
+        local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+          DefaultLocalExit::Advertised {
+            tags: vec![OutExitTag::from("system")],
+          },
+        )],
+        listen: None,
+        advertise: None,
+        hub: OutHubOptions {
+          address: "127.0.0.1:1".parse()?,
+          connections: 1,
+        },
+        context_dir: out_dir,
+      })
+      .arc();
+      let provider_id = out.id();
+      let mut peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener));
+
+      let in_node = In::new(
+        vec![],
+        Router::new(GeoLite2::new(&in_dir)),
+        InOptions {
+          hub: InHubOptions {
+            address: "127.0.0.1:1".parse()?,
+            connections: 1,
+          },
+          context_dir: in_dir,
+        },
+      )
+      .arc();
+      let peer_task_supervisor = tokio::spawn(in_node.clone().run_peer_out_tasks());
+      let peer_out = PeerOut {
+        provider_id,
+        exits: OutExits::new([OutExit::Proxy, OutExit::from("system")]),
+        address: peer_endpoint,
+      };
+      let key = PeerOutKey {
+        provider_id,
+        address: peer_endpoint,
+      };
+      let destination = SocketDestination {
+        host: SocketDestinationHost::IpAddress(target_address.ip()),
+        port: target_address.port(),
+      };
+
+      in_node.update_peer_outs(vec![peer_out.clone()]);
+      wait_for_peer_dispatcher(&in_node, key, true).await?;
+      assert_eq!(
+        in_node
+          .peer_out_dispatcher_map
+          .lock()
+          .unwrap()
+          .get(&key)
+          .unwrap()
+          .1
+          .match_exit(&OutExit::from("system"))
+          .unwrap()
+          .priority,
+        OutExitMatchPriority::PeerProvider
+      );
+      assert_proxied_ping(&in_node, destination.clone()).await?;
+
+      peer_listener_task.abort();
+      peer_listener_task.await.ok();
+      wait_for_peer_dispatcher(&in_node, key, false).await?;
+
+      let peer_listener = TcpListener::bind(peer_endpoint).await?;
+      peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener));
+
+      wait_for_peer_dispatcher(&in_node, key, true).await?;
+      assert_proxied_ping(&in_node, destination).await?;
+
+      in_node.update_peer_outs(vec![]);
+      assert!(
+        !in_node
+          .get_out_dispatchers()
+          .iter()
+          .any(|dispatcher| dispatcher.match_exit(&OutExit::from("system")).is_some())
+      );
+
+      target_task.await??;
+      peer_listener_task.abort();
+      peer_task_supervisor.abort();
+
+      anyhow::Ok(())
+    })
+    .await??;
+
+    Ok(())
+  }
+
+  async fn wait_for_peer_dispatcher(
+    in_node: &In,
+    key: PeerOutKey,
+    expected_present: bool,
+  ) -> anyhow::Result<()> {
+    timeout(duration!("8s"), async {
+      loop {
+        let present = in_node
+          .peer_out_dispatcher_map
+          .lock()
+          .unwrap()
+          .contains_key(&key);
+
+        if present == expected_present {
+          return;
+        }
+
+        sleep(duration!("20ms")).await;
+      }
+    })
+    .await
+    .context("timed out waiting for peer dispatcher state")?;
+
+    Ok(())
+  }
+
+  async fn assert_proxied_ping(
+    in_node: &Arc<In>,
+    destination: SocketDestination,
+  ) -> anyhow::Result<()> {
+    let (mut client_stream, proxy_stream) = duplex(1024);
+    let in_node = in_node.clone();
+    let proxy_task = tokio::spawn(async move {
+      in_node
+        .tcp_connect(
+          vec![OutExit::from("system")],
+          destination,
+          proxy_stream.wrap_box(),
+        )
+        .await
+    });
+
+    client_stream.write_all(b"ping").await?;
+
+    let mut response = [0; 4];
+    client_stream.read_exact(&mut response).await?;
+    assert_eq!(&response, b"pong");
+    client_stream.shutdown().await?;
+
+    proxy_task.await??;
+
+    Ok(())
+  }
 }

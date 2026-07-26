@@ -12,12 +12,15 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
   node::{Error, NodeMessageToOut, OutDispatcher, OutDispatcherLoad},
-  primitives::{BidiStream, OutExit, OutExitMatch, OutExits, SocketDestination},
-  quic_connection::QuicConnection,
+  primitives::{
+    BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
+  },
+  quic_connection::{QuicConnection, State as QuicConnectionState},
 };
 
 pub struct NodeOutDispatcher {
   exits: Mutex<OutExits>,
+  match_priority: OutExitMatchPriority,
   qomt_connection: Arc<QuicConnection>,
   active_transfers: AtomicUsize,
   goodput_bytes_per_second: AtomicU64,
@@ -27,8 +30,21 @@ impl NodeOutDispatcher {
   const MIN_GOODPUT_SAMPLE_BYTES: u64 = 64 * 1024;
 
   pub fn new(exits: OutExits, qomt_connection: Arc<QuicConnection>) -> Self {
+    Self::with_match_priority(exits, OutExitMatchPriority::Provider, qomt_connection)
+  }
+
+  pub fn new_peer(exits: OutExits, qomt_connection: Arc<QuicConnection>) -> Self {
+    Self::with_match_priority(exits, OutExitMatchPriority::PeerProvider, qomt_connection)
+  }
+
+  fn with_match_priority(
+    exits: OutExits,
+    match_priority: OutExitMatchPriority,
+    qomt_connection: Arc<QuicConnection>,
+  ) -> Self {
     Self {
       exits: exits.for_advertising().mutex(),
+      match_priority,
       qomt_connection,
       active_transfers: AtomicUsize::new(0),
       goodput_bytes_per_second: AtomicU64::new(0),
@@ -43,7 +59,24 @@ impl NodeOutDispatcher {
 #[async_trait]
 impl OutDispatcher for NodeOutDispatcher {
   fn match_exit(&self, route: &OutExit) -> Option<OutExitMatch> {
-    self.exits.lock().unwrap().match_exit(route)
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return None;
+    }
+
+    self
+      .exits
+      .lock()
+      .unwrap()
+      .match_exit(route)
+      .map(|mut matched| {
+        assert_eq!(
+          matched.priority,
+          OutExitMatchPriority::Provider,
+          "node dispatcher exits must match as provider exits"
+        );
+        matched.priority = self.match_priority;
+        matched
+      })
   }
 
   fn load(&self) -> OutDispatcherLoad {
@@ -97,13 +130,28 @@ impl OutDispatcher for NodeOutDispatcher {
     exit: OutExit,
     destination: SocketDestination,
   ) -> Result<Box<dyn BidiStream>, Error> {
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return Err(Error::OutDispatcherUnavailable);
+    }
+
     let mut stream = self.qomt_connection.open_stream();
 
     let message = NodeMessageToOut::Connect(exit, destination);
 
-    stream
+    if let Err(error) = stream
       .write_all(&postcard::to_allocvec(&message).unwrap())
-      .await?;
+      .await
+    {
+      if self.qomt_connection.state() != QuicConnectionState::Established {
+        return Err(Error::OutDispatcherUnavailable);
+      }
+
+      return Err(error.into());
+    }
+
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return Err(Error::OutDispatcherUnavailable);
+    }
 
     Ok(stream.wrap_box())
   }

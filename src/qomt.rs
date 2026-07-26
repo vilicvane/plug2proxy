@@ -1,13 +1,20 @@
 use std::{net::SocketAddr, ops::Deref};
 
 use anyhow::Context;
-use futures::SinkExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{SinkExt, StreamExt};
+use tokio::{
+  io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+  time::timeout,
+};
 
 use crate::{
-  mt_connections::{MtConnectionsPacket, mt_connections_connect},
+  mt_connections::{
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnections, MtConnectionsPacket, mt_connections_connect,
+  },
   quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicConnection},
 };
+
+pub const MAX_PENDING_QOMT_HANDSHAKES: usize = 64;
 
 impl MtConnectionsPacket for QuicBytesPacket {
   fn len(&self) -> usize {
@@ -65,9 +72,43 @@ pub async fn qomt_connect(
 
   let qomt_connection = QuicConnection::connect(&connection_id, quiche_config, mt_connections);
 
-  qomt_connection.established().await?;
+  timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    qomt_connection.established(),
+  )
+  .await
+  .context("timed out establishing QUIC connection")??;
 
   extend_signal_sender.send(()).ok();
+
+  Ok(qomt_connection)
+}
+
+pub async fn qomt_accept(
+  quiche_config: &mut quiche::Config,
+  mut mt_connections: MtConnections<QuicBytesPacket>,
+) -> anyhow::Result<QuicConnection> {
+  let first_packet = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, mt_connections.next())
+    .await
+    .context("timed out waiting for QUIC connection ID")?
+    .ok_or_else(|| anyhow::anyhow!("missing first packet (QUIC connection ID)"))?;
+
+  anyhow::ensure!(
+    first_packet.len() == quiche::MAX_CONN_ID_LEN,
+    "invalid QUIC connection ID length: expected {}, got {}",
+    quiche::MAX_CONN_ID_LEN,
+    first_packet.len()
+  );
+
+  let connection_id = quiche::ConnectionId::from_vec(first_packet.to_vec());
+  let qomt_connection = QuicConnection::accept(&connection_id, quiche_config, mt_connections);
+
+  timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    qomt_connection.established(),
+  )
+  .await
+  .context("timed out establishing QUIC connection")??;
 
   Ok(qomt_connection)
 }
