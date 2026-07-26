@@ -2,13 +2,13 @@ use std::{
   collections::HashMap,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
+  time::Duration,
 };
 
 use colored::Colorize;
 use futures::StreamExt;
-use itertools::Itertools;
 use lowkit::SelfWrapExt;
-use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinSet};
+use tokio::{io::AsyncWriteExt, net::TcpListener, sync::mpsc, task::JoinSet, time::timeout};
 
 use crate::{
   cert::{CA_PEM_FILE_NAME, NODE_PEM_FILE_NAME, generate_ca_pem_file, generate_node_pem_file},
@@ -17,31 +17,42 @@ use crate::{
   inbound::AnyInbound,
   mt_connections::MtConnectionsListener,
   node::{
-    DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToIn,
-    NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
+    DefaultLocalExit, DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId,
+    NodeMessageToIn, NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
   },
   out::DirectOut,
-  primitives::OutExitTag,
+  primitives::OutExits,
   quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
   route::{GeoLite2, Router},
-  utils::postcard::{postcard_read_stream, postcard_read_stream_to_end},
+  utils::{
+    postcard::{postcard_read_stream, postcard_read_stream_to_end},
+    task::reap_finished_tasks,
+  },
 };
 
 pub struct Hub {
   id: NodeId,
-  tags: Vec<OutExitTag>,
+  exits: OutExits,
   mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
   direct_out_dispatcher: Arc<dyn OutDispatcher>,
   connected_out_dispatcher_map: Mutex<HashMap<NodeId, Arc<dyn OutDispatcher>>>,
-  in_qomt_connection_map: Mutex<HashMap<NodeId, Arc<QuicConnection>>>,
-  out_map: Mutex<HashMap<NodeId, (Vec<OutExitTag>, Option<DirectOut>)>>,
+  in_update_sender_map: Mutex<HashMap<NodeId, Arc<mpsc::UnboundedSender<Vec<u8>>>>>,
+  in_update_lock: tokio::sync::Mutex<()>,
+  out_map: Mutex<HashMap<NodeId, HubOutState>>,
   router: Router,
   inbounds: Vec<Arc<AnyInbound>>,
   context_dir: PathBuf,
 }
 
+const IN_UPDATE_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct HubOutState {
+  exits: OutExits,
+  direct_out: Option<DirectOut>,
+}
+
 pub struct HubOptions {
-  pub tags: Option<Vec<OutExitTag>>,
+  pub default_local_exit: DefaultLocalExit,
   pub context_dir: PathBuf,
 }
 
@@ -50,15 +61,22 @@ impl Hub {
     tcp_listener: TcpListener,
     inbounds: Vec<AnyInbound>,
     router: Router,
-    HubOptions { tags, context_dir }: HubOptions,
+    HubOptions {
+      default_local_exit,
+      context_dir,
+    }: HubOptions,
   ) -> Self {
+    let direct_out_dispatcher = DirectOutDispatcher::new(default_local_exit);
+    let exits = direct_out_dispatcher.exits().for_advertising();
+
     Self {
       id: NodeId::new(),
-      tags: tags.clone().unwrap_or_default(),
+      exits,
       mt_connections_listener: MtConnectionsListener::new(tcp_listener).tokio_mutex(),
-      direct_out_dispatcher: DirectOutDispatcher::new(tags).arc(),
+      direct_out_dispatcher: direct_out_dispatcher.arc(),
       connected_out_dispatcher_map: HashMap::new().mutex(),
-      in_qomt_connection_map: HashMap::new().mutex(),
+      in_update_sender_map: HashMap::new().mutex(),
+      in_update_lock: tokio::sync::Mutex::new(()),
       out_map: HashMap::new().mutex(),
       router,
       inbounds: inbounds.into_iter().map(|inbound| inbound.arc()).collect(),
@@ -97,6 +115,8 @@ impl Hub {
         QuicConnection::accept(&connection_id, &mut quiche_config, mt_connections);
 
       let this = self.clone();
+
+      reap_finished_tasks(&mut join_set, "HUB node session task");
 
       join_set.spawn(async move {
         async {
@@ -153,47 +173,69 @@ impl Hub {
     mut stream: QuicStream,
     qomt_connection: QuicConnection,
   ) {
+    let qomt_connection = qomt_connection.arc();
+    let (update_sender, mut update_receiver) = mpsc::unbounded_channel();
+    let update_sender = Arc::new(update_sender);
+
     {
+      let _update_guard = self.in_update_lock.lock().await;
       let update = self.build_in_update();
 
-      if async {
-        stream.write_all(&update).await?;
-        stream.shutdown().await?;
-
-        log::info!("sent initial IN update to {node_id}.");
-
-        anyhow::Ok(())
-      }
-      .await
-      .inspect_err(|error| {
-        log::error!("error sending initial IN update to {node_id}: {error}");
-      })
-      .is_err()
-      {
+      if update_sender.send(update).is_err() {
+        log::error!("initial IN update queue for {node_id} unexpectedly closed");
         return;
       }
+
+      self
+        .in_update_sender_map
+        .lock()
+        .unwrap()
+        .insert(node_id, update_sender.clone());
+
+      log::info!("queued initial IN update to {node_id}.");
     }
-
-    let qomt_connection = qomt_connection.arc();
-
-    self
-      .in_qomt_connection_map
-      .lock()
-      .unwrap()
-      .insert(node_id, qomt_connection.clone());
 
     let mut join_set = JoinSet::new();
 
+    let update_writer = async {
+      while let Some(update) = update_receiver.recv().await {
+        timeout(IN_UPDATE_SEND_TIMEOUT, stream.write_all(&update))
+          .await
+          .map_err(|_| anyhow::anyhow!("timed out writing IN update"))??;
+      }
+
+      anyhow::Ok(())
+    };
+
+    tokio::pin!(update_writer);
+
     loop {
-      let Ok(Some(mut stream)) = qomt_connection.accept_stream().await.inspect_err(|error| {
-        log::error!("error accepting IN node stream: {}", error);
-      }) else {
-        break;
+      let stream = tokio::select! {
+        result = &mut update_writer => {
+          result.inspect_err(|error| {
+            log::error!("error writing IN update to {node_id}: {error}");
+          }).ok();
+
+          break;
+        }
+        result = qomt_connection.accept_stream() => {
+          let Ok(Some(stream)) = result.inspect_err(|error| {
+            log::error!("error accepting IN node stream: {}", error);
+          }) else {
+            break;
+          };
+
+          stream
+        }
       };
 
       let this = self.clone();
 
+      reap_finished_tasks(&mut join_set, "HUB CONNECT task");
+
       join_set.spawn(async move {
+        let mut stream = stream;
+
         async {
           let message = postcard_read_stream::<NodeMessageToOut>(&mut stream).await?;
 
@@ -216,35 +258,48 @@ impl Hub {
       });
     }
 
-    self.in_qomt_connection_map.lock().unwrap().remove(&node_id);
+    let _update_guard = self.in_update_lock.lock().await;
+    let mut update_sender_map = self.in_update_sender_map.lock().unwrap();
+
+    if update_sender_map
+      .get(&node_id)
+      .is_some_and(|current| Arc::ptr_eq(current, &update_sender))
+    {
+      update_sender_map.remove(&node_id);
+    }
   }
 
   async fn handle_out_node(
     self: Arc<Self>,
     NodeHelloOut {
       id,
+      exits,
       direct_out,
-      tags,
     }: NodeHelloOut,
     qomt_connection: QuicConnection,
   ) {
-    self
-      .out_map
-      .lock()
-      .unwrap()
-      .insert(id, (tags.clone(), direct_out));
-
+    let exits = exits.for_advertising();
     let qomt_connection = qomt_connection.arc();
+    let out_dispatcher = NodeOutDispatcher::new(exits.clone(), qomt_connection.clone()).arc();
+    let registered_out_dispatcher: Arc<dyn OutDispatcher> = out_dispatcher.clone();
 
-    let out_dispatcher = NodeOutDispatcher::new(tags, qomt_connection.clone());
+    {
+      let _update_guard = self.in_update_lock.lock().await;
 
-    self
-      .connected_out_dispatcher_map
-      .lock()
-      .unwrap()
-      .insert(id, out_dispatcher.arc());
+      self
+        .out_map
+        .lock()
+        .unwrap()
+        .insert(id, HubOutState { exits, direct_out });
 
-    self.send_in_update().await;
+      self
+        .connected_out_dispatcher_map
+        .lock()
+        .unwrap()
+        .insert(id, registered_out_dispatcher.clone());
+
+      self.queue_in_update();
+    }
 
     while qomt_connection
       .accept_stream()
@@ -255,32 +310,35 @@ impl Hub {
       .is_ok_and(|stream| stream.is_some())
     {}
 
-    self.out_map.lock().unwrap().remove(&id);
+    let _update_guard = self.in_update_lock.lock().await;
+    let mut dispatcher_map = self.connected_out_dispatcher_map.lock().unwrap();
 
-    self
-      .connected_out_dispatcher_map
-      .lock()
-      .unwrap()
-      .remove(&id);
-
-    self.send_in_update().await;
+    if dispatcher_map
+      .get(&id)
+      .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
+    {
+      dispatcher_map.remove(&id);
+      drop(dispatcher_map);
+      self.out_map.lock().unwrap().remove(&id);
+      self.queue_in_update();
+    }
   }
 
   fn build_in_update(&self) -> Vec<u8> {
     let update = {
       let out_map = self.out_map.lock().unwrap();
+      let exits = self
+        .exits
+        .iter()
+        .chain(out_map.values().flat_map(|out| out.exits.iter()))
+        .cloned()
+        .collect::<OutExits>();
 
       NodeMessageToIn::Update(NodeMessageToInUpdate {
-        tags: self
-          .tags
-          .iter()
-          .chain(out_map.values().flat_map(|(tags, _)| tags))
-          .unique()
-          .cloned()
-          .collect(),
+        exits,
         direct_outs: out_map
           .values()
-          .flat_map(|(_, direct_out)| direct_out)
+          .flat_map(|out| &out.direct_out)
           .cloned()
           .collect(),
         route_rules: self.router.build_rules(),
@@ -290,32 +348,22 @@ impl Hub {
     postcard::to_allocvec(&update).unwrap()
   }
 
-  async fn send_in_update(&self) {
+  /// Queues one complete snapshot for every registered IN. Callers serialize
+  /// state mutations and calls to this method with `in_update_lock`.
+  fn queue_in_update(&self) {
     let update = self.build_in_update();
-
-    let in_nodes = self
-      .in_qomt_connection_map
+    self
+      .in_update_sender_map
       .lock()
       .unwrap()
-      .iter()
-      .map(|(node_id, qomt_connection)| (*node_id, qomt_connection.clone()))
-      .collect_vec();
-
-    for (node_id, qomt_connection) in in_nodes {
-      let mut stream = qomt_connection.open_stream();
-
-      async {
-        stream.write_all(&update).await?;
-        stream.shutdown().await?;
-
-        anyhow::Ok(())
-      }
-      .await
-      .inspect_err(|error| {
-        log::error!("error sending IN update to {node_id}: {}", error);
-      })
-      .ok();
-    }
+      .retain(|node_id, sender| {
+        sender
+          .send(update.clone())
+          .inspect_err(|error| {
+            log::error!("error queueing IN update to {node_id}: {error}");
+          })
+          .is_ok()
+      });
   }
 }
 
@@ -392,12 +440,17 @@ pub async fn run_hub(
     router.register_local_rules(route_config.into());
   }
 
+  let default_local_exit = match tags {
+    None => DefaultLocalExit::Private,
+    Some(tags) => DefaultLocalExit::Advertised { tags },
+  };
+
   let hub = Hub::new(
     tcp_listener,
     inbounds,
     router,
     HubOptions {
-      tags,
+      default_local_exit,
       context_dir: context_dir.to_path_buf(),
     },
   );

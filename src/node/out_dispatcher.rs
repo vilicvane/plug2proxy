@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::{
   node::Error,
-  primitives::{BidiStream, OutExit, SocketDestination},
+  primitives::{BidiStream, OutExit, OutExitMatch, SocketDestination},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -16,7 +16,7 @@ pub struct OutDispatcherLoad {
 
 #[async_trait]
 pub trait OutDispatcher: Send + Sync {
-  fn match_exit(&self, exit: &OutExit) -> bool;
+  fn match_exit(&self, exit: &OutExit) -> Option<OutExitMatch>;
 
   fn load(&self) -> OutDispatcherLoad {
     OutDispatcherLoad::default()

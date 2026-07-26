@@ -21,6 +21,7 @@ use crate::{
   constants::SERVER_COMMON_NAME,
   primitives::ConnectionSide,
   quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
+  utils::task::reap_finished_tasks,
 };
 
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
@@ -270,6 +271,7 @@ impl QuicConnection {
         );
 
         let mut join_set = join_set.lock().unwrap();
+        reap_finished_tasks(&mut join_set, "QUIC stream task");
 
         // stream send loop
         join_set.spawn({

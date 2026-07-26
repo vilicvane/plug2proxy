@@ -12,25 +12,26 @@ use tokio::{io::AsyncWriteExt, task::JoinSet, time::sleep};
 use crate::{
   cert::NODE_PEM_FILE_NAME,
   node::{
-    DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut, OutDispatcher,
+    DefaultLocalExit, DirectOutDispatcher, Node, NodeHello, NodeHelloOut, NodeId, NodeMessageToOut,
+    OutDispatcher,
   },
   out::OutConfig,
-  primitives::OutExitTag,
+  primitives::{OutExitTag, OutExits},
   qomt::qomt_connect,
   quic_connection::{QuicConnection, create_quiche_config},
-  utils::postcard::postcard_read_stream,
+  utils::{postcard::postcard_read_stream, task::reap_finished_tasks},
 };
 
 pub struct Out {
   id: NodeId,
-  tags: Vec<OutExitTag>,
+  exits: OutExits,
   direct_out_dispatcher: Arc<dyn OutDispatcher>,
   hub_options: OutHubOptions,
   context_dir: PathBuf,
 }
 
 pub struct OutOptions {
-  pub tags: Vec<OutExitTag>,
+  pub default_local_exit: DefaultLocalExit,
   pub hub: OutHubOptions,
   pub context_dir: PathBuf,
 }
@@ -43,15 +44,18 @@ pub struct OutHubOptions {
 impl Out {
   pub fn new(
     OutOptions {
-      tags,
+      default_local_exit,
       hub: hub_options,
       context_dir,
     }: OutOptions,
   ) -> Self {
+    let direct_out_dispatcher = DirectOutDispatcher::new(default_local_exit);
+    let exits = direct_out_dispatcher.exits().for_advertising();
+
     Self {
       id: NodeId::new(),
-      tags: tags.clone(),
-      direct_out_dispatcher: DirectOutDispatcher::new(tags.some()).arc(),
+      exits,
+      direct_out_dispatcher: direct_out_dispatcher.arc(),
       hub_options,
       context_dir,
     }
@@ -93,8 +97,8 @@ impl Out {
 
         let hello = NodeHello::Out(NodeHelloOut {
           id: node_id,
+          exits: self.exits.clone(),
           direct_out: None,
-          tags: self.tags.clone(),
         });
 
         stream
@@ -126,6 +130,8 @@ impl Out {
       };
 
       let this = self.clone();
+
+      reap_finished_tasks(&mut join_set, "OUT stream task");
 
       join_set.spawn(async move {
         async {
@@ -178,8 +184,13 @@ pub async fn run_out(
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
 
+  let default_local_exit = match tags {
+    None => DefaultLocalExit::Private,
+    Some(tags) => DefaultLocalExit::Advertised { tags },
+  };
+
   let out = Out::new(OutOptions {
-    tags: tags.unwrap_or_default(),
+    default_local_exit,
     hub: hub.into(),
     context_dir: context_dir.to_owned(),
   });

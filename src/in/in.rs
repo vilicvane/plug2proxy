@@ -8,16 +8,17 @@ use std::{
 use lits::duration;
 use lowkit::SelfWrapExt;
 use tokio::io::AsyncWriteExt;
-use tokio::{task::JoinSet, time::sleep};
+use tokio::time::sleep;
 
 use crate::{
   cert::NODE_PEM_FILE_NAME,
   r#in::{InConfig, InLike},
   inbound::AnyInbound,
   node::{
-    DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeId, NodeMessageToIn,
+    DefaultLocalExit, DirectOutDispatcher, Node, NodeHello, NodeHelloAck, NodeId, NodeMessageToIn,
     NodeMessageToInUpdate, NodeOutDispatcher, OutDispatcher,
   },
+  primitives::OutExits,
   qomt::qomt_connect,
   quic_connection::{QuicConnection, QuicStream, create_quiche_config},
   route::{GeoLite2, Router},
@@ -57,7 +58,7 @@ impl In {
       id: NodeId::new(),
       inbounds: inbounds.into_iter().map(|inbound| inbound.arc()).collect(),
       router,
-      direct_out_dispatcher: DirectOutDispatcher::new(None).arc(),
+      direct_out_dispatcher: DirectOutDispatcher::new(DefaultLocalExit::Private).arc(),
       connected_out_dispatcher_map: HashMap::new().mutex(),
       hub_options,
       context_dir,
@@ -145,71 +146,59 @@ impl In {
   async fn handle_hub_node(
     self: Arc<Self>,
     node_id: NodeId,
-    initial_stream: QuicStream,
+    mut update_stream: QuicStream,
     qomt_connection: Arc<QuicConnection>,
   ) -> anyhow::Result<()> {
-    let out_dispatcher = NodeOutDispatcher::new(vec![], qomt_connection.clone()).arc();
+    let out_dispatcher = NodeOutDispatcher::new(OutExits::default(), qomt_connection.clone()).arc();
+    let registered_out_dispatcher: Arc<dyn OutDispatcher> = out_dispatcher.clone();
 
     self
       .connected_out_dispatcher_map
       .lock()
       .unwrap()
-      .insert(node_id, out_dispatcher.clone());
+      .insert(node_id, registered_out_dispatcher.clone());
 
-    let mut join_set = JoinSet::new();
+    let update_result = async {
+      loop {
+        let message = postcard_read_stream::<NodeMessageToIn>(&mut update_stream).await?;
 
-    let mut initial_stream = initial_stream.some();
+        match message {
+          NodeMessageToIn::Update(NodeMessageToInUpdate {
+            exits,
+            direct_outs: _,
+            route_rules,
+          }) => {
+            log::info!("received update from HUB.");
 
-    loop {
-      let mut stream = initial_stream.take();
-
-      if stream.is_none() {
-        stream = qomt_connection.accept_stream().await?;
-      }
-
-      let Some(mut stream) = stream else {
-        break;
-      };
-
-      let this = self.clone();
-      let out_dispatcher = out_dispatcher.clone();
-
-      join_set.spawn(async move {
-        async {
-          let message = postcard_read_stream::<NodeMessageToIn>(&mut stream).await?;
-
-          match message {
-            NodeMessageToIn::Update(NodeMessageToInUpdate {
-              tags,
-              direct_outs,
-              route_rules,
-            }) => {
-              log::info!("received update from HUB.");
-
-              out_dispatcher.update_tags(tags);
-              this.router.register_node_rules(node_id, route_rules);
-            }
+            out_dispatcher.update_exits(exits);
+            self.router.register_node_rules(node_id, route_rules);
           }
-
-          anyhow::Ok(())
         }
-        .await
-        .inspect_err(|error| {
-          log::error!("error handling TCP stream: {}", error);
-        })
-        .ok();
-      });
+      }
+      #[allow(unreachable_code)]
+      anyhow::Ok(())
+    }
+    .await;
+
+    let removed = {
+      let mut dispatcher_map = self.connected_out_dispatcher_map.lock().unwrap();
+
+      if dispatcher_map
+        .get(&node_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
+      {
+        dispatcher_map.remove(&node_id);
+        true
+      } else {
+        false
+      }
+    };
+
+    if removed {
+      self.router.unregister_node_rules(node_id);
     }
 
-    self
-      .connected_out_dispatcher_map
-      .lock()
-      .unwrap()
-      .remove(&node_id);
-
-    self.router.unregister_node_rules(node_id);
-
-    Ok(())
+    update_result
   }
 }
 

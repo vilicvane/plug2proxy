@@ -141,5 +141,46 @@ impl Router {
     }
 
     *self.merged_rules_cache.lock().unwrap() = rules;
+
+    self.cache.invalidate_all();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{
+    primitives::{SocketDestination, SocketDestinationHost},
+    test::test_dir,
+  };
+
+  #[tokio::test]
+  async fn rule_updates_invalidate_cached_destination_matches() {
+    let router = Router::new(GeoLite2::new(test_dir()));
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
+      port: 80,
+    };
+
+    router.register_local_rules(vec![
+      FallbackRule {
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+    ]);
+
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::Direct]
+    );
+
+    router.register_local_rules(vec![
+      FallbackRule {
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+    ]);
+
+    assert_eq!(router.match_exits(&destination).await, vec![OutExit::Proxy]);
   }
 }

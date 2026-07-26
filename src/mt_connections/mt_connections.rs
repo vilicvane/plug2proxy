@@ -22,7 +22,7 @@ use tokio::{
 };
 use uuid::{Uuid, serde::compact};
 
-use crate::primitives::ConnectionSide;
+use crate::{primitives::ConnectionSide, utils::task::reap_finished_tasks};
 
 pub const MT_CONNECTIONS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MT_CONNECTIONS_PACKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -166,6 +166,7 @@ where
           tcp_stream = tcp_stream_receiver.recv() => tcp_stream,
           _ = all_connections_closed_receiver.recv() => None,
         ) {
+          reap_finished_tasks(&mut join_set, "mTCP path task");
           join_set.spawn(pipe_bidirectional(tcp_stream));
         }
       }),

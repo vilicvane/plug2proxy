@@ -12,12 +12,12 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
   node::{Error, NodeMessageToOut, OutDispatcher, OutDispatcherLoad},
-  primitives::{BidiStream, OutExit, OutExitTag, SocketDestination},
+  primitives::{BidiStream, OutExit, OutExitMatch, OutExits, SocketDestination},
   quic_connection::QuicConnection,
 };
 
 pub struct NodeOutDispatcher {
-  tags: Mutex<Vec<OutExitTag>>,
+  exits: Mutex<OutExits>,
   qomt_connection: Arc<QuicConnection>,
   active_transfers: AtomicUsize,
   goodput_bytes_per_second: AtomicU64,
@@ -26,29 +26,24 @@ pub struct NodeOutDispatcher {
 impl NodeOutDispatcher {
   const MIN_GOODPUT_SAMPLE_BYTES: u64 = 64 * 1024;
 
-  pub fn new(tags: Vec<OutExitTag>, qomt_connection: Arc<QuicConnection>) -> Self {
+  pub fn new(exits: OutExits, qomt_connection: Arc<QuicConnection>) -> Self {
     Self {
-      tags: tags.mutex(),
+      exits: exits.for_advertising().mutex(),
       qomt_connection,
       active_transfers: AtomicUsize::new(0),
       goodput_bytes_per_second: AtomicU64::new(0),
     }
   }
 
-  pub fn update_tags(&self, tags: Vec<OutExitTag>) {
-    *self.tags.lock().unwrap() = tags;
+  pub fn update_exits(&self, exits: OutExits) {
+    *self.exits.lock().unwrap() = exits.for_advertising();
   }
 }
 
 #[async_trait]
 impl OutDispatcher for NodeOutDispatcher {
-  fn match_exit(&self, route: &OutExit) -> bool {
-    match route {
-      OutExit::Direct => false,
-      OutExit::Proxy => true,
-      OutExit::Any => true,
-      OutExit::Tag(route_tag) => self.tags.lock().unwrap().iter().any(|tag| tag == route_tag),
-    }
+  fn match_exit(&self, route: &OutExit) -> Option<OutExitMatch> {
+    self.exits.lock().unwrap().match_exit(route)
   }
 
   fn load(&self) -> OutDispatcherLoad {

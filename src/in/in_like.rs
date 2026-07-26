@@ -8,6 +8,7 @@ use crate::{
   node::{self, Node},
   primitives::{BidiStream, SocketDestination},
   route::Router,
+  utils::task::reap_finished_tasks,
 };
 
 #[async_trait]
@@ -51,6 +52,8 @@ pub trait InLike: Node + 'static {
       let (destination, stream) = inbound.accept_tcp_connect().await?;
 
       let hub = self.clone();
+
+      reap_finished_tasks(&mut join_set, "inbound TCP task");
 
       join_set.spawn(async move {
         hub

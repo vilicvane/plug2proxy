@@ -14,11 +14,11 @@ use uuid::Uuid;
 use crate::{
   node::{OutDispatcher, OutDispatcherLoad},
   out::DirectOut,
-  primitives::{BidiStream, OutExit, OutExitTag, SocketDestination},
+  primitives::{BidiStream, OutExit, OutExits, SocketDestination},
   route::AnyRule,
 };
 
-static NEXT_PROXY_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
+static NEXT_OUT_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
 
 #[async_trait]
 pub trait Node {
@@ -39,33 +39,43 @@ pub trait Node {
 
     let out_dispatchers = self.get_out_dispatchers();
 
-    let Some((matched_exit, out_dispatcher)) = exits.iter().find_map(|route| {
-      let matching_dispatchers = out_dispatchers
+    let Some((matched_exit, resolved_exit, out_dispatcher)) = exits.iter().find_map(|route| {
+      let mut matching_dispatchers = out_dispatchers
         .iter()
-        .filter(|dispatcher| dispatcher.match_exit(route))
+        .filter_map(|dispatcher| {
+          dispatcher
+            .match_exit(route)
+            .map(|matched| (dispatcher, matched))
+        })
         .collect_vec();
 
       if matching_dispatchers.is_empty() {
         return None;
       }
 
-      // Preserve the established DIRECT-first behavior for ANY. Explicit
-      // proxy/tag routes are spread across equivalent OUT connections so each
-      // one has an independent QUIC and TCP congestion window. Once real
-      // transfers have sampled those paths, avoid persistently slow pool slots.
-      let index = if *route == OutExit::Any {
-        0
-      } else {
-        select_dispatcher_index(
-          &matching_dispatchers
-            .iter()
-            .map(|dispatcher| dispatcher.load())
-            .collect_vec(),
-          NEXT_PROXY_DISPATCHER.fetch_add(1, Ordering::Relaxed),
-        )
-      };
+      // Selector order remains the outer priority. Within one selector, ANY
+      // prefers the current node's default local exit independently of
+      // dispatcher insertion order. Load and goodput only compare candidates
+      // in the same semantic priority layer.
+      let best_priority = matching_dispatchers
+        .iter()
+        .map(|(_, matched)| matched.priority)
+        .min()
+        .unwrap();
 
-      Some((route, matching_dispatchers[index].clone()))
+      matching_dispatchers.retain(|(_, matched)| matched.priority == best_priority);
+
+      let index = select_dispatcher_index(
+        &matching_dispatchers
+          .iter()
+          .map(|(dispatcher, _)| dispatcher.load())
+          .collect_vec(),
+        NEXT_OUT_DISPATCHER.fetch_add(1, Ordering::Relaxed),
+      );
+
+      let (dispatcher, matched) = matching_dispatchers.swap_remove(index);
+
+      Some((route, matched.resolved_exit, Arc::clone(dispatcher)))
     }) else {
       log::info!("TCP {destination} no out dispatcher matched.");
       return Ok(());
@@ -93,9 +103,7 @@ pub trait Node {
     let started_at = Instant::now();
 
     let transfer_result = async {
-      let mut out_stream = out_dispatcher
-        .connect(matched_exit.clone(), destination)
-        .await?;
+      let mut out_stream = out_dispatcher.connect(resolved_exit, destination).await?;
 
       copy_bidirectional(&mut stream, &mut out_stream)
         .await
@@ -182,7 +190,7 @@ pub enum NodeHello {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NodeHelloOut {
   pub id: NodeId,
-  pub tags: Vec<OutExitTag>,
+  pub exits: OutExits,
   pub direct_out: Option<DirectOut>,
 }
 
@@ -202,7 +210,7 @@ pub enum NodeMessageToIn {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NodeMessageToInUpdate {
-  pub tags: Vec<OutExitTag>,
+  pub exits: OutExits,
   pub direct_outs: Vec<DirectOut>,
   pub route_rules: Vec<AnyRule>,
 }
@@ -224,6 +232,8 @@ mod tests {
     sync::oneshot,
     time::timeout,
   };
+
+  use crate::primitives::OutExitMatch;
 
   use super::*;
 
@@ -247,8 +257,8 @@ mod tests {
 
   #[async_trait]
   impl OutDispatcher for BlockingTestDispatcher {
-    fn match_exit(&self, exit: &OutExit) -> bool {
-      exit == &OutExit::Any
+    fn match_exit(&self, exit: &OutExit) -> Option<OutExitMatch> {
+      OutExits::new([OutExit::Proxy]).match_exit(exit)
     }
 
     async fn connect(
@@ -275,8 +285,8 @@ mod tests {
 
   #[async_trait]
   impl OutDispatcher for UnmatchedTestDispatcher {
-    fn match_exit(&self, _exit: &OutExit) -> bool {
-      false
+    fn match_exit(&self, _exit: &OutExit) -> Option<OutExitMatch> {
+      None
     }
 
     async fn connect(
@@ -286,6 +296,66 @@ mod tests {
     ) -> Result<Box<dyn BidiStream>, Error> {
       unreachable!("unmatched dispatcher must not be connected")
     }
+  }
+
+  struct RecordingTestDispatcher {
+    exits: OutExits,
+    connected_exits: Mutex<Vec<OutExit>>,
+  }
+
+  impl RecordingTestDispatcher {
+    fn new(exits: Vec<OutExit>) -> Self {
+      Self {
+        exits: OutExits::new(exits),
+        connected_exits: Mutex::new(vec![]),
+      }
+    }
+
+    fn connected_exits(&self) -> Vec<OutExit> {
+      self.connected_exits.lock().unwrap().clone()
+    }
+  }
+
+  #[async_trait]
+  impl OutDispatcher for RecordingTestDispatcher {
+    fn match_exit(&self, exit: &OutExit) -> Option<OutExitMatch> {
+      self.exits.match_exit(exit)
+    }
+
+    async fn connect(
+      &self,
+      exit: OutExit,
+      _destination: SocketDestination,
+    ) -> Result<Box<dyn BidiStream>, Error> {
+      self.connected_exits.lock().unwrap().push(exit);
+
+      let (stream, peer) = duplex(64);
+      drop(peer);
+
+      Ok(Box::new(stream))
+    }
+  }
+
+  fn test_destination() -> SocketDestination {
+    SocketDestination {
+      host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
+      port: 80,
+    }
+  }
+
+  async fn run_selection(
+    exits: Vec<OutExit>,
+    dispatchers: Vec<Arc<dyn OutDispatcher>>,
+  ) -> Result<(), Error> {
+    let node = TakingTestNode {
+      dispatchers: Mutex::new(Some(dispatchers)),
+    };
+    let (node_stream, peer) = duplex(64);
+    drop(peer);
+
+    node
+      .tcp_connect(exits, test_destination(), Box::new(node_stream))
+      .await
   }
 
   fn adaptive_load(goodput: Option<u64>, active_transfers: usize) -> OutDispatcherLoad {
@@ -337,6 +407,46 @@ mod tests {
     ];
 
     assert_eq!(select_dispatcher_index(&loads, 3), 1);
+  }
+
+  #[tokio::test]
+  async fn any_prefers_default_local_independently_of_dispatcher_order() -> anyhow::Result<()> {
+    let provider = Arc::new(RecordingTestDispatcher::new(vec![OutExit::Proxy]));
+    let default_local = Arc::new(RecordingTestDispatcher::new(vec![OutExit::Direct]));
+    let dispatchers: Vec<Arc<dyn OutDispatcher>> = vec![provider.clone(), default_local.clone()];
+
+    run_selection(vec![OutExit::Any], dispatchers).await?;
+
+    assert_eq!(default_local.connected_exits(), vec![OutExit::Direct]);
+    assert!(provider.connected_exits().is_empty());
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn any_resolves_to_proxy_when_only_provider_matches() -> anyhow::Result<()> {
+    let provider = Arc::new(RecordingTestDispatcher::new(vec![OutExit::Proxy]));
+    let dispatchers: Vec<Arc<dyn OutDispatcher>> = vec![provider.clone()];
+
+    run_selection(vec![OutExit::Any], dispatchers).await?;
+
+    assert_eq!(provider.connected_exits(), vec![OutExit::Proxy]);
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn selector_order_precedes_any_internal_priority() -> anyhow::Result<()> {
+    let provider = Arc::new(RecordingTestDispatcher::new(vec![OutExit::Proxy]));
+    let default_local = Arc::new(RecordingTestDispatcher::new(vec![OutExit::Direct]));
+    let dispatchers: Vec<Arc<dyn OutDispatcher>> = vec![default_local.clone(), provider.clone()];
+
+    run_selection(vec![OutExit::Proxy, OutExit::Any], dispatchers).await?;
+
+    assert_eq!(provider.connected_exits(), vec![OutExit::Proxy]);
+    assert!(default_local.connected_exits().is_empty());
+
+    Ok(())
   }
 
   #[tokio::test]
