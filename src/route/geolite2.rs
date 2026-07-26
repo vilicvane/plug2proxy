@@ -70,17 +70,7 @@ impl GeoLite2 {
       .ok()?
       .flatten()?;
 
-    let mut codes = Vec::new();
-
-    if let Some(iso_code) = record.country.iso_code {
-      codes.push(iso_code.to_string());
-    }
-
-    if let Some(code) = record.continent.code {
-      codes.push(code.to_string());
-    }
-
-    if codes.is_empty() { None } else { Some(codes) }
+    region_codes(&record)
   }
 
   async fn schedule_reader_update(
@@ -123,5 +113,67 @@ impl GeoLite2 {
       })
       .await;
     }
+  }
+}
+
+fn region_codes(record: &Country<'_>) -> Option<Vec<String>> {
+  let mut codes = Vec::new();
+
+  if let Some(iso_code) = record
+    .country
+    .iso_code
+    .or(record.registered_country.iso_code)
+  {
+    codes.push(iso_code.to_string());
+  }
+
+  if let Some(code) = record.continent.code {
+    codes.push(code.to_string());
+  }
+
+  if codes.is_empty() { None } else { Some(codes) }
+}
+
+#[cfg(test)]
+mod tests {
+  use maxminddb::geoip2::{Country, country};
+
+  use super::region_codes;
+
+  #[test]
+  fn region_codes_falls_back_to_registered_country() {
+    let record = Country {
+      registered_country: country::Country {
+        iso_code: Some("US"),
+        ..Default::default()
+      },
+      ..Default::default()
+    };
+
+    assert_eq!(region_codes(&record), Some(vec!["US".to_string()]));
+  }
+
+  #[test]
+  fn region_codes_prefers_country() {
+    let record = Country {
+      country: country::Country {
+        iso_code: Some("CN"),
+        ..Default::default()
+      },
+      registered_country: country::Country {
+        iso_code: Some("US"),
+        ..Default::default()
+      },
+      continent: country::Continent {
+        code: Some("AS"),
+        ..Default::default()
+      },
+      ..Default::default()
+    };
+
+    assert_eq!(
+      region_codes(&record),
+      Some(vec!["CN".to_string(), "AS".to_string()])
+    );
   }
 }
