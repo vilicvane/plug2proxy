@@ -441,14 +441,6 @@ impl QuicConnection {
 
                   if finished {
                     log::debug!("{side} {id}: stream FIN received");
-                    write
-                      .shutdown()
-                      .await
-                      .inspect_err(|error| {
-                        log::warn!("error shutting down stream: {}", error);
-                      })
-                      .ok();
-
                     break;
                   }
                 }
@@ -459,14 +451,6 @@ impl QuicConnection {
                   // stream_finished() intentionally remains true.
                   if connection.lock().unwrap().stream_finished(id) {
                     log::debug!("{side} {id}: stream observed finished");
-                    write
-                      .shutdown()
-                      .await
-                      .inspect_err(|error| {
-                        log::warn!("error shutting down stream: {}", error);
-                      })
-                      .ok();
-
                     break;
                   }
 
@@ -484,6 +468,14 @@ impl QuicConnection {
                 }
               }
             }
+
+            write
+              .shutdown()
+              .await
+              .inspect_err(|error| {
+                log::warn!("error shutting down stream: {}", error);
+              })
+              .ok();
 
             connection_signals.stream_task_finished(id, &stream_signals);
             log::debug!("{side} {id}: stream recv loop ended");

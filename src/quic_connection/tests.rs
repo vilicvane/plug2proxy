@@ -431,7 +431,21 @@ async fn transport_close_wakes_stream_waiters() -> anyhow::Result<()> {
       hub_quic_connection.established()
     )?;
 
+    let mut out_stream = out_quic_connection.open_stream();
+    out_stream.write_u8(1).await?;
+
+    let mut hub_stream = hub_quic_connection
+      .accept_stream()
+      .await?
+      .expect("test stream should arrive");
+    assert_eq!(hub_stream.read_u8().await?, 1);
+
     drop(hub_quic_connection);
+
+    timeout(duration!("1s"), out_stream.read_u8())
+      .await
+      .map_err(|_| anyhow::anyhow!("existing stream waiter was not woken after transport close"))?
+      .expect_err("transport close should end the existing stream");
 
     let error = timeout(duration!("1s"), out_quic_connection.accept_stream())
       .await
