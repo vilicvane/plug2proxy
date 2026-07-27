@@ -43,6 +43,10 @@ pub trait Node {
 
   fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>>;
 
+  fn out_dispatcher_revision(&self) -> u64 {
+    0
+  }
+
   async fn tcp_connect(
     &self,
     exits: Vec<OutExit>,
@@ -165,6 +169,7 @@ async fn forward_udp(
   let mut association_senders = HashMap::<OutExit, mpsc::UnboundedSender<OutgoingUdpPacket>>::new();
   let mut association_tasks = JoinSet::new();
   let logged_flows = new_udp_flow_log_cache(UDP_FLOW_LOG_IDLE_TIMEOUT);
+  let mut out_dispatcher_revision = node.out_dispatcher_revision();
 
   loop {
     tokio::select! {
@@ -179,13 +184,24 @@ async fn forward_udp(
           continue;
         }
 
+        let current_out_dispatcher_revision = node.out_dispatcher_revision();
+
+        if current_out_dispatcher_revision != out_dispatcher_revision {
+          association_senders.clear();
+          out_dispatcher_revision = current_out_dispatcher_revision;
+        }
+
         let mut selected_association = None;
 
         for requested_exit in &exits {
-          if let Some(sender) = association_senders
+          if association_senders
             .get(requested_exit)
-            .filter(|sender| !sender.is_closed())
+            .is_some_and(mpsc::UnboundedSender::is_closed)
           {
+            association_senders.remove(requested_exit);
+          }
+
+          if let Some(sender) = association_senders.get(requested_exit) {
             selected_association = Some((requested_exit.clone(), sender.clone()));
             break;
           }
@@ -516,7 +532,10 @@ mod tests {
   use std::{
     collections::VecDeque,
     pin::Pin,
-    sync::{Mutex, atomic::AtomicUsize},
+    sync::{
+      Mutex,
+      atomic::{AtomicU64, AtomicUsize},
+    },
     task::{Context, Poll},
   };
 
@@ -554,6 +573,32 @@ mod tests {
 
     fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
       self.dispatchers.clone()
+    }
+  }
+
+  struct MutableTestNode {
+    dispatchers: Mutex<Vec<Arc<dyn OutDispatcher>>>,
+    out_dispatcher_revision: AtomicU64,
+  }
+
+  impl MutableTestNode {
+    fn set_dispatchers(&self, dispatchers: Vec<Arc<dyn OutDispatcher>>) {
+      *self.dispatchers.lock().unwrap() = dispatchers;
+      self.out_dispatcher_revision.fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
+  impl Node for MutableTestNode {
+    fn id(&self) -> NodeId {
+      NodeId::new()
+    }
+
+    fn get_out_dispatchers(&self) -> Vec<Arc<dyn OutDispatcher>> {
+      self.dispatchers.lock().unwrap().clone()
+    }
+
+    fn out_dispatcher_revision(&self) -> u64 {
+      self.out_dispatcher_revision.load(Ordering::Relaxed)
     }
   }
 
@@ -765,6 +810,67 @@ mod tests {
   struct RecoveringUdpTestDispatcher {
     exit: OutExit,
     association_attempts: AtomicUsize,
+  }
+
+  struct RecordingUdpTestDispatcher {
+    exit: OutExit,
+    match_priority: OutExitMatchPriority,
+    received_payloads: Arc<Mutex<Vec<Vec<u8>>>>,
+  }
+
+  impl RecordingUdpTestDispatcher {
+    fn new(exit: OutExit, match_priority: OutExitMatchPriority) -> Self {
+      Self {
+        exit,
+        match_priority,
+        received_payloads: Arc::new(Mutex::new(vec![])),
+      }
+    }
+
+    fn received_payloads(&self) -> Vec<Vec<u8>> {
+      self.received_payloads.lock().unwrap().clone()
+    }
+  }
+
+  #[async_trait]
+  impl OutDispatcher for RecordingUdpTestDispatcher {
+    fn match_exit(&self, exit: &OutExit) -> Option<OutExitMatch> {
+      OutExits::new([OutExit::Proxy, self.exit.clone()])
+        .match_exit(exit)
+        .map(|mut matched| {
+          matched.priority = self.match_priority;
+          matched
+        })
+    }
+
+    async fn connect(
+      &self,
+      _exit: OutExit,
+      _destination: SocketDestination,
+    ) -> Result<Box<dyn BidiStream>, Error> {
+      unreachable!("this dispatcher is only used for UDP")
+    }
+
+    async fn associate(&self, _exit: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
+      let (stream, peer) = duplex(4096);
+      let outbound =
+        crate::udp_forwarder::UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(
+          Box::new(stream),
+        );
+      let mut peer =
+        crate::udp_forwarder::UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(
+          Box::new(peer),
+        );
+      let received_payloads = self.received_payloads.clone();
+
+      tokio::spawn(async move {
+        while let Some(packet) = peer.next().await {
+          received_payloads.lock().unwrap().push(packet.payload);
+        }
+      });
+
+      Ok(Box::new(outbound))
+    }
   }
 
   #[async_trait]
@@ -1295,6 +1401,82 @@ mod tests {
     assert!(!route_task.is_finished());
     route_task.abort();
     route_task.await.unwrap_err();
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn udp_association_follows_dispatcher_changes() -> anyhow::Result<()> {
+    use crate::udp_forwarder::{UdpPacketSource, UdpPacketStream};
+
+    let exit = OutExit::from("us");
+    let relay_dispatcher = Arc::new(RecordingUdpTestDispatcher::new(
+      exit.clone(),
+      OutExitMatchPriority::Provider,
+    ));
+    let old_peer_dispatcher = Arc::new(RecordingUdpTestDispatcher::new(
+      exit.clone(),
+      OutExitMatchPriority::PeerProvider,
+    ));
+    let new_peer_dispatcher = Arc::new(RecordingUdpTestDispatcher::new(
+      exit.clone(),
+      OutExitMatchPriority::PeerProvider,
+    ));
+    let node = Arc::new(MutableTestNode {
+      dispatchers: Mutex::new(vec![relay_dispatcher.clone()]),
+      out_dispatcher_revision: AtomicU64::new(0),
+    });
+    let (node_stream, client_stream) = duplex(4096);
+    let node_packets =
+      UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(node_stream));
+    let mut client_packets =
+      UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(client_stream));
+    let relay_task = tokio::spawn({
+      let node = node.clone();
+      let exit = exit.clone();
+      async move { node.relay_udp(exit, Box::new(node_packets)).await }
+    });
+    let packet = |payload| OutgoingUdpPacket {
+      source: UdpPacketSource {
+        via: vec![],
+        address: "127.0.0.1:50000".parse().unwrap(),
+      },
+      destination: test_destination(),
+      payload,
+    };
+
+    client_packets.send(packet(vec![1])).await?;
+    timeout(Duration::from_secs(1), async {
+      while relay_dispatcher.received_payloads().is_empty() {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await?;
+
+    node.set_dispatchers(vec![relay_dispatcher.clone(), old_peer_dispatcher.clone()]);
+    client_packets.send(packet(vec![2])).await?;
+    timeout(Duration::from_secs(1), async {
+      while old_peer_dispatcher.received_payloads().is_empty() {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await?;
+
+    node.set_dispatchers(vec![relay_dispatcher.clone(), new_peer_dispatcher.clone()]);
+    client_packets.send(packet(vec![3])).await?;
+    timeout(Duration::from_secs(1), async {
+      while new_peer_dispatcher.received_payloads().is_empty() {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await?;
+
+    assert_eq!(relay_dispatcher.received_payloads(), vec![vec![1]]);
+    assert_eq!(old_peer_dispatcher.received_payloads(), vec![vec![2]]);
+    assert_eq!(new_peer_dispatcher.received_payloads(), vec![vec![3]]);
+
+    relay_task.abort();
+    relay_task.await.unwrap_err();
 
     Ok(())
   }

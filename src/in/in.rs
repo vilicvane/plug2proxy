@@ -4,7 +4,10 @@ use std::{
   net::SocketAddr,
   path::{Path, PathBuf},
   pin::Pin,
-  sync::{Arc, Mutex, Weak},
+  sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicU64, Ordering},
+  },
 };
 
 use anyhow::Context;
@@ -46,6 +49,7 @@ pub struct In {
   peer_out_task_map: Mutex<HashMap<PeerOutKey, PeerOutTask>>,
   peer_out_task_sender: mpsc::UnboundedSender<PeerOutTaskFuture>,
   peer_out_task_receiver: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<PeerOutTaskFuture>>>,
+  out_dispatcher_revision: AtomicU64,
   hub_options: InHubOptions,
   context_dir: PathBuf,
 }
@@ -86,6 +90,7 @@ impl Drop for PeerOutDispatcherRegistration {
       })
     {
       dispatcher_map.remove(&self.key);
+      in_node.mark_out_dispatchers_changed();
     }
   }
 }
@@ -122,6 +127,7 @@ impl In {
       peer_out_task_map: HashMap::new().mutex(),
       peer_out_task_sender,
       peer_out_task_receiver: Some(peer_out_task_receiver).tokio_mutex(),
+      out_dispatcher_revision: AtomicU64::new(0),
       hub_options,
       context_dir,
     }
@@ -137,6 +143,10 @@ impl In {
     )?;
 
     Ok(())
+  }
+
+  fn mark_out_dispatchers_changed(&self) {
+    self.out_dispatcher_revision.fetch_add(1, Ordering::Relaxed);
   }
 
   async fn run_peer_out_tasks(self: Arc<Self>) -> anyhow::Result<()> {
@@ -251,6 +261,7 @@ impl In {
       .lock()
       .unwrap()
       .insert(node_id, registered_out_dispatcher.clone());
+    self.mark_out_dispatchers_changed();
 
     let update_result = async {
       loop {
@@ -274,6 +285,7 @@ impl In {
             log::info!("received update from HUB.");
 
             out_dispatcher.update_exits(exits);
+            self.mark_out_dispatchers_changed();
             self.update_peer_outs(peer_outs);
             self.router.register_node_rules(node_id, route_rules);
           }
@@ -291,6 +303,7 @@ impl In {
       .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
     {
       dispatcher_map.remove(&node_id);
+      self.mark_out_dispatchers_changed();
       self.update_peer_outs(vec![]);
       self.router.unregister_node_rules(node_id);
     }
@@ -367,6 +380,7 @@ impl In {
         .is_some_and(|(generation, _)| *generation == task.generation)
       {
         dispatcher_map.remove(&key);
+        self.mark_out_dispatchers_changed();
       }
 
       drop(dispatcher_map);
@@ -503,6 +517,7 @@ impl In {
         .lock()
         .unwrap()
         .insert(key, (generation, registered_dispatcher.clone()));
+      in_node_arc.mark_out_dispatchers_changed();
     }
     drop(in_node_arc);
 
@@ -572,6 +587,10 @@ impl Node for In {
     );
 
     dispatchers
+  }
+
+  fn out_dispatcher_revision(&self) -> u64 {
+    self.out_dispatcher_revision.load(Ordering::Relaxed)
   }
 }
 

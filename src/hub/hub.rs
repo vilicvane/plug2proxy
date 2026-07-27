@@ -2,7 +2,10 @@ use std::{
   collections::HashMap,
   net::SocketAddr,
   path::{Path, PathBuf},
-  sync::{Arc, Mutex},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+  },
   time::Duration,
 };
 
@@ -45,6 +48,7 @@ pub struct Hub {
   mt_connections_listener: tokio::sync::Mutex<MtConnectionsListener<QuicBytesPacket>>,
   local_out_dispatchers: Vec<Arc<dyn OutDispatcher>>,
   connected_out_dispatcher_map: Mutex<HashMap<NodeId, Arc<dyn OutDispatcher>>>,
+  out_dispatcher_revision: AtomicU64,
   in_update_sender_map: Mutex<HashMap<NodeId, Arc<mpsc::UnboundedSender<Vec<u8>>>>>,
   in_update_lock: tokio::sync::Mutex<()>,
   out_map: Mutex<HashMap<NodeId, HubOutState>>,
@@ -92,6 +96,7 @@ impl Hub {
       mt_connections_listener: MtConnectionsListener::new(tcp_listener).tokio_mutex(),
       local_out_dispatchers,
       connected_out_dispatcher_map: HashMap::new().mutex(),
+      out_dispatcher_revision: AtomicU64::new(0),
       in_update_sender_map: HashMap::new().mutex(),
       in_update_lock: tokio::sync::Mutex::new(()),
       out_map: HashMap::new().mutex(),
@@ -107,6 +112,10 @@ impl Hub {
     tokio::try_join!(this.clone().run_hub(), this.run_inbounds())?;
 
     Ok(())
+  }
+
+  fn mark_out_dispatchers_changed(&self) {
+    self.out_dispatcher_revision.fetch_add(1, Ordering::Relaxed);
   }
 
   async fn run_hub(self: Arc<Self>) -> anyhow::Result<()> {
@@ -342,6 +351,7 @@ impl Hub {
         .lock()
         .unwrap()
         .insert(session_id, registered_out_dispatcher.clone());
+      self.mark_out_dispatchers_changed();
 
       self.queue_in_update();
     }
@@ -363,6 +373,7 @@ impl Hub {
       .is_some_and(|current| Arc::ptr_eq(current, &registered_out_dispatcher))
     {
       dispatcher_map.remove(&session_id);
+      self.mark_out_dispatchers_changed();
       drop(dispatcher_map);
       self.out_map.lock().unwrap().remove(&session_id);
       self.queue_in_update();
@@ -469,6 +480,10 @@ impl Node for Hub {
     );
 
     dispatchers
+  }
+
+  fn out_dispatcher_revision(&self) -> u64 {
+    self.out_dispatcher_revision.load(Ordering::Relaxed)
   }
 }
 
