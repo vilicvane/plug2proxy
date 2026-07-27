@@ -5,13 +5,15 @@ use std::{
     Arc,
     atomic::{AtomicUsize, Ordering},
   },
-  time::Instant,
+  time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use colored::Colorize;
 use futures::{SinkExt, StreamExt};
 use itertools::Itertools;
+use lits::duration;
+use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use tokio::{io::copy_bidirectional, sync::mpsc, task::JoinSet};
 use uuid::Uuid;
@@ -25,11 +27,15 @@ use crate::{
   route::{AnyRule, Router},
   udp_forwarder::{
     InboundUdpPacketStream, IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket,
-    UdpPacketStreamError,
+    UdpPacketSource, UdpPacketStreamError,
   },
 };
 
 static NEXT_OUT_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
+const UDP_FLOW_LOG_CACHE_CAPACITY: u64 = 1024 * 64;
+const UDP_FLOW_LOG_IDLE_TIMEOUT: Duration = duration!("1m");
+
+type UdpFlow = (UdpPacketSource, SocketDestination, OutExit);
 
 #[async_trait]
 pub trait Node {
@@ -158,6 +164,7 @@ async fn forward_udp(
   let (incoming_sender, mut incoming_receiver) = mpsc::unbounded_channel();
   let mut association_senders = HashMap::<OutExit, mpsc::UnboundedSender<OutgoingUdpPacket>>::new();
   let mut association_tasks = JoinSet::new();
+  let logged_flows = new_udp_flow_log_cache(UDP_FLOW_LOG_IDLE_TIMEOUT);
 
   loop {
     tokio::select! {
@@ -203,16 +210,8 @@ async fn forward_udp(
           association_senders.insert(matched_exit.clone(), association_sender.clone());
 
           log::info!(
-            "UDP {} -> {}",
-            outgoing.destination,
-            exits
-              .iter()
-              .map(|exit| if exit == &matched_exit {
-                exit.to_string().cyan().to_string()
-              } else {
-                exit.to_string()
-              })
-              .join(",")
+            "UDP association opened: exit={matched_exit}, first_destination={}",
+            outgoing.destination
           );
 
           selected_association = Some((matched_exit, association_sender));
@@ -223,6 +222,27 @@ async fn forward_udp(
           log::debug!("UDP {} no out dispatcher matched.", outgoing.destination);
           continue;
         };
+
+        if should_log_udp_flow(
+          &logged_flows,
+          &outgoing.source,
+          &outgoing.destination,
+          &matched_exit,
+        ) {
+          log::info!(
+            "UDP {} -> {} via {}",
+            outgoing.source.address,
+            outgoing.destination,
+            exits
+              .iter()
+              .map(|exit| if exit == &matched_exit {
+                exit.to_string().cyan().to_string()
+              } else {
+                exit.to_string()
+              })
+              .join(",")
+          );
+        }
 
         if association_sender.send(outgoing).is_err() {
           association_senders.remove(&matched_exit);
@@ -249,6 +269,29 @@ async fn forward_udp(
   }
 
   Ok(())
+}
+
+fn new_udp_flow_log_cache(idle_timeout: Duration) -> Cache<UdpFlow, ()> {
+  Cache::builder()
+    .max_capacity(UDP_FLOW_LOG_CACHE_CAPACITY)
+    .time_to_idle(idle_timeout)
+    .build()
+}
+
+fn should_log_udp_flow(
+  logged_flows: &Cache<UdpFlow, ()>,
+  source: &UdpPacketSource,
+  destination: &SocketDestination,
+  exit: &OutExit,
+) -> bool {
+  let flow = (source.clone(), destination.clone(), exit.clone());
+
+  if logged_flows.get(&flow).is_some() {
+    return false;
+  }
+
+  logged_flows.insert(flow, ());
+  true
 }
 
 async fn open_udp_association(
@@ -824,6 +867,88 @@ mod tests {
       active_transfers,
       goodput_bytes_per_second: goodput,
     }
+  }
+
+  #[test]
+  fn udp_flow_logging_deduplicates_only_the_same_flow() {
+    let logged_flows = new_udp_flow_log_cache(Duration::from_secs(60));
+    let source = UdpPacketSource {
+      via: vec![],
+      address: "127.0.0.1:50000".parse().unwrap(),
+    };
+    let destination = test_destination();
+    let exit = OutExit::from("us");
+
+    assert!(should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &destination,
+      &exit
+    ));
+    assert!(!should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &destination,
+      &exit
+    ));
+
+    let mut other_source = source.clone();
+    other_source.address.set_port(50001);
+    assert!(should_log_udp_flow(
+      &logged_flows,
+      &other_source,
+      &destination,
+      &exit
+    ));
+
+    let mut other_destination = destination.clone();
+    other_destination.port += 1;
+    assert!(should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &other_destination,
+      &exit
+    ));
+
+    assert!(should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &destination,
+      &OutExit::Direct
+    ));
+  }
+
+  #[tokio::test]
+  async fn udp_flow_logging_repeats_after_the_flow_expires() {
+    let logged_flows = new_udp_flow_log_cache(Duration::from_millis(25));
+    let source = UdpPacketSource {
+      via: vec![],
+      address: "127.0.0.1:50000".parse().unwrap(),
+    };
+    let destination = test_destination();
+    let exit = OutExit::from("us");
+
+    assert!(should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &destination,
+      &exit
+    ));
+    assert!(!should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &destination,
+      &exit
+    ));
+
+    sleep(Duration::from_millis(75)).await;
+
+    assert!(should_log_udp_flow(
+      &logged_flows,
+      &source,
+      &destination,
+      &exit
+    ));
   }
 
   #[test]
