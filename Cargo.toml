@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [[bin]]
-name = "p2p"
+name = "plug2proxy"
 path = "src/main.rs"
 
 [profile.release]

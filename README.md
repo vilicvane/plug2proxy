@@ -64,23 +64,47 @@ Plug2Proxy 仍处于早期实验阶段：
 
 ## 开始尝试
 
-准备 Rust 工具链后构建：
+准备 Rust 工具链后，日常调试和测试直接使用 Cargo：
 
 ```bash
-cargo build --release
+cargo build --locked
+cargo test --locked
 ```
 
-生成的二进制是：
+用于部署的 release 则使用
+[Cross](https://github.com/cross-rs/cross)。这在“本机编译、远程部署”时
+尤其重要：项目的 `Cross.toml` 固定了目标构建环境，避免本机较新的 glibc
+或不同 CPU 架构让二进制无法在服务器上运行。运行 Cross 前需要准备好
+Docker。
+
+根据目标服务器架构选择命令：
+
+```bash
+# x86_64
+cross build --locked --release --target x86_64-unknown-linux-gnu
+
+# ARM64 / aarch64
+cross build --locked --release --target aarch64-unknown-linux-gnu
+```
+
+对应的二进制是：
 
 ```text
-target/release/p2p
+target/x86_64-unknown-linux-gnu/release/plug2proxy
+target/aarch64-unknown-linux-gnu/release/plug2proxy
 ```
 
-教程中的部署示例将它安装为更易识别的 `plug2proxy`：
+部署时只取与服务器架构对应的文件。教程中的示例将它安装为更易识别的
+`plug2proxy`，例如：
 
 ```bash
-sudo install -m 0755 target/release/p2p /usr/sbin/plug2proxy
+sudo install -m 0755 \
+  target/x86_64-unknown-linux-gnu/release/plug2proxy \
+  /usr/sbin/plug2proxy
 ```
+
+第一次 Cross 构建会编译 BoringSSL，耗时通常明显长于后续增量构建。
+IN、HUB 和 OUT 应使用同一份代码和 lockfile 构建的版本。
 
 第一次尝试建议只准备一个 HUB、一个 IN 和一个 OUT，先通过 HUB relay
 跑通 SOCKS5，再增加 tag 路由、peer 直连或透明代理。这样每次只引入一个
