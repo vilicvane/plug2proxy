@@ -41,6 +41,15 @@ async fn configures_tcp_liveness_detection() -> anyhow::Result<()> {
   configure_mt_tcp_stream(&client_stream)?;
 
   let socket = SockRef::from(&client_stream);
+
+  #[cfg(target_os = "linux")]
+  if std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_congestion_control")?
+    .split_ascii_whitespace()
+    .any(|algorithm| algorithm == "bbr")
+  {
+    assert_eq!(socket.tcp_congestion()?, b"bbr");
+  }
+
   assert!(socket.keepalive()?);
   assert_eq!(socket.tcp_keepalive_time()?, MT_CONNECTIONS_KEEPALIVE_TIME);
   assert_eq!(

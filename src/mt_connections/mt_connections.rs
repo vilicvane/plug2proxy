@@ -35,6 +35,15 @@ pub(crate) fn configure_mt_tcp_stream(tcp_stream: &TcpStream) -> std::io::Result
   tcp_stream.set_nodelay(true)?;
 
   let socket = SockRef::from(tcp_stream);
+
+  #[cfg(target_os = "linux")]
+  socket
+    .set_tcp_congestion(b"bbr")
+    .inspect_err(|error| {
+      log::warn!("failed to enable BBR for mTCP connection: {error}");
+    })
+    .ok();
+
   socket.set_tcp_keepalive(
     &TcpKeepalive::new()
       .with_time(MT_CONNECTIONS_KEEPALIVE_TIME)
