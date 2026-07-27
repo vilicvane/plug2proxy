@@ -10,6 +10,8 @@ use plug2proxy::{
 use serde::Deserialize;
 use tokio::fs::read_to_string;
 
+const CONFIG_FILE: &str = "config.json";
+
 #[derive(Debug, Parser)]
 struct Args {
   #[arg(long)]
@@ -42,9 +44,10 @@ async fn main() -> anyhow::Result<()> {
     generate_node_cert(node_cert_common_name).await?;
     return Ok(());
   } else {
-    let config = serde_yaml::from_str::<Config>(&read_to_string("config.yaml").await.context(
-      format!("failed to read config file {}.", "config.yaml".yellow()),
-    )?)?;
+    let config_source = read_to_string(CONFIG_FILE)
+      .await
+      .with_context(|| format!("failed to read config file {}.", CONFIG_FILE.yellow()))?;
+    let config = parse_config(config_source)?;
 
     match config {
       Config::Hub(hub_config) => {
@@ -62,6 +65,12 @@ async fn main() -> anyhow::Result<()> {
   Ok(())
 }
 
+fn parse_config(mut source: String) -> anyhow::Result<Config> {
+  json_strip_comments::strip(&mut source).context("failed to strip JSONC comments")?;
+
+  serde_json::from_str(&source).context("failed to parse JSONC config")
+}
+
 #[allow(clippy::disallowed_macros)]
 async fn generate_node_cert(node_cert_common_name: String) -> anyhow::Result<()> {
   let path = generate_node_pem_file("", &node_cert_common_name, true).await?;
@@ -74,10 +83,43 @@ async fn generate_node_cert(node_cert_common_name: String) -> anyhow::Result<()>
     "{}",
     format!(
       "> Please copy this file to node's working directory that contains {}.",
-      "config.yaml".yellow()
+      CONFIG_FILE.yellow()
     )
     .dimmed()
   );
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn parses_jsonc_comments_and_trailing_commas() {
+    let config = parse_config(
+      r#"{
+        // Comments and trailing commas are accepted.
+        "type": "hub",
+        "listen": "127.0.0.1:1122",
+        /*
+         * Comment markers inside strings must remain untouched.
+         */
+        "inbounds": {
+          "socks5": {
+            "listen": "127.0.0.1:1080",
+          },
+        },
+      }"#
+        .to_owned(),
+    )
+    .unwrap();
+
+    let Config::Hub(config) = config else {
+      panic!("expected HUB config");
+    };
+
+    assert_eq!(config.listen.to_string(), "127.0.0.1:1122");
+    assert!(config.inbounds.is_some());
+  }
 }

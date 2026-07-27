@@ -27,7 +27,7 @@ relay。
 ## 有什么特点
 
 - **一套进程，三种角色**：`in`、`hub`、`out` 使用同一个二进制和
-  YAML 配置。
+  JSONC 配置。
 
 - **可组合的出口**：OUT 可以声明多个 tag，也可以把 local exit 绑定到指定 Linux
   interface，用于串接 WireGuard 或其他网络出口。

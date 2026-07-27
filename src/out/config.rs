@@ -166,12 +166,13 @@ mod tests {
 
   #[test]
   fn rejects_advertise_without_peer_listener() {
-    let config: OutConfig = serde_yaml::from_str(
-      r#"
-hub:
-  address: 127.0.0.1:1122
-advertise: 203.0.113.10:2233
-"#,
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": {
+          "address": "127.0.0.1:1122"
+        },
+        "advertise": "203.0.113.10:2233"
+      }"#,
     )
     .unwrap();
 
@@ -183,13 +184,14 @@ advertise: 203.0.113.10:2233
 
   #[test]
   fn rejects_zero_advertise_port() {
-    let config: OutConfig = serde_yaml::from_str(
-      r#"
-hub:
-  address: 127.0.0.1:1122
-listen: 0.0.0.0:1122
-advertise: 0.0.0.0:0
-"#,
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": {
+          "address": "127.0.0.1:1122"
+        },
+        "listen": "0.0.0.0:1122",
+        "advertise": "0.0.0.0:0"
+      }"#,
     )
     .unwrap();
 
@@ -201,12 +203,13 @@ advertise: 0.0.0.0:0
 
   #[test]
   fn leaves_omitted_advertise_unresolved_for_listener_port() {
-    let config: OutConfig = serde_yaml::from_str(
-      r#"
-hub:
-  address: 127.0.0.1:1122
-listen: 0.0.0.0:0
-"#,
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": {
+          "address": "127.0.0.1:1122"
+        },
+        "listen": "0.0.0.0:0"
+      }"#,
     )
     .unwrap();
 
@@ -218,18 +221,25 @@ listen: 0.0.0.0:0
 
   #[test]
   fn parses_default_and_interface_bound_local_exits() {
-    let config: OutConfig = serde_yaml::from_str(
-      r#"
-hub:
-  address: 127.0.0.1:1122
-exits:
-  - type: local
-    tags: [us, youtube]
-  - type: local
-    tags: [us, netflix]
-    bind:
-      interface: wg0
-"#,
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": {
+          "address": "127.0.0.1:1122"
+        },
+        "exits": [
+          {
+            "type": "local",
+            "tags": ["us", "youtube"]
+          },
+          {
+            "type": "local",
+            "tags": ["us", "netflix"],
+            "bind": {
+              "interface": "wg0"
+            }
+          }
+        ]
+      }"#,
     )
     .unwrap();
 
@@ -278,15 +288,21 @@ exits:
 
   #[test]
   fn rejects_multiple_default_local_exits() {
-    let config: OutConfig = serde_yaml::from_str(
-      r#"
-hub:
-  address: 127.0.0.1:1122
-exits:
-  - type: local
-  - type: local
-    bind: {}
-"#,
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": {
+          "address": "127.0.0.1:1122"
+        },
+        "exits": [
+          {
+            "type": "local"
+          },
+          {
+            "type": "local",
+            "bind": {}
+          }
+        ]
+      }"#,
     )
     .unwrap();
 

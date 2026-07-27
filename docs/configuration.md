@@ -21,16 +21,19 @@ SOCKS5 client → IN → HUB → OUT → target
 - 每台机器的工作目录均为 `/etc/plug2proxy`；
 - 将文中的 `HUB_ADDRESS` 替换为 HUB 的实际 IP 或域名。
 
-Plug2Proxy 从当前工作目录读取 `config.yaml` 和 `node.pem`。下文所有启动
+Plug2Proxy 从当前工作目录读取 `config.json` 和 `node.pem`。配置语法支持
+`//`、`/* ... */` 注释和尾逗号。下文所有启动
 命令都必须在 `/etc/plug2proxy` 中执行。
 
 ## 1. 配置并启动 HUB
 
-在 HUB 创建 `/etc/plug2proxy/config.yaml`：
+在 HUB 创建 `/etc/plug2proxy/config.json`：
 
-```yaml
-type: hub
-listen: 0.0.0.0:1122
+```jsonc
+{
+  "type": "hub",
+  "listen": "0.0.0.0:1122"
+}
 ```
 
 启动 HUB：
@@ -84,18 +87,22 @@ chmod 0600 /etc/plug2proxy/node.pem
 
 ## 3. 配置并启动 OUT
 
-在 OUT 创建 `/etc/plug2proxy/config.yaml`：
+在 OUT 创建 `/etc/plug2proxy/config.json`：
 
-```yaml
-type: out
-
-hub:
-  address: HUB_ADDRESS:1122
-  connections: 4
-
-exits:
-  - type: local
-    tags: [us]
+```jsonc
+{
+  "type": "out",
+  "hub": {
+    "address": "HUB_ADDRESS:1122",
+    "connections": 4
+  },
+  "exits": [
+    {
+      "type": "local",
+      "tags": ["us"]
+    }
+  ]
+}
 ```
 
 这里的 `us` 是 exit tag，名称可以修改，但必须与 IN 路由中的 `exit`
@@ -112,23 +119,29 @@ plug2proxy
 
 ## 4. 配置并启动 IN
 
-在 IN 创建 `/etc/plug2proxy/config.yaml`：
+在 IN 创建 `/etc/plug2proxy/config.json`：
 
-```yaml
-type: in
-
-hub:
-  address: HUB_ADDRESS:1122
-  connections: 4
-
-route:
-  rules:
-    - type: fallback
-      exit: us
-
-inbounds:
-  socks5:
-    listen: 127.0.0.1:1080
+```jsonc
+{
+  "type": "in",
+  "hub": {
+    "address": "HUB_ADDRESS:1122",
+    "connections": 4
+  },
+  "route": {
+    "rules": [
+      {
+        "type": "fallback",
+        "exit": "us"
+      }
+    ]
+  },
+  "inbounds": {
+    "socks5": {
+      "listen": "127.0.0.1:1080"
+    }
+  }
+}
 ```
 
 `fallback` 让所有请求使用带 `us` tag 的 OUT。
