@@ -1,11 +1,12 @@
 use std::{
+  marker::PhantomData,
   pin::Pin,
   task::{Context, Poll},
 };
 
 use futures::{Sink, Stream};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::ReadBuf;
 
 use crate::{
   primitives::BidiStream,
@@ -46,132 +47,208 @@ impl<T> OutboundUdpPacketStream for T where
 {
 }
 
-pub struct UdpPacketStream<TSend: 'static, TReceive: 'static> {
-  packet_sink: flume::r#async::SendSink<'static, TSend>,
-  packet_stream: flume::r#async::RecvStream<'static, TReceive>,
+struct PendingFrame {
+  encoded: Vec<u8>,
+  written: usize,
 }
 
-impl<TSend, TReceive> UdpPacketStream<TSend, TReceive>
-where
-  TSend: Serialize + Send + Sync + 'static,
-  TReceive: DeserializeOwned + Send + 'static,
-{
-  pub fn new(stream: Box<dyn BidiStream>) -> Self {
-    let (outgoing_sender, outgoing_receiver) = flume::unbounded::<TSend>();
-    let (incoming_sender, incoming_receiver) = flume::unbounded::<TReceive>();
-    let (mut read, mut write) = tokio::io::split(stream);
+enum ReadState {
+  Length {
+    encoded: [u8; size_of::<u32>()],
+    read: usize,
+  },
+  Payload {
+    encoded: Vec<u8>,
+    read: usize,
+  },
+}
 
-    tokio::spawn(async move {
-      while let Ok(packet) = outgoing_receiver.recv_async().await {
-        if let Err(error) = write_packet_frame(&mut write, &packet).await {
-          log::debug!("UDP packet stream writer stopped: {error}");
-          return;
-        }
-      }
-
-      write.shutdown().await.ok();
-    });
-
-    tokio::spawn(async move {
-      loop {
-        match read_packet_frame(&mut read).await {
-          Ok(Some(packet)) => {
-            if incoming_sender.send_async(packet).await.is_err() {
-              break;
-            }
-          }
-          Ok(None) => break,
-          Err(error) => {
-            log::debug!("UDP packet stream reader stopped: {error}");
-            break;
-          }
-        }
-      }
-    });
-
-    Self {
-      packet_sink: outgoing_sender.into_sink(),
-      packet_stream: incoming_receiver.into_stream(),
+impl ReadState {
+  fn length() -> Self {
+    Self::Length {
+      encoded: [0; size_of::<u32>()],
+      read: 0,
     }
   }
 }
 
-impl<TSend: 'static, TReceive: 'static> Sink<TSend> for UdpPacketStream<TSend, TReceive> {
-  type Error = UdpPacketStreamError;
+pub struct UdpPacketStream<TSend: 'static, TReceive: 'static> {
+  stream: Box<dyn BidiStream>,
+  pending_frame: Option<PendingFrame>,
+  read_state: ReadState,
+  read_closed: bool,
+  packet_types: PhantomData<fn(TSend, TReceive)>,
+}
 
-  fn poll_ready(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Pin::new(&mut self.packet_sink)
-      .poll_ready(context)
-      .map_err(|_| UdpPacketStreamError::Closed)
+impl<TSend: 'static, TReceive: 'static> UdpPacketStream<TSend, TReceive> {
+  pub fn new(stream: Box<dyn BidiStream>) -> Self {
+    Self {
+      stream,
+      pending_frame: None,
+      read_state: ReadState::length(),
+      read_closed: false,
+      packet_types: PhantomData,
+    }
   }
 
-  fn start_send(mut self: Pin<&mut Self>, packet: TSend) -> Result<(), Self::Error> {
-    Pin::new(&mut self.packet_sink)
-      .start_send(packet)
-      .map_err(|_| UdpPacketStreamError::Closed)
+  fn poll_write_pending(
+    &mut self,
+    context: &mut Context,
+  ) -> Poll<Result<(), UdpPacketStreamError>> {
+    while let Some(frame) = &mut self.pending_frame {
+      let written =
+        match Pin::new(&mut *self.stream).poll_write(context, &frame.encoded[frame.written..]) {
+          Poll::Ready(Ok(0)) => {
+            return Poll::Ready(Err(
+              std::io::Error::from(std::io::ErrorKind::WriteZero).into(),
+            ));
+          }
+          Poll::Ready(Ok(written)) => written,
+          Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+          Poll::Pending => return Poll::Pending,
+        };
+
+      frame.written += written;
+
+      if frame.written == frame.encoded.len() {
+        self.pending_frame = None;
+      }
+    }
+
+    Poll::Ready(Ok(()))
+  }
+
+  fn stop_reading(&mut self, error: impl std::fmt::Display) -> Poll<Option<TReceive>> {
+    log::debug!("UDP packet stream reader stopped: {error}");
+    self.read_closed = true;
+    Poll::Ready(None)
+  }
+}
+
+impl<TSend, TReceive> Sink<TSend> for UdpPacketStream<TSend, TReceive>
+where
+  TSend: Serialize + 'static,
+  TReceive: 'static,
+{
+  type Error = UdpPacketStreamError;
+
+  fn poll_ready(self: Pin<&mut Self>, context: &mut Context) -> Poll<Result<(), Self::Error>> {
+    self.get_mut().poll_write_pending(context)
+  }
+
+  fn start_send(self: Pin<&mut Self>, packet: TSend) -> Result<(), Self::Error> {
+    let this = self.get_mut();
+    assert!(
+      this.pending_frame.is_none(),
+      "start_send called before UdpPacketStream became ready"
+    );
+
+    let payload = postcard::to_allocvec(&packet)?;
+
+    if payload.len() > MAX_UDP_PACKET_FRAME_SIZE {
+      return Err(UdpPacketStreamError::FrameTooLarge(payload.len()));
+    }
+
+    let mut encoded = Vec::with_capacity(size_of::<u32>() + payload.len());
+    encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&payload);
+    this.pending_frame = Some(PendingFrame {
+      encoded,
+      written: 0,
+    });
+
+    Ok(())
   }
 
   fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Pin::new(&mut self.packet_sink)
+    match self.as_mut().get_mut().poll_write_pending(context) {
+      Poll::Ready(Ok(())) => {}
+      Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+      Poll::Pending => return Poll::Pending,
+    }
+
+    Pin::new(&mut *self.get_mut().stream)
       .poll_flush(context)
-      .map_err(|_| UdpPacketStreamError::Closed)
+      .map_err(UdpPacketStreamError::from)
   }
 
   fn poll_close(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Pin::new(&mut self.packet_sink)
-      .poll_close(context)
-      .map_err(|_| UdpPacketStreamError::Closed)
+    match self.as_mut().poll_flush(context) {
+      Poll::Ready(Ok(())) => {}
+      Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+      Poll::Pending => return Poll::Pending,
+    }
+
+    Pin::new(&mut *self.get_mut().stream)
+      .poll_shutdown(context)
+      .map_err(UdpPacketStreamError::from)
   }
 }
 
-impl<TSend: 'static, TReceive: 'static> Stream for UdpPacketStream<TSend, TReceive> {
+impl<TSend, TReceive> Stream for UdpPacketStream<TSend, TReceive>
+where
+  TSend: 'static,
+  TReceive: DeserializeOwned + 'static,
+{
   type Item = TReceive;
 
-  fn poll_next(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Option<Self::Item>> {
-    Pin::new(&mut self.packet_stream).poll_next(context)
+  fn poll_next(self: Pin<&mut Self>, context: &mut Context) -> Poll<Option<Self::Item>> {
+    let this = self.get_mut();
+
+    if this.read_closed {
+      return Poll::Ready(None);
+    }
+
+    loop {
+      let (target, read) = match &mut this.read_state {
+        ReadState::Length { encoded, read } => (&mut encoded[..], read),
+        ReadState::Payload { encoded, read } => (&mut encoded[..], read),
+      };
+      let mut read_buffer = ReadBuf::new(&mut target[*read..]);
+
+      match Pin::new(&mut *this.stream).poll_read(context, &mut read_buffer) {
+        Poll::Ready(Ok(())) => {}
+        Poll::Ready(Err(error)) => return this.stop_reading(error),
+        Poll::Pending => return Poll::Pending,
+      }
+
+      let read_now = read_buffer.filled().len();
+
+      if read_now == 0 && *read < target.len() {
+        if matches!(this.read_state, ReadState::Length { read: 0, .. }) {
+          this.read_closed = true;
+          return Poll::Ready(None);
+        }
+
+        return this.stop_reading(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+      }
+
+      *read += read_now;
+
+      if *read < target.len() {
+        continue;
+      }
+
+      match std::mem::replace(&mut this.read_state, ReadState::length()) {
+        ReadState::Length { encoded, .. } => {
+          let length = u32::from_be_bytes(encoded) as usize;
+
+          if length > MAX_UDP_PACKET_FRAME_SIZE {
+            return this.stop_reading(UdpPacketStreamError::FrameTooLarge(length));
+          }
+
+          this.read_state = ReadState::Payload {
+            encoded: vec![0; length],
+            read: 0,
+          };
+        }
+        ReadState::Payload { encoded, .. } => match postcard::from_bytes(&encoded) {
+          Ok(packet) => return Poll::Ready(Some(packet)),
+          Err(error) => return this.stop_reading(error),
+        },
+      }
+    }
   }
-}
-
-async fn write_packet_frame<T>(
-  writer: &mut (impl AsyncWrite + Unpin),
-  packet: &T,
-) -> Result<(), UdpPacketStreamError>
-where
-  T: Serialize,
-{
-  let encoded = postcard::to_allocvec(packet)?;
-
-  if encoded.len() > MAX_UDP_PACKET_FRAME_SIZE {
-    return Err(UdpPacketStreamError::FrameTooLarge(encoded.len()));
-  }
-
-  writer.write_u32(encoded.len() as u32).await?;
-  writer.write_all(&encoded).await?;
-  writer.flush().await?;
-
-  Ok(())
-}
-
-async fn read_packet_frame<T>(
-  reader: &mut (impl AsyncRead + Unpin),
-) -> Result<Option<T>, UdpPacketStreamError>
-where
-  T: DeserializeOwned,
-{
-  let length = match reader.read_u32().await {
-    Ok(length) => length as usize,
-    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-    Err(error) => return Err(error.into()),
-  };
-
-  if length > MAX_UDP_PACKET_FRAME_SIZE {
-    return Err(UdpPacketStreamError::FrameTooLarge(length));
-  }
-
-  let mut encoded = vec![0; length];
-  reader.read_exact(&mut encoded).await?;
-
-  Ok(Some(postcard::from_bytes(&encoded)?))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -233,5 +310,33 @@ mod tests {
     assert_eq!(received.source, incoming.source);
     assert_eq!(received.destination, incoming.destination);
     assert_eq!(received.payload, incoming.payload);
+  }
+
+  #[tokio::test]
+  async fn reports_underlying_write_failure_to_the_sender() {
+    let (stream, peer) = duplex(4096);
+    let mut packet_stream =
+      UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(stream));
+    drop(peer);
+
+    let result = packet_stream
+      .send(OutgoingUdpPacket {
+        source: UdpPacketSource {
+          via: vec![],
+          address: "127.0.0.1:12345".parse().unwrap(),
+        },
+        destination: SocketDestination {
+          host: SocketDestinationHost::DomainName("example.com".to_owned()),
+          port: 53,
+        },
+        payload: b"query".to_vec(),
+      })
+      .await;
+
+    assert!(matches!(
+      result,
+      Err(UdpPacketStreamError::Io(error))
+        if error.kind() == std::io::ErrorKind::BrokenPipe
+    ));
   }
 }
