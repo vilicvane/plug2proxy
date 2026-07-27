@@ -1,7 +1,107 @@
 # Plug2Proxy
 
-Plug2Proxy is an experimental multi-node transparent proxy.
+Plug2Proxy 是一个实验性的多节点代理。它把入口、协调和出口拆成独立节点，
+再用配置决定流量从哪里进入、经过哪条链路、最终从哪个网络接口离开。
 
-## Documentation
+它目前更像一套可以自己拼装的数据平面，而不是已经封装完成的代理产品。
+如果你喜欢搭服务器、调路由、看日志、测跨洲链路，并且不介意配置格式在
+快速迭代中发生变化，欢迎来玩。
 
-- [在 IN 上使用 sing-box 与 Tailscale 建立 IPv4 透明代理网关](docs/in-sing-box-tailscale.md)
+## 它怎么工作
+
+```text
+                         ┌──────── HUB relay ────────┐
+SOCKS5 / transparent → IN                           OUT → target
+                         └──── peer connection ──────┘
+```
+
+- **IN** 接收请求，执行路由规则，并提供当前机器的 `DIRECT` 出口。
+- **HUB** 协调节点、汇总 OUT 能力和路由信息，也可以同时提供 inbound
+  或 local exit。
+- **OUT** 提供一个或多个出口，并用 tag 声明自己能处理的流量。
+
+OUT 可以只连接 HUB，由 HUB 中继数据；也可以公布 peer listener，由 HUB
+协调 IN 与 OUT 建立直连。可用的 peer 路径优先，失效时仍可使用 HUB
+relay。
+
+## 有什么特点
+
+- **一套进程，三种角色**：`in`、`hub`、`out` 使用同一个二进制和
+  YAML 配置。
+
+- **可组合的出口**：OUT 可以声明多个 tag，也可以把 local exit 绑定到指定 Linux
+  interface，用于串接 WireGuard 或其他网络出口。
+
+- **按目标选择出口**：路由支持域名及子域、正则表达式、IP/CIDR、端口、GeoIP、取反和
+  fallback。`DIRECT`、`PROXY`、`ANY` 与自定义 tag 可以组合使用。
+
+- **HUB relay 与 IN–OUT peer 直连**：OUT 决定是否提供直连入口，HUB
+  负责协调和下发 endpoint，IN 维护实际可用的 peer 路径。
+
+- **SOCKS5 TCP 与 UDP**：IN 可以直接作为 SOCKS5 代理，也可以接在
+  sing-box TUN 等透明代理入口之后。
+
+- **QomT 传输**：项目使用 quiche，让 QUIC 的连接和多路流状态机运行在
+  一组并行 TCP 连接之上。Linux 上还会尝试为底层 TCP socket 启用 BBR，
+  主要用于探索高延迟、受限网络下的实际表现。
+
+- **节点间双向认证**：HUB 持有私有 CA，为每个 IN 和 OUT 签发独立节点
+  证书；HUB relay 和 peer 直连使用同一套信任关系。
+
+## 当前状态
+
+Plug2Proxy 仍处于早期实验阶段：
+
+- 主要定位是个人、小规模、节点彼此可信的部署；
+- 配置与节点协议不承诺跨版本兼容；
+- SOCKS5 暂无认证，不应直接暴露到公网；
+- Linux 是目前主要验证环境；
+- 自动部署、升级、证书轮换和完善的可观测性仍需自己处理；
+- 遇到违反协议不变量的状态时，程序可能直接终止。
+
+它已经能够承担真实的 TCP、UDP、HUB relay、peer 直连和规则路由流量，
+但还需要愿意观察日志、理解数据路径并亲手排错的用户。
+
+## 开始尝试
+
+准备 Rust 工具链后构建：
+
+```bash
+cargo build --release
+```
+
+生成的二进制是：
+
+```text
+target/release/p2p
+```
+
+教程中的部署示例将它安装为更易识别的 `plug2proxy`：
+
+```bash
+sudo install -m 0755 target/release/p2p /usr/sbin/plug2proxy
+```
+
+第一次尝试建议只准备一个 HUB、一个 IN 和一个 OUT，先通过 HUB relay
+跑通 SOCKS5，再增加 tag 路由、peer 直连或透明代理。这样每次只引入一个
+新的网络变量，日志也更容易读懂。
+
+## 文档
+
+- [Plug2Proxy 最简配置教程](docs/configuration.md)
+- [使用 Tailscale、sing-box 与 Plug2Proxy 建立最简 IPv4 exit node](docs/tailscale-sing-box.md)
+
+## 一起折腾
+
+欢迎尝试不同地区的 HUB/OUT、不同 RTT 和丢包环境、多个 interface 出口，
+以及 TCP/UDP 混合负载。
+
+报告问题时，最好附上：
+
+- IN、HUB、OUT 的拓扑和版本；
+- 去除证书与隐私信息后的配置；
+- 相关节点同一时间段的日志；
+- 目标是 TCP 还是 UDP、HUB relay 还是 peer 直连；
+- 可复现问题的最小步骤。
+
+别提交 `ca.pem`、`node.pem`、SSH 私钥或云凭据。
