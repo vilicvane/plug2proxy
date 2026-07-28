@@ -296,10 +296,6 @@ impl DomainRegexMatcher {
       pattern: pattern.into(),
     })
   }
-
-  pub(super) fn from_pattern(pattern: SerdeRegex) -> Self {
-    Self { pattern }
-  }
 }
 
 impl DomainMatcher for DomainRegexMatcher {

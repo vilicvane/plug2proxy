@@ -5,9 +5,7 @@ use crate::{
   out::OutExitConfig,
   route::{
     AnyRule,
-    rule::{
-      AddressRule, AnyDomainMatcher, DomainRegexMatcher, DomainRule, FallbackRule, GeoIpRule,
-    },
+    rule::{AddressRule, AnyDomainMatcher, DomainPatternRule, DomainRule, FallbackRule, GeoIpRule},
   },
   utils::serde::{SerdeIpNet, SerdeOneOrMany},
 };
@@ -69,12 +67,8 @@ impl RouteRuleConfig {
         exits: config.exit.into(),
       }
       .into(),
-      RouteRuleConfig::DomainPattern(config) => DomainRule {
-        matchers: Vec::<SerdeRegex>::from(config.r#match)
-          .into_iter()
-          .map(DomainRegexMatcher::from_pattern)
-          .map(AnyDomainMatcher::Regex)
-          .collect(),
+      RouteRuleConfig::DomainPattern(config) => DomainPatternRule {
+        matches: config.r#match.into(),
         priority: config.priority.unwrap_or(priority_default),
         negate: config.negate,
         exits: config.exit.into(),
@@ -186,7 +180,7 @@ mod tests {
   }
 
   #[test]
-  fn legacy_domain_pattern_config_builds_domain_regex_matchers() {
+  fn legacy_domain_pattern_config_preserves_its_wire_rule() {
     let config: RouteConfig = serde_json::from_str(
       r#"{
         "rules": [{
@@ -199,14 +193,11 @@ mod tests {
     )
     .unwrap();
     let rules: Vec<AnyRule> = config.into();
-    let [AnyRule::Domain(rule)] = rules.as_slice() else {
-      panic!("expected legacy config to produce one domain rule");
+    let [AnyRule::DomainPattern(rule)] = rules.as_slice() else {
+      panic!("expected legacy config to produce one legacy domain pattern rule");
     };
 
-    assert!(matches!(
-      rule.matchers.as_slice(),
-      [AnyDomainMatcher::Regex(_), AnyDomainMatcher::Regex(_)]
-    ));
+    assert_eq!(rule.matches.len(), 2);
     assert_eq!(rule.priority, 30);
   }
 
