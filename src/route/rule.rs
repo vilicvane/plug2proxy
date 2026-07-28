@@ -28,7 +28,6 @@ pub enum AnyRule {
   GeoIp(GeoIpRule),
   Address(AddressRule),
   Domain(DomainRule),
-  DomainPattern(DomainPatternRule),
   Fallback(FallbackRule),
 }
 
@@ -301,44 +300,6 @@ impl DomainRegexMatcher {
 impl DomainMatcher for DomainRegexMatcher {
   fn matches(&self, domain: &str, _geosite: &Geosite) -> bool {
     self.pattern.is_match(domain)
-  }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DomainPatternRule {
-  pub matches: Vec<SerdeRegex>,
-  pub priority: i64,
-  pub negate: bool,
-  pub exits: Vec<OutExit>,
-}
-
-impl Rule for DomainPatternRule {
-  fn priority(&self) -> i64 {
-    self.priority
-  }
-
-  fn exits(&self) -> &[OutExit] {
-    &self.exits
-  }
-
-  fn test(
-    &self,
-    _address: &Option<SocketAddr>,
-    domain: &Option<String>,
-    _region_codes: &Option<Vec<String>>,
-    _geosite: &Geosite,
-  ) -> bool {
-    if let Some(domain) = domain {
-      let mut condition = self.matches.iter().any(|pattern| pattern.is_match(domain));
-
-      if self.negate {
-        condition = !condition;
-      }
-
-      condition
-    } else {
-      false
-    }
   }
 }
 

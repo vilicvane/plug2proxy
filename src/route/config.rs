@@ -1,11 +1,10 @@
-use lowkit::SerdeRegex;
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{
   out::OutExitConfig,
   route::{
     AnyRule,
-    rule::{AddressRule, AnyDomainMatcher, DomainPatternRule, DomainRule, FallbackRule, GeoIpRule},
+    rule::{AddressRule, AnyDomainMatcher, DomainRule, FallbackRule, GeoIpRule},
   },
   utils::serde::{SerdeIpNet, SerdeOneOrMany},
 };
@@ -36,8 +35,6 @@ pub enum RouteRuleConfig {
   Address(AddressRuleConfig),
   #[serde(rename = "domain")]
   Domain(DomainRuleConfig),
-  #[serde(rename = "domain_pattern")]
-  DomainPattern(DomainPatternRuleConfig),
   #[serde(rename = "fallback")]
   Fallback(FallbackRuleConfig),
 }
@@ -62,13 +59,6 @@ impl RouteRuleConfig {
       .into(),
       RouteRuleConfig::Domain(config) => DomainRule {
         matchers: config.r#match.into(),
-        priority: config.priority.unwrap_or(priority_default),
-        negate: config.negate,
-        exits: config.exit.into(),
-      }
-      .into(),
-      RouteRuleConfig::DomainPattern(config) => DomainPatternRule {
-        matches: config.r#match.into(),
         priority: config.priority.unwrap_or(priority_default),
         negate: config.negate,
         exits: config.exit.into(),
@@ -132,15 +122,6 @@ impl From<DomainMatcherConfig> for AnyDomainMatcher {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct DomainPatternRuleConfig {
-  pub r#match: SerdeOneOrMany<SerdeRegex>,
-  #[serde(default)]
-  pub negate: bool,
-  pub priority: Option<i64>,
-  pub exit: SerdeOneOrMany<OutExitConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
 pub struct FallbackRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
 }
@@ -180,25 +161,19 @@ mod tests {
   }
 
   #[test]
-  fn legacy_domain_pattern_config_preserves_its_wire_rule() {
-    let config: RouteConfig = serde_json::from_str(
-      r#"{
+  fn domain_pattern_rule_is_rejected() {
+    assert!(
+      serde_json::from_str::<RouteConfig>(
+        r#"{
         "rules": [{
           "type": "domain_pattern",
-          "match": ["(?:^|\\.)bitget", "(^|\\.)bitapi\\."],
-          "priority": 30,
+          "match": "(?:^|\\.)bitget",
           "exit": "mo"
         }]
       }"#,
-    )
-    .unwrap();
-    let rules: Vec<AnyRule> = config.into();
-    let [AnyRule::DomainPattern(rule)] = rules.as_slice() else {
-      panic!("expected legacy config to produce one legacy domain pattern rule");
-    };
-
-    assert_eq!(rule.matches.len(), 2);
-    assert_eq!(rule.priority, 30);
+      )
+      .is_err()
+    );
   }
 
   #[test]
