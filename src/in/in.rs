@@ -35,7 +35,7 @@ use crate::{
   quic_connection::{
     QuicConnection, QuicStream, State as QuicConnectionState, create_quiche_config,
   },
-  route::{GeoLite2, Router},
+  route::Router,
   utils::postcard::postcard_read_stream,
 };
 
@@ -610,7 +610,7 @@ pub async fn run_in(
     vec![]
   };
 
-  let router = Router::new(GeoLite2::new(context_dir));
+  let router = Router::new(context_dir);
 
   if let Some(route_config) = route_config {
     router.register_local_rules(route_config.into());
@@ -655,7 +655,7 @@ mod tests {
     let context_dir = test_dir().join(format!("peer_panic_{}", uuid::Uuid::new_v4()));
     let in_node = In::new(
       vec![],
-      Router::new(GeoLite2::new(&context_dir)),
+      Router::new(&context_dir),
       InOptions {
         hub: InHubOptions {
           address: "127.0.0.1:1".parse().unwrap(),
@@ -681,7 +681,7 @@ mod tests {
     let context_dir = test_dir().join(format!("peer_reconcile_{}", uuid::Uuid::new_v4()));
     let in_node = In::new(
       vec![],
-      Router::new(GeoLite2::new(&context_dir)),
+      Router::new(&context_dir),
       InOptions {
         hub: InHubOptions {
           address: "127.0.0.1:1".parse().unwrap(),
@@ -797,7 +797,7 @@ mod tests {
 
       let in_node = In::new(
         vec![],
-        Router::new(GeoLite2::new(&in_dir)),
+        Router::new(&in_dir),
         InOptions {
           hub: InHubOptions {
             address: "127.0.0.1:1".parse()?,

@@ -1265,7 +1265,7 @@ mod tests {
   async fn udp_selector_order_precedes_an_existing_lower_priority_association() -> anyhow::Result<()>
   {
     use crate::{
-      route::{AddressRule, FallbackRule, GeoLite2},
+      route::{AddressRule, FallbackRule},
       test::test_dir,
       udp_forwarder::{UdpPacketSource, UdpPacketStream},
     };
@@ -1280,7 +1280,7 @@ mod tests {
     let node = Arc::new(StaticTestNode {
       dispatchers: vec![dispatcher.clone()],
     });
-    let router = Arc::new(Router::new(GeoLite2::new(test_dir())));
+    let router = Arc::new(Router::new(test_dir()));
     router.register_local_rules(vec![
       AddressRule {
         match_ips: None,
@@ -1356,7 +1356,7 @@ mod tests {
   #[tokio::test]
   async fn udp_association_failure_does_not_stop_the_inbound() -> anyhow::Result<()> {
     use crate::{
-      route::{FallbackRule, GeoLite2},
+      route::FallbackRule,
       test::test_dir,
       udp_forwarder::{UdpPacketSource, UdpPacketStream},
     };
@@ -1369,7 +1369,7 @@ mod tests {
     let node = Arc::new(StaticTestNode {
       dispatchers: vec![dispatcher.clone()],
     });
-    let router = Arc::new(Router::new(GeoLite2::new(test_dir())));
+    let router = Arc::new(Router::new(test_dir()));
     router.register_local_rules(vec![FallbackRule { exits: vec![exit] }.into()]);
     let (node_stream, client_stream) = duplex(4096);
     let node_packets =

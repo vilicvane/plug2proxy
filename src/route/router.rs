@@ -1,5 +1,6 @@
 use std::{
   collections::HashMap,
+  path::Path,
   sync::{Arc, Mutex},
 };
 
@@ -11,13 +12,14 @@ use moka::sync::Cache;
 use crate::{
   node::NodeId,
   primitives::{OutExit, SocketDestination},
-  route::{FallbackRule, GeoLite2},
+  route::{FallbackRule, GeoLite2, Geosite},
 };
 
 use super::{rule::AnyRule, rule::Rule};
 
 pub struct Router {
   geolite2: GeoLite2,
+  geosite: Geosite,
   rules_map: Mutex<HashMap<RulesKey, Vec<Arc<AnyRule>>>>,
   merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
   cache: Cache<SocketDestination, Vec<OutExit>>,
@@ -30,12 +32,18 @@ enum RulesKey {
 }
 
 impl Router {
-  pub fn new(geolite2: GeoLite2) -> Self {
+  pub fn new(dir: impl AsRef<Path>) -> Self {
+    let dir = dir.as_ref();
+    let cache = Cache::builder().time_to_live(duration!("1h")).build();
+    let geolite2 = GeoLite2::new(dir);
+    let geosite = Geosite::new(dir, cache.clone());
+
     Self {
       geolite2,
+      geosite,
       rules_map: HashMap::new().mutex(),
       merged_rules_cache: Vec::new().mutex(),
-      cache: Cache::builder().time_to_live(duration!("1h")).build(),
+      cache,
     }
   }
 
@@ -73,7 +81,7 @@ impl Router {
 
     let exits = rules
       .iter()
-      .filter(|rule| rule.test(&address, &domain, &region_codes))
+      .filter(|rule| rule.test(&address, &domain, &region_codes, &self.geosite))
       .fold(Vec::new(), |mut exits, rule| {
         if matches!(**rule, AnyRule::Fallback(_)) && !exits.is_empty() {
           return exits;
@@ -100,6 +108,10 @@ impl Router {
   }
 
   fn register_rules(&self, key: RulesKey, rules: Vec<AnyRule>) {
+    if rules.iter().any(AnyRule::uses_geosite) {
+      self.geosite.ensure_updating();
+    }
+
     self
       .rules_map
       .lock()
@@ -156,7 +168,7 @@ mod tests {
 
   #[tokio::test]
   async fn rule_updates_invalidate_cached_destination_matches() {
-    let router = Router::new(GeoLite2::new(test_dir()));
+    let router = Router::new(test_dir());
     let destination = SocketDestination {
       host: SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
       port: 80,

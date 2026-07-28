@@ -34,7 +34,7 @@ use crate::{
   primitives::OutExits,
   qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept},
   quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
-  route::{GeoLite2, Router},
+  route::Router,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
@@ -533,7 +533,7 @@ pub async fn run_hub(
     vec![]
   };
 
-  let router = Router::new(GeoLite2::new(context_dir));
+  let router = Router::new(context_dir);
 
   if let Some(route_config) = route_config {
     router.register_local_rules(route_config.into());
@@ -676,7 +676,7 @@ mod tests {
       let hub = Hub::new(
         hub_listener,
         vec![],
-        Router::new(GeoLite2::new(&hub_dir)),
+        Router::new(&hub_dir),
         HubOptions {
           local_out_dispatchers: vec![LocalOutDispatcher::new_default(
             crate::node::DefaultLocalExit::Private,

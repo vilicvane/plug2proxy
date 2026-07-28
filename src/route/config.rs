@@ -61,7 +61,7 @@ impl RouteRuleConfig {
       }
       .into(),
       RouteRuleConfig::Domain(config) => DomainRule {
-        matches: config.r#match.into(),
+        matchers: config.r#match.into(),
         priority: config.priority.unwrap_or(priority_default),
         negate: config.negate,
         exits: config.exit.into(),
@@ -122,4 +122,38 @@ pub struct DomainPatternRuleConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct FallbackRuleConfig {
   pub exit: SerdeOneOrMany<OutExitConfig>,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::route::AnyDomainMatcher;
+
+  #[test]
+  fn domain_rule_accepts_plain_and_geosite_matchers() {
+    let config: RouteConfig = serde_json::from_str(
+      r#"{
+        "rules": [{
+          "type": "domain",
+          "match": ["okx.com", "geosite:okx"],
+          "exit": "hk"
+        }],
+        "priority": 100
+      }"#,
+    )
+    .unwrap();
+    let rules: Vec<AnyRule> = config.into();
+    let [AnyRule::Domain(rule)] = rules.as_slice() else {
+      panic!("expected one domain rule");
+    };
+
+    assert!(matches!(
+      rule.matchers.as_slice(),
+      [
+        AnyDomainMatcher::DomainName(_),
+        AnyDomainMatcher::Geosite(_)
+      ]
+    ));
+    assert_eq!(rule.priority, 100);
+  }
 }

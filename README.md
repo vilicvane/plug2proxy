@@ -32,8 +32,10 @@ relay。
 - **可组合的出口**：OUT 可以声明多个 tag，也可以把 local exit 绑定到指定 Linux
   interface，用于串接 WireGuard 或其他网络出口。
 
-- **按目标选择出口**：路由支持域名及子域、正则表达式、IP/CIDR、端口、GeoIP、取反和
-  fallback。`DIRECT`、`PROXY`、`ANY` 与自定义 tag 可以组合使用。
+- **按目标选择出口**：路由支持域名及子域、`geosite:...` 社区域名列表、
+  正则表达式、IP/CIDR、端口、GeoIP、取反和 fallback。`DIRECT`、
+  `PROXY`、`ANY` 与自定义 tag 可以组合使用。使用 Geosite 规则时会在
+  工作目录维护 `dlc.dat`。
 
 - **HUB relay 与 IN–OUT peer 直连**：OUT 决定是否提供直连入口，HUB
   负责协调和下发 endpoint，IN 维护实际可用的 peer 路径。

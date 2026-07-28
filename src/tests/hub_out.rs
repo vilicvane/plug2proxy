@@ -6,7 +6,7 @@ use crate::{
   node::{DefaultLocalExit, LocalOutDispatcher},
   out::{Out, OutHubOptions, OutOptions},
   primitives::OutExit,
-  route::{AddressRule, GeoLite2, Router},
+  route::{AddressRule, Router},
   test::{get_free_local_tcp_address, test_dir},
 };
 use lits::duration;
@@ -53,7 +53,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
 
   tokio::try_join!(
     async {
-      let router = Router::new(GeoLite2::new(&hub_dir));
+      let router = Router::new(&hub_dir);
 
       router.register_local_rules(vec![
         AddressRule {
@@ -81,7 +81,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
       anyhow::Ok(())
     },
     async {
-      let router = Router::new(GeoLite2::new(&in_dir));
+      let router = Router::new(&in_dir);
       let in_node = In::new(
         vec![socks5_inbound.into()],
         router,

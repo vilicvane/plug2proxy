@@ -1,7 +1,6 @@
-*_plan.md
-*_
+.*/
+*_/
 
-/tmp
+tmp/
 
-/target
-/.test
+/target/

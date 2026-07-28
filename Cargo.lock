@@ -1888,6 +1888,7 @@ dependencies = [
  "moka",
  "pem",
  "postcard",
+ "prost",
  "quiche",
  "rand",
  "rcgen",
