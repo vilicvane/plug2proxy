@@ -53,8 +53,10 @@ pub trait Node {
     destination: SocketDestination,
     mut stream: Box<dyn BidiStream>,
   ) -> Result<(), Error> {
+    let route_label = destination.route_label();
+
     if exits.is_empty() {
-      log::info!("TCP {destination} no exit matched.");
+      log::info!("TCP {route_label} no exit matched.");
       return Ok(());
     }
 
@@ -66,7 +68,7 @@ pub trait Node {
       let Some((matched_exit, matched, out_dispatcher)) =
         select_out_dispatcher(&exits, &out_dispatchers)
       else {
-        log::info!("TCP {destination} no out dispatcher matched.");
+        log::info!("TCP {route_label} no out dispatcher matched.");
         return Ok(());
       };
 
@@ -77,7 +79,7 @@ pub trait Node {
       drop(out_dispatchers);
 
       log::info!(
-        "TCP {destination} -> {}",
+        "TCP {route_label} -> {}",
         exits
           .iter()
           .map(|exit| if exit == &matched_exit {
@@ -103,7 +105,7 @@ pub trait Node {
           out_dispatcher.transfer_finished(0, started_at.elapsed());
           may_retry_peer_unavailable = false;
           log::debug!(
-            "peer OUT for TCP {destination} became unavailable before opening a stream; \
+            "peer OUT for TCP {route_label} became unavailable before opening a stream; \
              selecting again."
           );
           continue;
@@ -180,7 +182,10 @@ async fn forward_udp(
         let exits = route.match_exits(&outgoing.destination).await;
 
         if exits.is_empty() {
-          log::debug!("UDP {} no exit matched.", outgoing.destination);
+          log::debug!(
+            "UDP {} no exit matched.",
+            outgoing.destination.route_label()
+          );
           continue;
         }
 
@@ -227,7 +232,7 @@ async fn forward_udp(
 
           log::info!(
             "UDP association opened: exit={matched_exit}, first_destination={}",
-            outgoing.destination
+            outgoing.destination.route_label()
           );
 
           selected_association = Some((matched_exit, association_sender));
@@ -235,7 +240,10 @@ async fn forward_udp(
         }
 
         let Some((matched_exit, association_sender)) = selected_association else {
-          log::debug!("UDP {} no out dispatcher matched.", outgoing.destination);
+          log::debug!(
+            "UDP {} no out dispatcher matched.",
+            outgoing.destination.route_label()
+          );
           continue;
         };
 
@@ -248,7 +256,7 @@ async fn forward_udp(
           log::info!(
             "UDP {} -> {} via {}",
             outgoing.source.address,
-            outgoing.destination,
+            outgoing.destination.route_label(),
             exits
               .iter()
               .map(|exit| if exit == &matched_exit {
@@ -334,8 +342,8 @@ async fn open_udp_association(
       {
         may_retry_peer_unavailable = false;
         log::debug!(
-          "peer OUT for UDP {destination} became unavailable before opening an association; \
-           selecting again."
+          "peer OUT for UDP {} became unavailable before opening an association; selecting again.",
+          destination.route_label()
         );
       }
       Err(error) => return Err(error),

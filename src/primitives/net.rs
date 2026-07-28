@@ -27,6 +27,15 @@ impl SocketDestination {
     self.routing_domain = domain;
   }
 
+  pub fn route_label(&self) -> String {
+    match (&self.host, self.routing_domain.as_deref()) {
+      (SocketDestinationHost::IpAddress(_), Some(domain)) => {
+        format!("{self} ({domain})")
+      }
+      _ => self.to_string(),
+    }
+  }
+
   pub async fn resolve(&self) -> Result<Vec<SocketAddr>, std::io::Error> {
     match &self.host {
       SocketDestinationHost::DomainName(domain) => {
@@ -85,6 +94,10 @@ mod tests {
       destination.host,
       SocketDestinationHost::IpAddress("182.140.143.139".parse()?)
     );
+    assert_eq!(
+      destination.route_label(),
+      "182.140.143.139:443 (c2c.cdn.weixin.qq.com)"
+    );
 
     let decoded: SocketDestination = postcard::from_bytes(&postcard::to_allocvec(&destination)?)?;
     assert_eq!(decoded.host, destination.host);
@@ -102,5 +115,6 @@ mod tests {
     };
 
     assert_eq!(destination.routing_domain().as_deref(), Some("Example.COM"));
+    assert_eq!(destination.route_label(), "Example.COM:443");
   }
 }
