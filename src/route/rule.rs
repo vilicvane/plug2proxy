@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use enum_dispatch::enum_dispatch;
 use lowkit::SerdeRegex;
+use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{primitives::OutExit, route::Geosite, utils::serde::SerdeIpNet};
@@ -189,21 +190,32 @@ pub trait DomainMatcher: Send + Sync {
 pub enum AnyDomainMatcher {
   DomainName(DomainNameMatcher),
   Geosite(GeositeDomainMatcher),
+  Regex(DomainRegexMatcher),
 }
 
 impl AnyDomainMatcher {
   fn uses_geosite(&self) -> bool {
     matches!(self, AnyDomainMatcher::Geosite(_))
   }
+
+  pub fn parse(expression: &str) -> Result<Self, regex::Error> {
+    if expression.starts_with(GeositeDomainMatcher::PREFIX) {
+      Ok(AnyDomainMatcher::Geosite(GeositeDomainMatcher::parse(
+        expression,
+      )))
+    } else if expression.starts_with(DomainRegexMatcher::PREFIX) {
+      DomainRegexMatcher::parse(expression).map(AnyDomainMatcher::Regex)
+    } else {
+      Ok(AnyDomainMatcher::DomainName(DomainNameMatcher::new(
+        expression.to_owned(),
+      )))
+    }
+  }
 }
 
 impl From<String> for AnyDomainMatcher {
   fn from(value: String) -> Self {
-    if value.starts_with(GeositeDomainMatcher::PREFIX) {
-      AnyDomainMatcher::Geosite(GeositeDomainMatcher::parse(&value))
-    } else {
-      AnyDomainMatcher::DomainName(DomainNameMatcher::new(value))
-    }
+    Self::parse(&value).unwrap_or_else(|error| panic!("invalid domain matcher {value:?}: {error}"))
   }
 }
 
@@ -264,6 +276,35 @@ impl GeositeDomainMatcher {
 impl DomainMatcher for GeositeDomainMatcher {
   fn matches(&self, domain: &str, geosite: &Geosite) -> bool {
     geosite.matches(self, domain)
+  }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DomainRegexMatcher {
+  pattern: SerdeRegex,
+}
+
+impl DomainRegexMatcher {
+  const PREFIX: &str = "regex:";
+
+  fn parse(expression: &str) -> Result<Self, regex::Error> {
+    let pattern = expression
+      .strip_prefix(Self::PREFIX)
+      .expect("regex matcher must start with regex:");
+
+    Regex::new(pattern).map(|pattern| Self {
+      pattern: pattern.into(),
+    })
+  }
+
+  pub(super) fn from_pattern(pattern: SerdeRegex) -> Self {
+    Self { pattern }
+  }
+}
+
+impl DomainMatcher for DomainRegexMatcher {
+  fn matches(&self, domain: &str, _geosite: &Geosite) -> bool {
+    self.pattern.is_match(domain)
   }
 }
 
@@ -359,9 +400,24 @@ mod tests {
   }
 
   #[test]
+  fn regex_matcher_matches_normalized_domains() {
+    let geosite = empty_geosite();
+    let matcher = AnyDomainMatcher::parse(r"regex:(?:^|\.)bitget").unwrap();
+
+    assert!(matcher.matches("bitget.com", &geosite));
+    assert!(matcher.matches("api.bitget.com", &geosite));
+    assert!(!matcher.matches("notbitget.com", &geosite));
+    assert!(AnyDomainMatcher::parse("regex:(").is_err());
+  }
+
+  #[test]
   fn domain_matchers_survive_postcard_round_trip() {
     let rule = DomainRule {
-      matchers: vec!["okx.com".to_owned().into(), "geosite:okx".to_owned().into()],
+      matchers: vec![
+        "okx.com".to_owned().into(),
+        "geosite:okx".to_owned().into(),
+        "regex:^api\\.okx\\.com$".to_owned().into(),
+      ],
       priority: 100,
       negate: false,
       exits: vec![OutExit::Direct],
@@ -373,7 +429,8 @@ mod tests {
       decoded.matchers.as_slice(),
       [
         AnyDomainMatcher::DomainName(_),
-        AnyDomainMatcher::Geosite(_)
+        AnyDomainMatcher::Geosite(_),
+        AnyDomainMatcher::Regex(_)
       ]
     ));
   }
