@@ -23,12 +23,35 @@ impl InboundsConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Socks5InboundConfig {
   pub listen: SerdeSocketAddress,
+  #[serde(default = "default_sniff")]
+  pub sniff: bool,
 }
 
 impl From<Socks5InboundConfig> for Socks5InboundOptions {
-  fn from(Socks5InboundConfig { listen }: Socks5InboundConfig) -> Self {
+  fn from(Socks5InboundConfig { listen, sniff }: Socks5InboundConfig) -> Self {
     Socks5InboundOptions {
       listen: listen.into(),
+      sniff,
     }
+  }
+}
+
+fn default_sniff() -> bool {
+  true
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn socks_sniff_defaults_to_enabled_and_can_be_disabled() {
+    let default: InboundsConfig =
+      serde_json::from_str(r#"{"socks5":{"listen":"127.0.0.1:1080"}}"#).unwrap();
+    assert!(default.socks5.unwrap().sniff);
+
+    let disabled: InboundsConfig =
+      serde_json::from_str(r#"{"socks5":{"listen":"127.0.0.1:1080","sniff":false}}"#).unwrap();
+    assert!(!disabled.socks5.unwrap().sniff);
   }
 }

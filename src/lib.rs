@@ -11,6 +11,7 @@ pub mod primitives;
 pub mod qomt;
 pub mod quic_connection;
 pub mod route;
+pub mod sniff;
 pub mod udp_forwarder;
 pub mod utils;
 

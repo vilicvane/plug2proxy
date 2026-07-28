@@ -48,6 +48,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
 
   let socks5_inbound = Socks5Inbound::new(Socks5InboundOptions {
     listen: socks5_listen_address,
+    sniff: true,
   })
   .await?;
 

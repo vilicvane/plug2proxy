@@ -949,6 +949,7 @@ mod tests {
     SocketDestination {
       host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
       port: 80,
+      routing_domain: None,
     }
   }
 
@@ -1317,6 +1318,7 @@ mod tests {
         destination: SocketDestination {
           host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
           port: 1000,
+          routing_domain: None,
         },
         payload: vec![1],
       })
@@ -1334,6 +1336,7 @@ mod tests {
         destination: SocketDestination {
           host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
           port: 2000,
+          routing_domain: None,
         },
         payload: vec![2],
       })
@@ -1497,6 +1500,7 @@ mod tests {
     let destination = SocketDestination {
       host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
       port: 80,
+      routing_domain: None,
     };
     let (node_stream, client_stream) = duplex(64);
 

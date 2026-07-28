@@ -264,6 +264,7 @@ mod tests {
     SocketDestination {
       host: SocketDestinationHost::IpAddress(address.ip()),
       port: address.port(),
+      routing_domain: None,
     }
   }
 
@@ -481,6 +482,7 @@ mod tests {
       destination: SocketDestination {
         host: SocketDestinationHost::DomainName("localhost".to_string()),
         port: server_address.port(),
+        routing_domain: None,
       },
       payload: payload.clone(),
     };
@@ -530,6 +532,7 @@ mod tests {
         destination: SocketDestination {
           host: SocketDestinationHost::DomainName("localhost".to_string()),
           port: server_address.port(),
+          routing_domain: None,
         },
         payload: format!("packet {}", i).into_bytes(),
       };

@@ -820,6 +820,7 @@ mod tests {
       let destination = SocketDestination {
         host: SocketDestinationHost::IpAddress(target_address.ip()),
         port: target_address.port(),
+        routing_domain: None,
       };
 
       in_node.update_peer_outs(vec![peer_out.clone()]);

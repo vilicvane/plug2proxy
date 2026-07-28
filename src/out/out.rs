@@ -459,6 +459,7 @@ mod tests {
         SocketDestination {
           host: SocketDestinationHost::IpAddress(target_address.ip()),
           port: target_address.port(),
+          routing_domain: None,
         },
       );
 
@@ -500,6 +501,7 @@ mod tests {
           destination: SocketDestination {
             host: SocketDestinationHost::IpAddress(target_address.ip()),
             port: target_address.port(),
+            routing_domain: None,
           },
           payload: b"udp ping".to_vec(),
         })

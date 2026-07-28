@@ -289,6 +289,7 @@ mod tests {
       destination: SocketDestination {
         host: SocketDestinationHost::DomainName("example.com".to_owned()),
         port: 53,
+        routing_domain: None,
       },
       payload: b"query".to_vec(),
     };
@@ -328,6 +329,7 @@ mod tests {
         destination: SocketDestination {
           host: SocketDestinationHost::DomainName("example.com".to_owned()),
           port: 53,
+          routing_domain: None,
         },
         payload: b"query".to_vec(),
       })

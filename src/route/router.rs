@@ -69,7 +69,7 @@ impl Router {
       .ok()
       .map(|addresses| addresses[0]);
 
-    let domain = socket_destination.host.as_domain_name();
+    let domain = socket_destination.routing_domain();
 
     let rules = self.merged_rules_cache.lock().unwrap();
 
@@ -163,6 +163,7 @@ mod tests {
   use super::*;
   use crate::{
     primitives::{SocketDestination, SocketDestinationHost},
+    route::DomainRule,
     test::test_dir,
   };
 
@@ -172,6 +173,7 @@ mod tests {
     let destination = SocketDestination {
       host: SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
       port: 80,
+      routing_domain: None,
     };
 
     router.register_local_rules(vec![
@@ -193,6 +195,35 @@ mod tests {
       .into(),
     ]);
 
+    assert_eq!(router.match_exits(&destination).await, vec![OutExit::Proxy]);
+  }
+
+  #[tokio::test]
+  async fn sniffed_domain_routes_without_changing_the_resolved_ip() {
+    let router = Router::new(test_dir());
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
+      port: 443,
+      routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+    };
+    router.register_local_rules(vec![
+      DomainRule {
+        matchers: vec!["weixin.qq.com".to_owned().into()],
+        priority: 0,
+        negate: false,
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+      FallbackRule {
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+    ]);
+
+    assert_eq!(
+      destination.resolve().await.unwrap(),
+      vec!["182.140.143.139:443".parse().unwrap()]
+    );
     assert_eq!(router.match_exits(&destination).await, vec![OutExit::Proxy]);
   }
 }
