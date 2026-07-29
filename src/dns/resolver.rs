@@ -1,4 +1,8 @@
-use std::sync::LazyLock;
+use std::{
+  net::{IpAddr, Ipv4Addr},
+  path::Path,
+  sync::LazyLock,
+};
 
 use hickory_resolver::{
   TokioResolver,
@@ -15,6 +19,8 @@ use crate::node::{NodeResolveAnswers, ResolveQuery};
 
 /// systemd-resolved 的真实上行列表（/etc/resolv.conf 是本地 stub 时使用）。
 const SYSTEMD_RESOLVED_UPLINK_RESOLV_CONF: &str = "/run/systemd/resolve/resolv.conf";
+const PROC_NET_ROUTE: &str = "/proc/net/route";
+const SYS_CLASS_NET: &str = "/sys/class/net";
 
 static LOCAL_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
   let (config, options) = load_upstream_config().expect("failed to load DNS upstream config");
@@ -41,7 +47,7 @@ fn load_upstream_config() -> Result<(ResolverConfig, ResolverOpts), NetError> {
     .all(|server| server.ip.is_loopback());
 
   if !loopback_only {
-    return Ok((config, options));
+    return Ok((filter_recursive_name_servers(config)?, options));
   }
 
   let Ok(data) = std::fs::read(SYSTEMD_RESOLVED_UPLINK_RESOLV_CONF) else {
@@ -64,7 +70,104 @@ fn load_upstream_config() -> Result<(ResolverConfig, ResolverOpts), NetError> {
      {SYSTEMD_RESOLVED_UPLINK_RESOLV_CONF} to avoid the sing-box DNS loop"
   );
 
-  Ok((uplink_config, options))
+  Ok((filter_recursive_name_servers(uplink_config)?, options))
+}
+
+fn filter_recursive_name_servers(mut config: ResolverConfig) -> Result<ResolverConfig, NetError> {
+  let route_table = match std::fs::read_to_string(PROC_NET_ROUTE) {
+    Ok(route_table) => Some(route_table),
+    Err(error) => {
+      log::warn!(
+        "failed to inspect {PROC_NET_ROUTE} while checking recursive DNS upstreams: {error}"
+      );
+      None
+    }
+  };
+
+  config.name_servers.retain(|server| {
+    if server.ip.is_loopback() {
+      log::info!(
+        "ignoring recursive DNS upstream {} because it is a loopback address",
+        server.ip
+      );
+      return false;
+    }
+
+    let IpAddr::V4(ip) = server.ip else {
+      return true;
+    };
+    let Some(interface) = route_table
+      .as_deref()
+      .and_then(|routes| best_ipv4_route_interface(ip, routes))
+    else {
+      return true;
+    };
+    if !Path::new(SYS_CLASS_NET)
+      .join(interface)
+      .join("tun_flags")
+      .exists()
+    {
+      return true;
+    }
+
+    log::info!(
+      "ignoring recursive DNS upstream {} because its route uses tunnel interface {interface}",
+      server.ip
+    );
+    false
+  });
+
+  if config.name_servers.is_empty() {
+    return Err(NetError::from(
+      "no non-recursive system DNS upstreams remain after excluding loopback and tunnel routes"
+        .to_string(),
+    ));
+  }
+
+  Ok(config)
+}
+
+fn best_ipv4_route_interface(target: Ipv4Addr, route_table: &str) -> Option<&str> {
+  let target = u32::from(target);
+  let mut best = None;
+
+  for line in route_table.lines().skip(1) {
+    let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+    if fields.len() < 8 {
+      continue;
+    }
+
+    let Some(destination) = parse_proc_route_ipv4(fields[1]) else {
+      continue;
+    };
+    let Ok(flags) = u32::from_str_radix(fields[3], 16) else {
+      continue;
+    };
+    let Ok(metric) = fields[6].parse::<u32>() else {
+      continue;
+    };
+    let Some(mask) = parse_proc_route_ipv4(fields[7]) else {
+      continue;
+    };
+
+    if flags & 1 == 0 || target & mask != destination & mask {
+      continue;
+    }
+
+    let prefix_length = mask.count_ones();
+    if best.is_none_or(|(best_prefix, best_metric, _)| {
+      prefix_length > best_prefix || prefix_length == best_prefix && metric < best_metric
+    }) {
+      best = Some((prefix_length, metric, fields[0]));
+    }
+  }
+
+  best.map(|(_, _, interface)| interface)
+}
+
+fn parse_proc_route_ipv4(value: &str) -> Option<u32> {
+  let value = u32::from_str_radix(value, 16).ok()?;
+  Some(u32::from_be_bytes(value.to_le_bytes()))
 }
 
 /// 在本机执行解析，把应答 records 编码为 DNS wire format 的完整 Message。
@@ -123,6 +226,8 @@ fn log_resolve_failure(error: &NetError, name: &str, record_type: u16) {
 
 #[cfg(test)]
 mod tests {
+  use std::net::Ipv4Addr;
+
   use hickory_resolver::{
     net::{DnsError, NetError, NoRecords},
     proto::{
@@ -131,7 +236,7 @@ mod tests {
     },
   };
 
-  use super::resolve_error_answers;
+  use super::{best_ipv4_route_interface, resolve_error_answers};
   use crate::node::NodeResolveAnswers;
 
   fn no_records_error(response_code: ResponseCode) -> NetError {
@@ -177,5 +282,25 @@ mod tests {
       resolve_error_answers(&error, "example.com.", u16::from(RecordType::A)),
       NodeResolveAnswers::Failure
     ));
+  }
+
+  #[test]
+  fn best_ipv4_route_uses_longest_prefix_then_lowest_metric() {
+    let routes = "\
+Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+eth0 00000000 0101A8C0 0003 0 0 100 00000000 0 0 0
+singtun0 000013AC 00000000 0001 0 0 0 FCFFFFFF 0 0 0
+slowtun0 000013AC 00000000 0001 0 0 50 FCFFFFFF 0 0 0
+down0 020013AC 00000000 0000 0 0 0 FFFFFFFF 0 0 0
+";
+
+    assert_eq!(
+      best_ipv4_route_interface(Ipv4Addr::new(172, 19, 0, 2), routes),
+      Some("singtun0")
+    );
+    assert_eq!(
+      best_ipv4_route_interface(Ipv4Addr::new(8, 8, 8, 8), routes),
+      Some("eth0")
+    );
   }
 }
