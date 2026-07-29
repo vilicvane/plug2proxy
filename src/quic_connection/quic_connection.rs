@@ -9,7 +9,7 @@ use std::{
 };
 
 use colored::Colorize;
-use futures::{Sink, SinkExt, Stream, StreamExt};
+use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt};
 use lits::bytes;
 use lowkit::{DropCallback, SelfWrapExt, tokio_join_set};
 use tokio::{
@@ -34,6 +34,7 @@ const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 struct StreamSignals {
   recv: Notify,
   send: Notify,
+  external_drop: Notify,
   created: AtomicBool,
   external_dropped: AtomicBool,
   active_tasks: AtomicUsize,
@@ -44,6 +45,7 @@ impl StreamSignals {
     Self {
       recv: Notify::new(),
       send: Notify::new(),
+      external_drop: Notify::new(),
       created: AtomicBool::new(created),
       external_dropped: AtomicBool::new(false),
       active_tasks: AtomicUsize::new(2),
@@ -394,9 +396,20 @@ impl QuicConnection {
             let mut buffer = [0; READ_WRITE_BUFFER_SIZE];
 
             'outer: loop {
-              let read_result = tokio::select! {
-                result = read.read(&mut buffer) => result,
-                _ = connection_signals.state_updater.wait(State::Closed) => break,
+              let read_result = if stream_signals
+                .external_dropped
+                .load(atomic::Ordering::Acquire)
+              {
+                // No external writer remains. Drain any bytes that were
+                // already accepted by the in-memory pipe, then emit FIN
+                // without depending on the split writer's close wakeup.
+                read.read(&mut buffer).now_or_never().unwrap_or(Ok(0))
+              } else {
+                tokio::select! {
+                  result = read.read(&mut buffer) => result,
+                  _ = stream_signals.external_drop.notified() => continue,
+                  _ = connection_signals.state_updater.wait(State::Closed) => break,
+                }
               };
 
               match read_result {
@@ -601,6 +614,7 @@ impl QuicConnection {
             stream_signals
               .external_dropped
               .store(true, atomic::Ordering::Release);
+            stream_signals.external_drop.notify_one();
             stream_signals.recv.notify_one();
             stream_signals.send.notify_one();
           }) as Box<dyn Fn() + Send>

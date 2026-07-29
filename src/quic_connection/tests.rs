@@ -676,6 +676,118 @@ async fn dropped_request_response_stream_tasks_are_reaped() -> anyhow::Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[test_log::test]
+async fn concurrent_dropped_request_response_stream_tasks_are_reaped() -> anyhow::Result<()> {
+  const STREAM_COUNT: usize = 256;
+
+  timeout(duration!("20s"), async {
+    let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+    let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
+    let connection_id = QuicConnection::generate_connection_id();
+
+    let out_quic_connection = Arc::new(QuicConnection::connect_with_sink_and_stream(
+      &connection_id,
+      &mut out_quiche_config,
+      out_to_hub_packet_sender.into_sink(),
+      hub_to_out_packet_receiver.into_stream(),
+    ));
+
+    let hub_quic_connection = Arc::new(QuicConnection::accept_with_sink_and_stream(
+      out_quic_connection.id(),
+      &mut hub_quiche_config,
+      hub_to_out_packet_sender.into_sink(),
+      out_to_hub_packet_receiver.into_stream(),
+    ));
+
+    tokio::try_join!(
+      out_quic_connection.established(),
+      hub_quic_connection.established()
+    )?;
+
+    tokio::try_join!(
+      async {
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..STREAM_COUNT {
+          let connection = out_quic_connection.clone();
+
+          tasks.spawn(async move {
+            let mut stream = connection.open_stream();
+            stream.write_all(b"request").await?;
+
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            anyhow::ensure!(response == b"response");
+
+            anyhow::Ok(())
+          });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+          result??;
+        }
+
+        anyhow::Ok(())
+      },
+      async {
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..STREAM_COUNT {
+          let connection = hub_quic_connection.clone();
+
+          tasks.spawn(async move {
+            let mut stream = connection
+              .accept_stream()
+              .await?
+              .ok_or_else(|| anyhow::anyhow!("missing request stream"))?;
+            let mut request = [0; 7];
+            stream.read_exact(&mut request).await?;
+            anyhow::ensure!(&request == b"request");
+            stream.write_all(b"response").await?;
+
+            anyhow::Ok(())
+          });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+          result??;
+        }
+
+        anyhow::Ok(())
+      },
+    )?;
+
+    timeout(duration!("5s"), async {
+      loop {
+        if out_quic_connection.diagnostics().contains("streams=0 ")
+          && hub_quic_connection.diagnostics().contains("streams=0 ")
+        {
+          break;
+        }
+
+        sleep(duration!("20ms")).await;
+      }
+    })
+    .await
+    .map_err(|_| {
+      anyhow::anyhow!(
+        "concurrent dropped request/response tasks were not reaped: out=[{}] hub=[{}]",
+        out_quic_connection.diagnostics(),
+        hub_quic_connection.diagnostics(),
+      )
+    })?;
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
 async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()> {
   const STREAM_COUNT: u8 = 32;
 
