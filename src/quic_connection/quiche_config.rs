@@ -27,8 +27,10 @@ pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche
   config.set_initial_max_stream_data_bidi_local(MAX_DATA_BUFFER_SIZE_PER_STREAM);
   config.set_initial_max_stream_data_bidi_remote(MAX_DATA_BUFFER_SIZE_PER_STREAM);
   config.set_initial_max_stream_data_uni(MAX_DATA_BUFFER_SIZE_PER_STREAM);
-  config.set_initial_max_streams_bidi(1024);
-  config.set_initial_max_streams_uni(1024);
+  // 流上限取足够大的有限值：1024 曾在 DNS 故障的重试风暴中被打满（StreamLimit），
+  // 而 u64::MAX 会让握手以 InvalidTransportParam 失败。
+  config.set_initial_max_streams_bidi(65536);
+  config.set_initial_max_streams_uni(65536);
   config.set_disable_active_migration(true);
   // QomT is carried by TCP, whose kernel congestion control already paces
   // writes. QUIC pacing here would throttle the same bytes a second time and
