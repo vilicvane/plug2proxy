@@ -790,23 +790,6 @@ impl QuicConnection {
                 })
                 .collect::<Vec<_>>();
 
-              // Dropping the external stream can race with a send task that
-              // has just consumed its one-shot writable notification. Re-arm
-              // dropped senders until their buffered bytes and FIN are
-              // accepted, so backpressure cannot strand the task forever.
-              let externally_dropped_streams = connection_signals
-                .streams
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|signals| signals.external_dropped.load(atomic::Ordering::Acquire))
-                .cloned()
-                .collect::<Vec<_>>();
-
-              for signals in externally_dropped_streams {
-                signals.send.notify_one();
-              }
-
               let finished = {
                 let connection = connection.lock().unwrap();
 
@@ -904,6 +887,23 @@ impl QuicConnection {
                     .then_some(id)
                 })
                 .collect::<Vec<_>>();
+
+              // Dropping the external stream can race with a send task that
+              // has just consumed its one-shot writable notification. Re-arm
+              // dropped senders until their buffered bytes and FIN are
+              // accepted, so backpressure cannot strand the task forever.
+              let externally_dropped_streams = connection_signals
+                .streams
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|signals| signals.external_dropped.load(atomic::Ordering::Acquire))
+                .cloned()
+                .collect::<Vec<_>>();
+
+              for signals in externally_dropped_streams {
+                signals.send.notify_one();
+              }
 
               let finished = {
                 let connection = connection.lock().unwrap();
