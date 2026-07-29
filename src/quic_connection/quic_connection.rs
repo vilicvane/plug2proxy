@@ -148,6 +148,42 @@ fn format_connection_id(id: &quiche::ConnectionId<'_>) -> String {
   formatted
 }
 
+fn normalize_stream_send_result(
+  result: Result<usize, quiche::Error>,
+  empty_fin: bool,
+) -> Result<Option<usize>, quiche::Error> {
+  match result {
+    Ok(length) => Ok(Some(length)),
+    // quiche queues a zero-length FIN before returning Done when the
+    // connection has send capacity. Retrying would queue nothing new and
+    // strand this task forever.
+    Err(quiche::Error::Done) if empty_fin => Ok(Some(0)),
+    Err(quiche::Error::Done) => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+#[cfg(test)]
+mod stream_send_result_tests {
+  use super::normalize_stream_send_result;
+
+  #[test]
+  fn empty_fin_done_is_accepted() {
+    assert_eq!(
+      normalize_stream_send_result(Err(quiche::Error::Done), true).unwrap(),
+      Some(0),
+    );
+  }
+
+  #[test]
+  fn data_done_remains_blocked() {
+    assert_eq!(
+      normalize_stream_send_result(Err(quiche::Error::Done), false).unwrap(),
+      None,
+    );
+  }
+}
+
 fn format_connection_diagnostics(
   connection: &Arc<Mutex<quiche::Connection>>,
   signals: &ConnectionSignals,
@@ -421,14 +457,18 @@ impl QuicConnection {
                   loop {
                     log::trace!("{side} {id}: stream send {offset}..{total_length}");
 
-                    let stream_send_result = connection.lock().unwrap().stream_send(
-                      id,
-                      &buffer[offset..total_length],
-                      total_length == 0,
+                    let empty_fin = total_length == 0;
+                    let stream_send_result = normalize_stream_send_result(
+                      connection.lock().unwrap().stream_send(
+                        id,
+                        &buffer[offset..total_length],
+                        empty_fin,
+                      ),
+                      empty_fin,
                     );
 
                     match stream_send_result {
-                      Ok(length) => {
+                      Ok(Some(length)) => {
                         stream_signals
                           .created
                           .store(true, atomic::Ordering::Release);
@@ -446,7 +486,7 @@ impl QuicConnection {
                           break;
                         }
                       }
-                      Err(quiche::Error::Done) => {
+                      Ok(None) => {
                         log::trace!("{side} {id}: stream send done");
 
                         tokio::select! {

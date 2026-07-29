@@ -642,12 +642,21 @@ async fn dropped_request_response_stream_tasks_are_reaped() -> anyhow::Result<()
     assert_eq!(&request, b"request");
 
     hub_stream.write_all(b"response").await?;
-    drop(hub_stream);
+    hub_stream.shutdown().await?;
+
+    let hub_stream_task = tokio::spawn(async move {
+      let mut request_tail = Vec::new();
+      hub_stream.read_to_end(&mut request_tail).await?;
+      anyhow::ensure!(request_tail.is_empty());
+
+      anyhow::Ok(())
+    });
 
     let mut response = Vec::new();
     out_stream.read_to_end(&mut response).await?;
     assert_eq!(response, b"response");
     drop(out_stream);
+    hub_stream_task.await??;
 
     timeout(duration!("2s"), async {
       loop {
