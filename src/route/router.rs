@@ -21,7 +21,8 @@ use super::{rule::AnyRule, rule::Rule, rule::RuleKind};
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct RouteMatch {
   pub exit: OutExit,
-  pub rule_kind: RuleKind,
+  /// 命中原因（按什么种类的条件匹配的），由规则的匹配过程产出。
+  pub rule_kinds: Vec<RuleKind>,
   pub matched_address: Option<SocketAddr>,
 }
 
@@ -29,7 +30,7 @@ impl RouteMatch {
   pub fn fixed(exit: OutExit) -> Self {
     Self {
       exit,
-      rule_kind: RuleKind::Fallback,
+      rule_kinds: vec![RuleKind::Fallback],
       matched_address: None,
     }
   }
@@ -65,6 +66,7 @@ impl Router {
     }
   }
 
+  /// 构建下发给其他节点的规则。fallback 是节点本地概念，不下发。
   pub fn build_rules(&self) -> Vec<AnyRule> {
     self
       .merged_rules_cache
@@ -100,8 +102,12 @@ impl Router {
 
     let routes = rules
       .iter()
-      .filter(|rule| rule.test(&address, &domain, &protocol, &region_codes, &self.geosite))
-      .fold(Vec::new(), |mut routes, rule| {
+      .filter_map(|rule| {
+        rule
+          .test(&address, &domain, &protocol, &region_codes, &self.geosite)
+          .map(|rule_kinds| (rule, rule_kinds))
+      })
+      .fold(Vec::new(), |mut routes, (rule, rule_kinds)| {
         if matches!(**rule, AnyRule::Fallback(_)) && !routes.is_empty() {
           return routes;
         }
@@ -113,7 +119,7 @@ impl Router {
 
           routes.push(RouteMatch {
             exit: exit.clone(),
-            rule_kind: rule.kind(),
+            rule_kinds: rule_kinds.clone(),
             matched_address: address,
           });
         }
@@ -146,7 +152,7 @@ impl Router {
   }
 
   fn register_rules(&self, key: RulesKey, rules: Vec<AnyRule>) {
-    if rules.iter().any(AnyRule::uses_geosite) {
+    if rules.iter().any(Rule::requires_geosite) {
       self.geosite.ensure_updating();
     }
 
@@ -201,7 +207,7 @@ mod tests {
   use super::*;
   use crate::{
     primitives::{SniffedProtocol, SocketDestination, SocketDestinationHost},
-    route::{AddressRule, DomainRule, ProtocolRule, RuleKind},
+    route::{AddressRule, AndRule, DomainRule, ProtocolRule, RuleKind},
     test::test_dir,
   };
 
@@ -269,7 +275,7 @@ mod tests {
       router.match_routes(&destination).await,
       vec![RouteMatch {
         exit: OutExit::Proxy,
-        rule_kind: RuleKind::Domain,
+        rule_kinds: vec![RuleKind::Domain],
         matched_address: Some("182.140.143.139:443".parse().unwrap()),
       }]
     );
@@ -306,7 +312,7 @@ mod tests {
       router.match_routes(&destination).await,
       vec![RouteMatch {
         exit: OutExit::Proxy,
-        rule_kind: RuleKind::Domain,
+        rule_kinds: vec![RuleKind::Domain],
         matched_address: Some("203.0.113.8:443".parse().unwrap()),
       }]
     );
@@ -342,9 +348,120 @@ mod tests {
       router.match_routes(&destination).await,
       vec![RouteMatch {
         exit: OutExit::Direct,
-        rule_kind: RuleKind::Protocol,
+        rule_kinds: vec![RuleKind::Protocol],
         matched_address: Some("203.0.113.8:2222".parse().unwrap()),
       }]
     );
+  }
+
+  #[tokio::test]
+  async fn and_rule_matches_only_when_all_conditions_match() {
+    let router = Router::new(test_dir());
+    router.register_local_rules(vec![
+      // domain AND port 443，priority/exit 由组级提供。
+      AndRule {
+        rules: vec![
+          DomainRule {
+            matchers: vec!["example.com".to_owned().into()],
+            priority: i64::MAX,
+            negate: false,
+            exits: vec![],
+          }
+          .into(),
+          AddressRule {
+            match_ips: None,
+            match_ports: Some(vec![443]),
+            priority: i64::MAX,
+            negate: false,
+            exits: vec![],
+          }
+          .into(),
+        ],
+        priority: 10,
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+      DomainRule {
+        matchers: vec!["example.com".to_owned().into()],
+        priority: 20,
+        negate: false,
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+    ]);
+
+    let mut destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+      port: 443,
+      routing_domain: Some("example.com".to_owned()),
+      routing_protocol: None,
+    };
+    assert_eq!(
+      router.match_routes(&destination).await,
+      vec![
+        RouteMatch {
+          exit: OutExit::Proxy,
+          rule_kinds: vec![RuleKind::Domain, RuleKind::Address],
+          matched_address: Some("203.0.113.8:443".parse().unwrap()),
+        },
+        RouteMatch {
+          exit: OutExit::Direct,
+          rule_kinds: vec![RuleKind::Domain],
+          matched_address: Some("203.0.113.8:443".parse().unwrap()),
+        },
+      ]
+    );
+
+    // 端口不命中时 AND 规则不命中，只剩单条域名规则。
+    destination.port = 80;
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::Direct]
+    );
+  }
+
+  #[tokio::test]
+  async fn build_rules_pushes_and_rules_but_not_fallback() {
+    let router = Router::new(test_dir());
+    router.register_local_rules(vec![
+      AndRule {
+        rules: vec![
+          DomainRule {
+            matchers: vec!["example.com".to_owned().into()],
+            priority: i64::MAX,
+            negate: false,
+            exits: vec![],
+          }
+          .into(),
+          AddressRule {
+            match_ips: None,
+            match_ports: Some(vec![443]),
+            priority: i64::MAX,
+            negate: false,
+            exits: vec![],
+          }
+          .into(),
+        ],
+        priority: 10,
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+      ProtocolRule {
+        matches: vec![SniffedProtocol::Ssh],
+        priority: 20,
+        negate: false,
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+      FallbackRule {
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+    ]);
+
+    let built_rules = router.build_rules();
+    let [AnyRule::And(_), AnyRule::Protocol(_)] = built_rules.as_slice() else {
+      panic!("expected the AND rule and the protocol rule, without fallback");
+    };
   }
 }

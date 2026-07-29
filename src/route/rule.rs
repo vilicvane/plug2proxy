@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use enum_dispatch::enum_dispatch;
+use itertools::Itertools as _;
 use lowkit::SerdeRegex;
 use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -17,6 +18,12 @@ pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
 
   fn exits(&self) -> &[OutExit];
 
+  fn requires_geosite(&self) -> bool {
+    false
+  }
+
+  /// 返回 `Some(命中原因)` 表示命中；原因由匹配过程产出，复合规则
+  /// （AND）的原因来自各子规则的命中结果。
   fn test(
     &self,
     address: &Option<SocketAddr>,
@@ -24,7 +31,7 @@ pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
     protocol: &Option<SniffedProtocol>,
     region_codes: &Option<Vec<String>>,
     geosite: &Geosite,
-  ) -> bool;
+  ) -> Option<Vec<RuleKind>>;
 }
 
 #[enum_dispatch]
@@ -35,24 +42,11 @@ pub enum AnyRule {
   Domain(DomainRule),
   Protocol(ProtocolRule),
   Fallback(FallbackRule),
+  // 新增变体必须保持在末尾，保证 postcard 线上兼容。
+  And(AndRule),
 }
 
-impl AnyRule {
-  pub(super) fn uses_geosite(&self) -> bool {
-    matches!(self, AnyRule::Domain(rule) if rule.uses_geosite())
-  }
-
-  pub(super) fn kind(&self) -> RuleKind {
-    match self {
-      AnyRule::GeoIp(_) => RuleKind::GeoIp,
-      AnyRule::Address(_) => RuleKind::Address,
-      AnyRule::Domain(_) => RuleKind::Domain,
-      AnyRule::Protocol(_) => RuleKind::Protocol,
-      AnyRule::Fallback(_) => RuleKind::Fallback,
-    }
-  }
-}
-
+/// 命中原因（按什么种类的条件匹配的）。
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub enum RuleKind {
   GeoIp,
@@ -86,19 +80,19 @@ impl Rule for GeoIpRule {
     _protocol: &Option<SniffedProtocol>,
     region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
-  ) -> bool {
-    region_codes.as_ref().is_some_and(|region_codes| {
-      let mut condition = self
-        .matches
-        .iter()
-        .any(|match_region| region_codes.iter().any(|region| region == match_region));
+  ) -> Option<Vec<RuleKind>> {
+    let region_codes = region_codes.as_ref()?;
 
-      if self.negate {
-        condition = !condition;
-      }
+    let mut condition = self
+      .matches
+      .iter()
+      .any(|match_region| region_codes.iter().any(|region| region == match_region));
 
-      condition
-    })
+    if self.negate {
+      condition = !condition;
+    }
+
+    condition.then(|| vec![RuleKind::GeoIp])
   }
 }
 
@@ -127,13 +121,11 @@ impl Rule for AddressRule {
     _protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
-  ) -> bool {
-    let Some(address) = address else {
-      return false;
-    };
+  ) -> Option<Vec<RuleKind>> {
+    let address = address.as_ref()?;
 
     if self.match_ips.is_none() && self.match_ports.is_none() {
-      return false;
+      return None;
     }
 
     let port_matched = if let Some(match_ports) = &self.match_ports {
@@ -154,7 +146,7 @@ impl Rule for AddressRule {
       condition = !condition;
     }
 
-    condition
+    condition.then(|| vec![RuleKind::Address])
   }
 }
 
@@ -166,12 +158,6 @@ pub struct DomainRule {
   pub exits: Vec<OutExit>,
 }
 
-impl DomainRule {
-  pub(super) fn uses_geosite(&self) -> bool {
-    self.matchers.iter().any(AnyDomainMatcher::uses_geosite)
-  }
-}
-
 impl Rule for DomainRule {
   fn priority(&self) -> i64 {
     self.priority
@@ -181,6 +167,10 @@ impl Rule for DomainRule {
     &self.exits
   }
 
+  fn requires_geosite(&self) -> bool {
+    self.matchers.iter().any(AnyDomainMatcher::requires_geosite)
+  }
+
   fn test(
     &self,
     _address: &Option<SocketAddr>,
@@ -188,22 +178,20 @@ impl Rule for DomainRule {
     _protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     geosite: &Geosite,
-  ) -> bool {
-    if let Some(domain) = domain {
-      let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-      let mut condition = self
-        .matchers
-        .iter()
-        .any(|matcher| matcher.matches(&domain, geosite));
+  ) -> Option<Vec<RuleKind>> {
+    let domain = domain.as_ref()?;
 
-      if self.negate {
-        condition = !condition;
-      }
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    let mut condition = self
+      .matchers
+      .iter()
+      .any(|matcher| matcher.matches(&domain, geosite));
 
-      condition
-    } else {
-      false
+    if self.negate {
+      condition = !condition;
     }
+
+    condition.then(|| vec![RuleKind::Domain])
   }
 }
 
@@ -231,13 +219,13 @@ impl Rule for ProtocolRule {
     protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
-  ) -> bool {
-    let Some(protocol) = protocol else {
-      return false;
-    };
+  ) -> Option<Vec<RuleKind>> {
+    let protocol = protocol.as_ref()?;
 
     let condition = self.matches.contains(protocol);
-    if self.negate { !condition } else { condition }
+    let condition = if self.negate { !condition } else { condition };
+
+    condition.then(|| vec![RuleKind::Protocol])
   }
 }
 
@@ -255,7 +243,7 @@ pub enum AnyDomainMatcher {
 }
 
 impl AnyDomainMatcher {
-  fn uses_geosite(&self) -> bool {
+  fn requires_geosite(&self) -> bool {
     matches!(self, AnyDomainMatcher::Geosite(_))
   }
 
@@ -386,8 +374,58 @@ impl Rule for FallbackRule {
     _protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
-  ) -> bool {
-    true
+  ) -> Option<Vec<RuleKind>> {
+    Some(vec![RuleKind::Fallback])
+  }
+}
+
+/// `type: "and"` 规则：组内所有子规则同时命中时该规则才命中。
+///
+/// 子规则只提供匹配条件（来自配置的 filter 层），命中后累计的是组自身
+/// 的 `exits`，排序用的也是组自身的 `priority`。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AndRule {
+  pub rules: Vec<AnyRule>,
+  pub priority: i64,
+  pub exits: Vec<OutExit>,
+}
+
+impl Rule for AndRule {
+  fn priority(&self) -> i64 {
+    self.priority
+  }
+
+  fn exits(&self) -> &[OutExit] {
+    &self.exits
+  }
+
+  fn requires_geosite(&self) -> bool {
+    self.rules.iter().any(Rule::requires_geosite)
+  }
+
+  fn test(
+    &self,
+    address: &Option<SocketAddr>,
+    domain: &Option<String>,
+    protocol: &Option<SniffedProtocol>,
+    region_codes: &Option<Vec<String>>,
+    geosite: &Geosite,
+  ) -> Option<Vec<RuleKind>> {
+    if self.rules.is_empty() {
+      return None;
+    }
+
+    let kinds = self
+      .rules
+      .iter()
+      .map(|rule| rule.test(address, domain, protocol, region_codes, geosite))
+      .collect::<Option<Vec<_>>>()?
+      .into_iter()
+      .flatten()
+      .unique()
+      .collect();
+
+    Some(kinds)
   }
 }
 
@@ -453,6 +491,87 @@ mod tests {
         AnyDomainMatcher::Regex(_)
       ]
     ));
+  }
+
+  #[test]
+  fn and_rule_matches_only_when_all_sub_rules_match() {
+    let geosite = empty_geosite();
+    let domain = Some("example.com".to_owned());
+    let rule = AndRule {
+      rules: vec![
+        DomainRule {
+          matchers: vec!["example.com".to_owned().into()],
+          priority: i64::MAX,
+          negate: false,
+          exits: vec![],
+        }
+        .into(),
+        AddressRule {
+          match_ips: None,
+          match_ports: Some(vec![443]),
+          priority: i64::MAX,
+          negate: false,
+          exits: vec![],
+        }
+        .into(),
+      ],
+      priority: 10,
+      exits: vec![OutExit::Proxy],
+    };
+
+    // 命中原因是各子规则命中结果的并集。
+    let address = Some("203.0.113.8:443".parse().unwrap());
+    assert_eq!(
+      rule.test(&address, &domain, &None, &None, &geosite),
+      Some(vec![RuleKind::Domain, RuleKind::Address])
+    );
+
+    // 任一子规则不命中时整组不命中。
+    let address = Some("203.0.113.8:80".parse().unwrap());
+    assert_eq!(rule.test(&address, &domain, &None, &None, &geosite), None);
+    assert_eq!(rule.test(&None, &domain, &None, &None, &geosite), None);
+
+    // 空组永不命中。
+    let empty = AndRule {
+      rules: vec![],
+      priority: 10,
+      exits: vec![OutExit::Proxy],
+    };
+    assert_eq!(empty.test(&address, &domain, &None, &None, &geosite), None);
+  }
+
+  #[test]
+  fn and_rule_survives_postcard_round_trip() {
+    let rule: AnyRule = AndRule {
+      rules: vec![
+        ProtocolRule {
+          matches: vec![SniffedProtocol::Tls],
+          priority: i64::MAX,
+          negate: false,
+          exits: vec![],
+        }
+        .into(),
+        DomainRule {
+          matchers: vec!["example.com".to_owned().into()],
+          priority: i64::MAX,
+          negate: true,
+          exits: vec![],
+        }
+        .into(),
+      ],
+      priority: 10,
+      exits: vec![OutExit::Proxy],
+    }
+    .into();
+    let encoded = postcard::to_allocvec(&rule).unwrap();
+    let decoded: AnyRule = postcard::from_bytes(&encoded).unwrap();
+
+    let AnyRule::And(decoded) = decoded else {
+      panic!("expected And rule");
+    };
+    assert_eq!(decoded.rules.len(), 2);
+    assert_eq!(decoded.priority, 10);
+    assert_eq!(decoded.exits, [OutExit::Proxy]);
   }
 
   fn empty_geosite() -> Geosite {

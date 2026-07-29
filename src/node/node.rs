@@ -225,7 +225,7 @@ fn destination_for_route(
   }
 
   if dispatcher_is_local
-    && route.rule_kind != RuleKind::Domain
+    && !route.rule_kinds.contains(&RuleKind::Domain)
     && matches!(destination.host, SocketDestinationHost::DomainName(_))
     && let Some(address) = route.matched_address
   {
@@ -1401,7 +1401,7 @@ mod tests {
     };
     let route = RouteMatch {
       exit: OutExit::from("us"),
-      rule_kind: RuleKind::GeoIp,
+      rule_kinds: vec![RuleKind::GeoIp],
       matched_address: Some("182.140.143.139:443".parse().unwrap()),
     };
 
@@ -1426,7 +1426,7 @@ mod tests {
     };
     let route = RouteMatch {
       exit: OutExit::Direct,
-      rule_kind: RuleKind::Domain,
+      rule_kinds: vec![RuleKind::Domain],
       matched_address: Some("182.140.143.139:443".parse().unwrap()),
     };
 
@@ -1446,7 +1446,7 @@ mod tests {
     };
     let route = RouteMatch {
       exit: OutExit::from("us"),
-      rule_kind: RuleKind::GeoIp,
+      rule_kinds: vec![RuleKind::GeoIp],
       matched_address: Some("203.0.113.8:443".parse().unwrap()),
     };
 
@@ -1471,7 +1471,7 @@ mod tests {
     };
     let route = RouteMatch {
       exit: OutExit::from("us"),
-      rule_kind: RuleKind::GeoIp,
+      rule_kinds: vec![RuleKind::GeoIp],
       matched_address: Some("203.0.113.8:443".parse().unwrap()),
     };
 

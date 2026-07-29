@@ -115,6 +115,26 @@ SOCKS5 暂无认证，监听到局域网地址时必须用防火墙限制访问�
 候选顺序是 `hk`、`us`：`hk` 可用时优先，否则可以继续尝试 `us`。同一条
 规则的 `match` 数组是 any-of。
 
+需要多个条件同时成立时，使用 `and` 规则：`match` 里是一组只含匹配条件
+的规则（不需要 `exit`/`priority`，但可以各自 `negate`），所有条件同时
+命中时才命中，`priority` 与 `exit` 由组级配置提供：
+
+```jsonc
+// okx.com 且目标端口为 443 时使用 hk。
+{
+  "type": "and",
+  "match": [
+    { "type": "domain", "match": "okx.com" },
+    { "type": "address", "match_port": 443 }
+  ],
+  "priority": 10,
+  "exit": "hk"
+}
+```
+
+`and` 规则与普通规则一样参与优先级排序和 exit 累计，也会随 HUB 的
+规则下发同步给 IN。
+
 `protocol` 规则匹配嗅探得到的应用层协议，而不是端口号。当前可配置值为
 `"http"`、`"tls"`、`"quic"` 和 `"ssh"`；值必须小写。SSH 根据客户端
 `SSH-2.0-...`（以及兼容的 `SSH-1.99-...`）identification banner 识别，
