@@ -8,6 +8,9 @@ use crate::{node::NodeId, primitives::SocketDestination};
 pub struct OutgoingUdpPacket {
   pub source: UdpPacketSource,
   pub destination: SocketDestination,
+  /// Source address that must be presented with the response when the
+  /// outbound resolves a domain instead of using the transparent target.
+  pub response_destination: Option<SocketAddr>,
   pub payload: Vec<u8>,
 }
 

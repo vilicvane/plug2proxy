@@ -13,9 +13,9 @@ use prost::{Enumeration, Message};
 use regex::RegexSet;
 use tokio::task::JoinSet;
 
-use crate::primitives::{OutExit, SocketDestination};
+use crate::primitives::SocketDestination;
 
-use super::rule::GeositeDomainMatcher;
+use super::{router::RouteMatch, rule::GeositeDomainMatcher};
 
 const GEOSITE_URL: &str =
   "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat";
@@ -26,7 +26,7 @@ const RETRY_INTERVAL: Duration = duration!("30s");
 const DOWNLOAD_TIMEOUT: Duration = duration!("30s");
 const CONNECT_TIMEOUT: Duration = duration!("10s");
 
-type RouteCache = Cache<SocketDestination, Vec<OutExit>>;
+type RouteCache = Cache<SocketDestination, Vec<RouteMatch>>;
 
 pub struct Geosite {
   reader: Arc<Mutex<Option<GeositeDatabase>>>,

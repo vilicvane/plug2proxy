@@ -21,9 +21,9 @@ pub trait InLike: Node + 'static {
     destination: SocketDestination,
     stream: Box<dyn BidiStream>,
   ) -> Result<(), Error> {
-    let exits = self.router().match_exits(&destination).await;
+    let routes = self.router().match_routes(&destination).await;
 
-    self.tcp_connect(exits, destination, stream).await?;
+    self.tcp_connect_routes(routes, destination, stream).await?;
 
     Ok(())
   }

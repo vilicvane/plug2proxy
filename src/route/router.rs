@@ -1,5 +1,6 @@
 use std::{
   collections::HashMap,
+  net::SocketAddr,
   path::Path,
   sync::{Arc, Mutex},
 };
@@ -15,14 +16,31 @@ use crate::{
   route::{FallbackRule, GeoLite2, Geosite},
 };
 
-use super::{rule::AnyRule, rule::Rule};
+use super::{rule::AnyRule, rule::Rule, rule::RuleKind};
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct RouteMatch {
+  pub exit: OutExit,
+  pub rule_kind: RuleKind,
+  pub matched_address: Option<SocketAddr>,
+}
+
+impl RouteMatch {
+  pub fn fixed(exit: OutExit) -> Self {
+    Self {
+      exit,
+      rule_kind: RuleKind::Fallback,
+      matched_address: None,
+    }
+  }
+}
 
 pub struct Router {
   geolite2: GeoLite2,
   geosite: Geosite,
   rules_map: Mutex<HashMap<RulesKey, Vec<Arc<AnyRule>>>>,
   merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
-  cache: Cache<SocketDestination, Vec<OutExit>>,
+  cache: Cache<SocketDestination, Vec<RouteMatch>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, derive_more::From)]
@@ -58,16 +76,16 @@ impl Router {
       .collect()
   }
 
-  pub async fn match_exits(&self, socket_destination: &SocketDestination) -> Vec<OutExit> {
-    if let Some(exits) = self.cache.get(socket_destination) {
-      return exits;
+  pub async fn match_routes(&self, socket_destination: &SocketDestination) -> Vec<RouteMatch> {
+    if let Some(routes) = self.cache.get(socket_destination) {
+      return routes;
     }
 
     let address = socket_destination
       .resolve()
       .await
       .ok()
-      .map(|addresses| addresses[0]);
+      .and_then(|addresses| addresses.first().copied());
 
     let domain = socket_destination.routing_domain();
 
@@ -79,24 +97,43 @@ impl Router {
       None
     };
 
-    let exits = rules
+    let routes = rules
       .iter()
       .filter(|rule| rule.test(&address, &domain, &region_codes, &self.geosite))
-      .fold(Vec::new(), |mut exits, rule| {
-        if matches!(**rule, AnyRule::Fallback(_)) && !exits.is_empty() {
-          return exits;
+      .fold(Vec::new(), |mut routes, rule| {
+        if matches!(**rule, AnyRule::Fallback(_)) && !routes.is_empty() {
+          return routes;
         }
 
-        exits.extend(rule.exits().iter().cloned());
-        exits
-      })
+        for exit in rule.exits() {
+          if routes.iter().any(|route: &RouteMatch| route.exit == *exit) {
+            continue;
+          }
+
+          routes.push(RouteMatch {
+            exit: exit.clone(),
+            rule_kind: rule.kind(),
+            matched_address: address,
+          });
+        }
+
+        routes
+      });
+
+    self
+      .cache
+      .insert(socket_destination.clone(), routes.clone());
+
+    routes
+  }
+
+  pub async fn match_exits(&self, socket_destination: &SocketDestination) -> Vec<OutExit> {
+    self
+      .match_routes(socket_destination)
+      .await
       .into_iter()
-      .unique()
-      .collect_vec();
-
-    self.cache.insert(socket_destination.clone(), exits.clone());
-
-    exits
+      .map(|route| route.exit)
+      .collect()
   }
 
   pub fn register_local_rules(&self, rules: Vec<AnyRule>) {
@@ -163,7 +200,7 @@ mod tests {
   use super::*;
   use crate::{
     primitives::{SocketDestination, SocketDestinationHost},
-    route::DomainRule,
+    route::{AddressRule, DomainRule, RuleKind},
     test::test_dir,
   };
 
@@ -225,5 +262,49 @@ mod tests {
       vec!["182.140.143.139:443".parse().unwrap()]
     );
     assert_eq!(router.match_exits(&destination).await, vec![OutExit::Proxy]);
+    assert_eq!(
+      router.match_routes(&destination).await,
+      vec![RouteMatch {
+        exit: OutExit::Proxy,
+        rule_kind: RuleKind::Domain,
+        matched_address: Some("182.140.143.139:443".parse().unwrap()),
+      }]
+    );
+  }
+
+  #[tokio::test]
+  async fn first_rule_for_an_exit_controls_resolution_provenance() {
+    let router = Router::new(test_dir());
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+      port: 443,
+      routing_domain: Some("example.com".to_owned()),
+    };
+    router.register_local_rules(vec![
+      DomainRule {
+        matchers: vec!["example.com".to_owned().into()],
+        priority: 10,
+        negate: false,
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+      AddressRule {
+        match_ips: None,
+        match_ports: Some(vec![443]),
+        priority: 20,
+        negate: false,
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+    ]);
+
+    assert_eq!(
+      router.match_routes(&destination).await,
+      vec![RouteMatch {
+        exit: OutExit::Proxy,
+        rule_kind: RuleKind::Domain,
+        matched_address: Some("203.0.113.8:443".parse().unwrap()),
+      }]
+    );
   }
 }

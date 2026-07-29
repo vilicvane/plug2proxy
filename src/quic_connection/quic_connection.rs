@@ -1,9 +1,11 @@
 use std::{
   collections::HashMap,
+  fmt::Write as _,
   sync::{
     Arc, Mutex,
     atomic::{self, AtomicBool, AtomicU64, AtomicUsize},
   },
+  time::Instant,
 };
 
 use colored::Colorize;
@@ -14,7 +16,7 @@ use tokio::{
   io::{AsyncReadExt, AsyncWriteExt, simplex},
   sync::{Notify, mpsc, watch},
   task::JoinSet,
-  time::{Duration, sleep, sleep_until},
+  time::{Duration, Instant as TokioInstant, MissedTickBehavior, interval_at, sleep, sleep_until},
 };
 
 use crate::{
@@ -27,6 +29,7 @@ use crate::{
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
+const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct StreamSignals {
   recv: Notify,
@@ -53,6 +56,10 @@ struct ConnectionSignals {
   streams: Mutex<HashMap<u64, Arc<StreamSignals>>>,
   transport_closed: AtomicBool,
   driver_failed: AtomicBool,
+  created_at: Instant,
+  underlying_send_pending: AtomicBool,
+  last_underlying_send_progress_millis: AtomicU64,
+  last_underlying_recv_progress_millis: AtomicU64,
   state_updater: Arc<StateUpdater>,
 }
 
@@ -63,8 +70,16 @@ impl ConnectionSignals {
       streams: Mutex::new(HashMap::new()),
       transport_closed: AtomicBool::new(false),
       driver_failed: AtomicBool::new(false),
+      created_at: Instant::now(),
+      underlying_send_pending: AtomicBool::new(false),
+      last_underlying_send_progress_millis: AtomicU64::new(0),
+      last_underlying_recv_progress_millis: AtomicU64::new(0),
       state_updater,
     }
+  }
+
+  fn elapsed_millis(&self) -> u64 {
+    self.created_at.elapsed().as_millis().min(u64::MAX as u128) as u64
   }
 
   fn stream_task_finished(&self, id: u64, stream_signals: &Arc<StreamSignals>) {
@@ -119,6 +134,101 @@ impl ConnectionSignals {
   fn driver_failed(&self) -> bool {
     self.driver_failed.load(atomic::Ordering::Acquire)
   }
+}
+
+fn format_connection_id(id: &quiche::ConnectionId<'_>) -> String {
+  let mut formatted = String::with_capacity(12);
+
+  for byte in id.as_ref().iter().take(6) {
+    write!(&mut formatted, "{byte:02x}").unwrap();
+  }
+
+  formatted
+}
+
+fn format_connection_diagnostics(
+  connection: &Arc<Mutex<quiche::Connection>>,
+  signals: &ConnectionSignals,
+  side: ConnectionSide,
+  connection_id: &str,
+) -> String {
+  let (active_streams, uncreated_streams, externally_dropped_streams) = {
+    let streams = signals.streams.lock().unwrap();
+
+    (
+      streams.len(),
+      streams
+        .values()
+        .filter(|stream| !stream.created.load(atomic::Ordering::Acquire))
+        .count(),
+      streams
+        .values()
+        .filter(|stream| stream.external_dropped.load(atomic::Ordering::Acquire))
+        .count(),
+    )
+  };
+  let connection_age_millis = signals.elapsed_millis();
+  let last_send_progress_millis = signals
+    .last_underlying_send_progress_millis
+    .load(atomic::Ordering::Acquire);
+  let last_recv_progress_millis = signals
+    .last_underlying_recv_progress_millis
+    .load(atomic::Ordering::Acquire);
+  let connection = connection.lock().unwrap();
+  let stats = connection.stats();
+  let path = connection.path_stats().next().map(|path| {
+    format!(
+      "rtt_ms={} rttvar_ms={} cwnd={} pto={} delivery_rate={} path_lost={} path_retrans={}",
+      path.rtt.as_millis(),
+      path.rttvar.as_millis(),
+      path.cwnd,
+      path.total_pto_count,
+      path.delivery_rate,
+      path.lost,
+      path.retrans
+    )
+  });
+
+  format!(
+    "cid={connection_id} side={side} state={:?} age_ms={connection_age_millis} \
+     streams={active_streams} uncreated_streams={uncreated_streams} \
+     externally_dropped_streams={externally_dropped_streams} \
+     underlying_send_pending={} underlying_send_idle_ms={} underlying_recv_idle_ms={} \
+     quic_sent_packets={} quic_recv_packets={} quic_sent_bytes={} quic_recv_bytes={} \
+     quic_acked_bytes={} quic_lost_packets={} quic_lost_bytes={} quic_retrans_packets={} \
+     quic_stream_retrans_bytes={} data_blocked_sent={} data_blocked_recv={} \
+     stream_data_blocked_sent={} stream_data_blocked_recv={} \
+     streams_blocked_bidi_recv={} reset_local={} reset_remote={} stopped_local={} \
+     stopped_remote={} tx_buffered={:?} path=[{}] transport_closed={} driver_failed={}",
+    signals.state_updater.state(),
+    signals
+      .underlying_send_pending
+      .load(atomic::Ordering::Acquire),
+    connection_age_millis.saturating_sub(last_send_progress_millis),
+    connection_age_millis.saturating_sub(last_recv_progress_millis),
+    stats.sent,
+    stats.recv,
+    stats.sent_bytes,
+    stats.recv_bytes,
+    stats.acked_bytes,
+    stats.lost,
+    stats.lost_bytes,
+    stats.retrans,
+    stats.stream_retrans_bytes,
+    stats.data_blocked_sent_count,
+    stats.data_blocked_recv_count,
+    stats.stream_data_blocked_sent_count,
+    stats.stream_data_blocked_recv_count,
+    stats.streams_blocked_bidi_recv_count,
+    stats.reset_stream_count_local,
+    stats.reset_stream_count_remote,
+    stats.stopped_stream_count_local,
+    stats.stopped_stream_count_remote,
+    stats.tx_buffered_state,
+    path.unwrap_or_else(|| "none".to_owned()),
+    signals.transport_closed(),
+    signals.driver_failed(),
+  )
 }
 
 pub struct QuicConnection {
@@ -245,6 +355,7 @@ impl QuicConnection {
     let connection = connection.mutex().arc();
     let state_updater = StateUpdater::new(side).arc();
     let connection_signals = ConnectionSignals::new(state_updater.clone()).arc();
+    let diagnostic_connection_id = format_connection_id(&id);
 
     let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
 
@@ -290,12 +401,12 @@ impl QuicConnection {
 
               match read_result {
                 Ok(total_length) => {
-                  log::debug!("{side} {id}: stream send read {total_length} bytes");
+                  log::trace!("{side} {id}: stream send read {total_length} bytes");
 
                   let mut offset = 0;
 
                   loop {
-                    log::debug!("{side} {id}: stream send {offset}..{total_length}");
+                    log::trace!("{side} {id}: stream send {offset}..{total_length}");
 
                     let stream_send_result = connection.lock().unwrap().stream_send(
                       id,
@@ -313,7 +424,7 @@ impl QuicConnection {
 
                         offset += length;
 
-                        log::debug!(
+                        log::trace!(
                           "{side} {id}: {stream_send} {offset}/{total_length}",
                           stream_send = "stream send".on_green(),
                         );
@@ -323,7 +434,7 @@ impl QuicConnection {
                         }
                       }
                       Err(quiche::Error::Done) => {
-                        log::debug!("{side} {id}: stream send done");
+                        log::trace!("{side} {id}: stream send done");
 
                         tokio::select! {
                           _ = stream_signals.send.notified() => {}
@@ -404,7 +515,7 @@ impl QuicConnection {
               }
 
               let stream_recv_result = {
-                log::debug!(
+                log::trace!(
                   "{side} {id}: {stream_recv}",
                   stream_recv = "stream recv".on_red()
                 );
@@ -418,7 +529,7 @@ impl QuicConnection {
                 Ok((length, finished)) => {
                   connection_signals.connection_send.notify_one();
 
-                  log::debug!("{side} {id}: stream recv {length} {finished}");
+                  log::trace!("{side} {id}: stream recv {length} {finished}");
 
                   if length > 0 {
                     let write_result = tokio::select! {
@@ -455,7 +566,7 @@ impl QuicConnection {
                   }
 
                   if matches!(error, quiche::Error::Done) {
-                    log::debug!("{side} {id}: stream recv done");
+                    log::trace!("{side} {id}: stream recv done");
 
                     tokio::select! {
                       _ = stream_signals.recv.notified() => {}
@@ -522,7 +633,7 @@ impl QuicConnection {
             let mut byte_count = 0;
 
             loop {
-              log::debug!("{side} {send}", send = "send".green());
+              log::trace!("{side} {send}", send = "send".green());
 
               let send_result = {
                 let mut connection = connection.lock().unwrap();
@@ -539,20 +650,35 @@ impl QuicConnection {
                   packet_count += 1;
                   byte_count += length;
 
-                  log::debug!("{side} send {packet_count} packets, {byte_count} bytes");
+                  log::trace!("{side} send {packet_count} packets, {byte_count} bytes");
 
                   tokio::select! {
                     _ = sleep_until(send_info.at.into()) => {}
                     _ = state_updater.wait(State::Closed) => break,
                   }
 
+                  connection_signals
+                    .underlying_send_pending
+                    .store(true, atomic::Ordering::Release);
+
                   let send_result = tokio::select! {
                     result = underlying_sink.send(buffer[..length].to_vec().into()) => Some(result),
                     _ = state_updater.wait(State::Closed) => None,
                   };
 
+                  connection_signals
+                    .underlying_send_pending
+                    .store(false, atomic::Ordering::Release);
+
                   match send_result {
-                    Some(Ok(())) => {}
+                    Some(Ok(())) => {
+                      connection_signals
+                        .last_underlying_send_progress_millis
+                        .store(
+                          connection_signals.elapsed_millis(),
+                          atomic::Ordering::Release,
+                        );
+                    }
                     Some(Err(error)) => {
                       log::warn!("error sending packet to underlying sink: {error}");
                       connection_signals.mark_transport_closed();
@@ -562,7 +688,7 @@ impl QuicConnection {
                   }
                 }
                 Err(quiche::Error::Done) => {
-                  log::debug!("{side} send done");
+                  log::trace!("{side} send done");
 
                   let timeout_instant = connection.lock().unwrap().timeout_instant();
 
@@ -624,11 +750,17 @@ impl QuicConnection {
 
               packet_count += 1;
               byte_count += packet.len();
+              connection_signals
+                .last_underlying_recv_progress_millis
+                .store(
+                  connection_signals.elapsed_millis(),
+                  atomic::Ordering::Release,
+                );
 
-              log::debug!("{side} underlying read {packet_count} packets, {byte_count} bytes");
+              log::trace!("{side} underlying read {packet_count} packets, {byte_count} bytes");
 
               let recv_result = {
-                log::debug!("{side} {} {}", "recv".red(), packet.len());
+                log::trace!("{side} {} {}", "recv".red(), packet.len());
 
                 let mut connection = connection.lock().unwrap();
 
@@ -678,7 +810,7 @@ impl QuicConnection {
                 Ok(_) => {
                   // Source code suggests that recv always return the length of the packet if Ok.
 
-                  log::debug!("{side} recv ok");
+                  log::trace!("{side} recv ok");
 
                   let (readable, writable) = {
                     let connection = connection.lock().unwrap();
@@ -698,7 +830,7 @@ impl QuicConnection {
                   }
 
                   for id in readable {
-                    log::debug!("{side} {id}: stream recv readable");
+                    log::trace!("{side} {id}: stream recv readable");
 
                     if let Some(signals) =
                       connection_signals.streams.lock().unwrap().get(&id).cloned()
@@ -775,7 +907,43 @@ impl QuicConnection {
           }
         };
 
-        tokio_join_set!(send_loop, recv_loop, finished_stream_reconciliation_loop)
+        let diagnostics_loop = {
+          let connection = connection.clone();
+          let connection_signals = connection_signals.clone();
+          let state_updater = state_updater.clone();
+
+          async move {
+            let mut interval = interval_at(
+              TokioInstant::now() + DIAGNOSTIC_INTERVAL,
+              DIAGNOSTIC_INTERVAL,
+            );
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+              tokio::select! {
+                _ = interval.tick() => {
+                  log::debug!(
+                    "QOMT diagnostic: {}",
+                    format_connection_diagnostics(
+                      &connection,
+                      &connection_signals,
+                      side,
+                      &diagnostic_connection_id,
+                    )
+                  );
+                }
+                _ = state_updater.wait(State::Closed) => break,
+              }
+            }
+          }
+        };
+
+        tokio_join_set!(
+          send_loop,
+          recv_loop,
+          finished_stream_reconciliation_loop,
+          diagnostics_loop
+        )
       },
     }
   }
@@ -790,6 +958,19 @@ impl QuicConnection {
 
   pub fn id(&self) -> &quiche::ConnectionId<'static> {
     &self.id
+  }
+
+  pub fn diagnostic_id(&self) -> String {
+    format_connection_id(&self.id)
+  }
+
+  pub fn diagnostics(&self) -> String {
+    format_connection_diagnostics(
+      &self.connection,
+      &self.connection_signals,
+      self.side,
+      &self.diagnostic_id(),
+    )
   }
 
   pub async fn accept_stream(&self) -> Result<Option<QuicStream>, QuicConnectionError> {

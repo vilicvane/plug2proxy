@@ -529,15 +529,18 @@ impl In {
     };
 
     log::info!(
-      "connection to peer OUT {} ({provider_id}) established.",
-      key.address
+      "connection to peer OUT {} ({provider_id}) established: QOMT {}.",
+      key.address,
+      qomt_connection.diagnostic_id(),
     );
 
-    while let Some(_unexpected_stream) = qomt_connection.accept_stream().await? {
+    while let Some(unexpected_stream) = qomt_connection.accept_stream().await? {
       log::warn!(
-        "unexpected stream received from peer OUT {} ({}).",
+        "unexpected stream {} received from peer OUT {} ({}) on QOMT {}.",
+        unexpected_stream.id(),
         key.address,
-        key.provider_id
+        key.provider_id,
+        qomt_connection.diagnostic_id(),
       );
     }
 

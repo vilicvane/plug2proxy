@@ -1,10 +1,13 @@
 use std::{
   collections::HashMap,
+  io,
   net::SocketAddr,
+  pin::Pin,
   sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
   },
+  task::{Context, Poll},
   time::{Duration, Instant},
 };
 
@@ -15,7 +18,12 @@ use itertools::Itertools;
 use lits::duration;
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
-use tokio::{io::copy_bidirectional, sync::mpsc, task::JoinSet};
+use tokio::{
+  io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional},
+  sync::mpsc,
+  task::JoinSet,
+  time::{Instant as TokioInstant, MissedTickBehavior, interval_at},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -23,8 +31,9 @@ use crate::{
   out::PeerOut,
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
+    SocketDestinationHost,
   },
-  route::{AnyRule, Router},
+  route::{AnyRule, RouteMatch, Router, RuleKind},
   udp_forwarder::{
     InboundUdpPacketStream, IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket,
     UdpPacketSource, UdpPacketStreamError,
@@ -32,10 +41,200 @@ use crate::{
 };
 
 static NEXT_OUT_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
+static NEXT_TCP_FLOW_ID: AtomicU64 = AtomicU64::new(1);
+const PENDING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
+const TRANSFER_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UDP_FLOW_LOG_CACHE_CAPACITY: u64 = 1024 * 64;
 const UDP_FLOW_LOG_IDLE_TIMEOUT: Duration = duration!("1m");
 
 type UdpFlow = (UdpPacketSource, SocketDestination, OutExit);
+
+struct FlowIoMetrics {
+  started_at: Instant,
+  read_bytes: AtomicU64,
+  written_bytes: AtomicU64,
+  read_pending: AtomicBool,
+  write_pending: AtomicBool,
+  last_read_progress_millis: AtomicU64,
+  last_write_progress_millis: AtomicU64,
+}
+
+impl FlowIoMetrics {
+  fn new() -> Self {
+    Self {
+      started_at: Instant::now(),
+      read_bytes: AtomicU64::new(0),
+      written_bytes: AtomicU64::new(0),
+      read_pending: AtomicBool::new(false),
+      write_pending: AtomicBool::new(false),
+      last_read_progress_millis: AtomicU64::new(0),
+      last_write_progress_millis: AtomicU64::new(0),
+    }
+  }
+
+  fn elapsed_millis(&self) -> u64 {
+    self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+  }
+
+  fn record_read(&self, bytes: usize) {
+    if bytes == 0 {
+      return;
+    }
+
+    self.read_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    self
+      .last_read_progress_millis
+      .store(self.elapsed_millis(), Ordering::Release);
+  }
+
+  fn record_write(&self, bytes: usize) {
+    if bytes == 0 {
+      return;
+    }
+
+    self
+      .written_bytes
+      .fetch_add(bytes as u64, Ordering::Relaxed);
+    self
+      .last_write_progress_millis
+      .store(self.elapsed_millis(), Ordering::Release);
+  }
+
+  fn snapshot(&self) -> String {
+    let elapsed_millis = self.elapsed_millis();
+
+    format!(
+      "read_bytes={} written_bytes={} read_pending={} write_pending={} \
+       read_idle_ms={} write_idle_ms={}",
+      self.read_bytes.load(Ordering::Relaxed),
+      self.written_bytes.load(Ordering::Relaxed),
+      self.read_pending.load(Ordering::Acquire),
+      self.write_pending.load(Ordering::Acquire),
+      elapsed_millis.saturating_sub(self.last_read_progress_millis.load(Ordering::Acquire)),
+      elapsed_millis.saturating_sub(self.last_write_progress_millis.load(Ordering::Acquire)),
+    )
+  }
+}
+
+struct MeteredBidiStream {
+  inner: Box<dyn BidiStream>,
+  metrics: Arc<FlowIoMetrics>,
+}
+
+impl MeteredBidiStream {
+  fn new(inner: Box<dyn BidiStream>, metrics: Arc<FlowIoMetrics>) -> Self {
+    Self { inner, metrics }
+  }
+}
+
+impl AsyncRead for MeteredBidiStream {
+  fn poll_read(
+    self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffer: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    let this = self.get_mut();
+    let previous_length = buffer.filled().len();
+    let result = Pin::new(&mut *this.inner).poll_read(context, buffer);
+
+    match &result {
+      Poll::Ready(Ok(())) => {
+        this.metrics.read_pending.store(false, Ordering::Release);
+        this
+          .metrics
+          .record_read(buffer.filled().len().saturating_sub(previous_length));
+      }
+      Poll::Ready(Err(_)) => {
+        this.metrics.read_pending.store(false, Ordering::Release);
+      }
+      Poll::Pending => {
+        this.metrics.read_pending.store(true, Ordering::Release);
+      }
+    }
+
+    result
+  }
+}
+
+impl AsyncWrite for MeteredBidiStream {
+  fn poll_write(
+    self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffer: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    let this = self.get_mut();
+    let result = Pin::new(&mut *this.inner).poll_write(context, buffer);
+
+    match &result {
+      Poll::Ready(Ok(bytes)) => {
+        this.metrics.write_pending.store(false, Ordering::Release);
+        this.metrics.record_write(*bytes);
+      }
+      Poll::Ready(Err(_)) => {
+        this.metrics.write_pending.store(false, Ordering::Release);
+      }
+      Poll::Pending => {
+        this.metrics.write_pending.store(true, Ordering::Release);
+      }
+    }
+
+    result
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+    let this = self.get_mut();
+    let result = Pin::new(&mut *this.inner).poll_flush(context);
+    this
+      .metrics
+      .write_pending
+      .store(result.is_pending(), Ordering::Release);
+    result
+  }
+
+  fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+    let this = self.get_mut();
+    let result = Pin::new(&mut *this.inner).poll_shutdown(context);
+    this
+      .metrics
+      .write_pending
+      .store(result.is_pending(), Ordering::Release);
+    result
+  }
+}
+
+fn new_diagnostic_interval(period: Duration) -> tokio::time::Interval {
+  let mut interval = interval_at(TokioInstant::now() + period, period);
+  interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+  interval
+}
+
+fn destination_for_route(
+  destination: &SocketDestination,
+  route: &RouteMatch,
+  dispatcher_is_local: bool,
+) -> SocketDestination {
+  if !dispatcher_is_local {
+    if let Some(domain) = destination.routing_domain() {
+      return SocketDestination {
+        host: SocketDestinationHost::DomainName(domain),
+        port: destination.port,
+        routing_domain: None,
+      };
+    }
+  }
+
+  if dispatcher_is_local
+    && route.rule_kind != RuleKind::Domain
+    && matches!(destination.host, SocketDestinationHost::DomainName(_))
+    && let Some(address) = route.matched_address
+  {
+    let mut destination = destination.clone();
+    destination.host = SocketDestinationHost::IpAddress(address.ip());
+    return destination;
+  }
+
+  destination.clone()
+}
 
 #[async_trait]
 pub trait Node {
@@ -51,26 +250,48 @@ pub trait Node {
     &self,
     exits: Vec<OutExit>,
     destination: SocketDestination,
-    mut stream: Box<dyn BidiStream>,
+    stream: Box<dyn BidiStream>,
   ) -> Result<(), Error> {
-    let route_label = destination.route_label();
+    self
+      .tcp_connect_routes(
+        exits.into_iter().map(RouteMatch::fixed).collect(),
+        destination,
+        stream,
+      )
+      .await
+  }
 
-    if exits.is_empty() {
-      log::info!("TCP {route_label} no exit matched.");
+  async fn tcp_connect_routes(
+    &self,
+    routes: Vec<RouteMatch>,
+    destination: SocketDestination,
+    stream: Box<dyn BidiStream>,
+  ) -> Result<(), Error> {
+    let flow_id = NEXT_TCP_FLOW_ID.fetch_add(1, Ordering::Relaxed);
+    let route_label = destination.route_label();
+    let exits = routes.iter().map(|route| route.exit.clone()).collect_vec();
+
+    if routes.is_empty() {
+      log::info!("TCP flow {flow_id} {route_label} no exit matched.");
       return Ok(());
     }
 
     let mut may_retry_peer_unavailable = true;
+    let mut attempt = 0_u32;
 
     loop {
+      attempt += 1;
       let out_dispatchers = self.get_out_dispatchers();
 
-      let Some((matched_exit, matched, out_dispatcher)) =
-        select_out_dispatcher(&exits, &out_dispatchers)
+      let Some((matched_route, matched, out_dispatcher)) =
+        select_route_dispatcher(&routes, &out_dispatchers)
       else {
-        log::info!("TCP {route_label} no out dispatcher matched.");
+        log::info!("TCP flow {flow_id} {route_label} no out dispatcher matched.");
         return Ok(());
       };
+      let matched_exit = &matched_route.exit;
+      let dial_destination =
+        destination_for_route(&destination, &matched_route, out_dispatcher.is_local());
 
       // A transfer only needs the dispatcher that opens its stream. Keeping
       // the full routing snapshot here pins every QUIC connection that was
@@ -78,26 +299,50 @@ pub trait Node {
       // withdrawn or replaced.
       drop(out_dispatchers);
 
+      let dispatcher_label = out_dispatcher.diagnostic_label();
       log::info!(
-        "TCP {route_label} -> {}",
+        "TCP flow {flow_id} attempt {attempt} {route_label} -> {} via \
+         {dispatcher_label}, priority={:?}, resolved_exit={}",
         exits
           .iter()
-          .map(|exit| if exit == &matched_exit {
+          .map(|exit| if exit == matched_exit {
             exit.to_string().cyan().to_string()
           } else {
             exit.to_string()
           })
-          .join(",")
+          .join(","),
+        matched.priority,
+        matched.resolved_exit,
       );
 
       out_dispatcher.transfer_started();
       let started_at = Instant::now();
-      let connect_result = out_dispatcher
-        .connect(matched.resolved_exit, destination.clone())
-        .await;
+      let connect = out_dispatcher.connect(matched.resolved_exit, dial_destination.clone());
+      tokio::pin!(connect);
+      let mut diagnostic_interval = new_diagnostic_interval(PENDING_DIAGNOSTIC_INTERVAL);
+      let connect_result = loop {
+        tokio::select! {
+          result = &mut connect => break result,
+          _ = diagnostic_interval.tick() => {
+            log::debug!(
+              "TCP flow {flow_id} attempt {attempt} connect pending for {} ms: \
+               destination={dial_destination}, dispatcher=[{}]",
+              started_at.elapsed().as_millis(),
+              out_dispatcher.diagnostics(),
+            );
+          }
+        }
+      };
 
-      let mut out_stream = match connect_result {
-        Ok(out_stream) => out_stream,
+      let out_stream = match connect_result {
+        Ok(out_stream) => {
+          log::debug!(
+            "TCP flow {flow_id} attempt {attempt} connected in {} ms: \
+             destination={dial_destination}, dispatcher={dispatcher_label}",
+            started_at.elapsed().as_millis(),
+          );
+          out_stream
+        }
         Err(Error::OutDispatcherUnavailable)
           if may_retry_peer_unavailable
             && matched.priority == OutExitMatchPriority::PeerProvider =>
@@ -105,26 +350,74 @@ pub trait Node {
           out_dispatcher.transfer_finished(0, started_at.elapsed());
           may_retry_peer_unavailable = false;
           log::debug!(
-            "peer OUT for TCP {route_label} became unavailable before opening a stream; \
-             selecting again."
+            "TCP flow {flow_id} attempt {attempt} peer dispatcher became unavailable \
+             after {} ms; selecting again: destination={destination}, \
+             dispatcher={dispatcher_label}",
+            started_at.elapsed().as_millis(),
           );
           continue;
         }
         Err(error) => {
           out_dispatcher.transfer_finished(0, started_at.elapsed());
+          log::warn!(
+            "TCP flow {flow_id} attempt {attempt} connect failed after {} ms: \
+             destination={dial_destination}, dispatcher={dispatcher_label}, error={error}",
+            started_at.elapsed().as_millis(),
+          );
           return Err(error);
         }
       };
 
-      let transfer_result = copy_bidirectional(&mut stream, &mut out_stream)
-        .await
-        .map_err(Error::from);
+      let client_metrics = Arc::new(FlowIoMetrics::new());
+      let outbound_metrics = Arc::new(FlowIoMetrics::new());
+      let mut metered_client = MeteredBidiStream::new(stream, client_metrics.clone());
+      let mut metered_outbound = MeteredBidiStream::new(out_stream, outbound_metrics.clone());
+      let transfer = copy_bidirectional(&mut metered_client, &mut metered_outbound);
+      tokio::pin!(transfer);
+      let mut diagnostic_interval = new_diagnostic_interval(TRANSFER_DIAGNOSTIC_INTERVAL);
+      let transfer_result = loop {
+        tokio::select! {
+          result = &mut transfer => break result.map_err(Error::from),
+          _ = diagnostic_interval.tick() => {
+            log::debug!(
+              "TCP flow {flow_id} attempt {attempt} transfer diagnostic after {} ms: \
+               destination={dial_destination}, dispatcher={dispatcher_label}, \
+               client=[{}], outbound=[{}]",
+              started_at.elapsed().as_millis(),
+              client_metrics.snapshot(),
+              outbound_metrics.snapshot(),
+            );
+          }
+        }
+      };
       let transferred_bytes = transfer_result
         .as_ref()
         .map(|(upstream, downstream)| upstream.saturating_add(*downstream))
         .unwrap_or(0);
 
       out_dispatcher.transfer_finished(transferred_bytes, started_at.elapsed());
+
+      match &transfer_result {
+        Ok((upstream, downstream)) => {
+          log::debug!(
+            "TCP flow {flow_id} attempt {attempt} completed after {} ms: \
+             destination={dial_destination}, dispatcher={dispatcher_label}, \
+             upstream_bytes={upstream}, downstream_bytes={downstream}",
+            started_at.elapsed().as_millis(),
+          );
+        }
+        Err(error) => {
+          log::warn!(
+            "TCP flow {flow_id} attempt {attempt} transfer failed after {} ms: \
+             destination={dial_destination}, dispatcher={dispatcher_label}, \
+             client=[{}], outbound=[{}], error={error}",
+            started_at.elapsed().as_millis(),
+            client_metrics.snapshot(),
+            outbound_metrics.snapshot(),
+          );
+        }
+      }
+
       transfer_result?;
 
       return Ok(());
@@ -154,12 +447,18 @@ enum UdpRoute<'a> {
 }
 
 impl UdpRoute<'_> {
-  async fn match_exits(&self, destination: &SocketDestination) -> Vec<OutExit> {
+  async fn match_routes(&self, destination: &SocketDestination) -> Vec<RouteMatch> {
     match self {
-      UdpRoute::Router(router) => router.match_exits(destination).await,
-      UdpRoute::Fixed(exit) => vec![exit.clone()],
+      UdpRoute::Router(router) => router.match_routes(destination).await,
+      UdpRoute::Fixed(exit) => vec![RouteMatch::fixed(exit.clone())],
     }
   }
+}
+
+#[derive(Clone)]
+struct UdpAssociationSender {
+  sender: mpsc::UnboundedSender<OutgoingUdpPacket>,
+  is_local: bool,
 }
 
 async fn forward_udp(
@@ -168,7 +467,7 @@ async fn forward_udp(
   mut packet_stream: Box<dyn InboundUdpPacketStream>,
 ) -> Result<(), Error> {
   let (incoming_sender, mut incoming_receiver) = mpsc::unbounded_channel();
-  let mut association_senders = HashMap::<OutExit, mpsc::UnboundedSender<OutgoingUdpPacket>>::new();
+  let mut association_senders = HashMap::<OutExit, UdpAssociationSender>::new();
   let mut association_tasks = JoinSet::new();
   let logged_flows = new_udp_flow_log_cache(UDP_FLOW_LOG_IDLE_TIMEOUT);
   let mut out_dispatcher_revision = node.out_dispatcher_revision();
@@ -179,10 +478,14 @@ async fn forward_udp(
         let Some(outgoing) = outgoing else {
           break;
         };
-        let exits = route.match_exits(&outgoing.destination).await;
+        let routes = route.match_routes(&outgoing.destination).await;
+        let exits = routes
+          .iter()
+          .map(|route| route.exit.clone())
+          .collect_vec();
 
-        if exits.is_empty() {
-          log::debug!(
+        if routes.is_empty() {
+          log::trace!(
             "UDP {} no exit matched.",
             outgoing.destination.route_label()
           );
@@ -198,22 +501,23 @@ async fn forward_udp(
 
         let mut selected_association = None;
 
-        for requested_exit in &exits {
+        for requested_route in &routes {
+          let requested_exit = &requested_route.exit;
           if association_senders
             .get(requested_exit)
-            .is_some_and(mpsc::UnboundedSender::is_closed)
+            .is_some_and(|association| association.sender.is_closed())
           {
             association_senders.remove(requested_exit);
           }
 
-          if let Some(sender) = association_senders.get(requested_exit) {
-            selected_association = Some((requested_exit.clone(), sender.clone()));
+          if let Some(association) = association_senders.get(requested_exit) {
+            selected_association = Some((requested_route.clone(), association.clone()));
             break;
           }
 
-          let Some((matched_exit, outbound)) = open_udp_association(
+          let Some((matched_route, outbound, is_local)) = open_udp_association(
             node,
-            std::slice::from_ref(requested_exit),
+            std::slice::from_ref(requested_route),
             &outgoing.destination,
           )
           .await?
@@ -223,24 +527,37 @@ async fn forward_udp(
           let (association_sender, association_receiver) = mpsc::unbounded_channel();
 
           association_tasks.spawn(run_udp_association(
-            matched_exit.clone(),
+            matched_route.exit.clone(),
             outbound,
             association_receiver,
             incoming_sender.clone(),
           ));
-          association_senders.insert(matched_exit.clone(), association_sender.clone());
+          association_senders.insert(
+            matched_route.exit.clone(),
+            UdpAssociationSender {
+              sender: association_sender.clone(),
+              is_local,
+            },
+          );
 
           log::info!(
-            "UDP association opened: exit={matched_exit}, first_destination={}",
+            "UDP association opened: exit={}, first_destination={}",
+            matched_route.exit,
             outgoing.destination.route_label()
           );
 
-          selected_association = Some((matched_exit, association_sender));
+          selected_association = Some((
+            matched_route,
+            UdpAssociationSender {
+              sender: association_sender,
+              is_local,
+            },
+          ));
           break;
         }
 
-        let Some((matched_exit, association_sender)) = selected_association else {
-          log::debug!(
+        let Some((matched_route, association)) = selected_association else {
+          log::trace!(
             "UDP {} no out dispatcher matched.",
             outgoing.destination.route_label()
           );
@@ -251,7 +568,7 @@ async fn forward_udp(
           &logged_flows,
           &outgoing.source,
           &outgoing.destination,
-          &matched_exit,
+          &matched_route.exit,
         ) {
           log::info!(
             "UDP {} -> {} via {}",
@@ -259,7 +576,7 @@ async fn forward_udp(
             outgoing.destination.route_label(),
             exits
               .iter()
-              .map(|exit| if exit == &matched_exit {
+              .map(|exit| if exit == &matched_route.exit {
                 exit.to_string().cyan().to_string()
               } else {
                 exit.to_string()
@@ -268,8 +585,26 @@ async fn forward_udp(
           );
         }
 
-        if association_sender.send(outgoing).is_err() {
-          association_senders.remove(&matched_exit);
+        let mut outgoing = outgoing;
+        let dial_destination = destination_for_route(
+          &outgoing.destination,
+          &matched_route,
+          association.is_local,
+        );
+        if outgoing.response_destination.is_none()
+          && let SocketDestinationHost::IpAddress(address) = outgoing.destination.host
+          && matches!(
+            dial_destination.host,
+            SocketDestinationHost::DomainName(_)
+          )
+        {
+          outgoing.response_destination =
+            Some(SocketAddr::from((address, outgoing.destination.port)));
+        }
+        outgoing.destination = dial_destination;
+
+        if association.sender.send(outgoing).is_err() {
+          association_senders.remove(&matched_route.exit);
         }
       }
       Some(incoming) = incoming_receiver.recv() => {
@@ -280,7 +615,7 @@ async fn forward_udp(
 
         if association_senders
           .get(&exit)
-          .is_some_and(mpsc::UnboundedSender::is_closed)
+          .is_some_and(|association| association.sender.is_closed())
         {
           association_senders.remove(&exit);
         }
@@ -320,30 +655,66 @@ fn should_log_udp_flow(
 
 async fn open_udp_association(
   node: &(impl Node + ?Sized),
-  exits: &[OutExit],
+  routes: &[RouteMatch],
   destination: &SocketDestination,
-) -> Result<Option<(OutExit, Box<dyn OutboundUdpPacketStream>)>, Error> {
+) -> Result<Option<(RouteMatch, Box<dyn OutboundUdpPacketStream>, bool)>, Error> {
   let mut may_retry_peer_unavailable = true;
+  let route_label = destination.route_label();
 
   loop {
     let out_dispatchers = node.get_out_dispatchers();
-    let Some((matched_exit, matched, out_dispatcher)) =
-      select_out_dispatcher(exits, &out_dispatchers)
+    let Some((matched_route, matched, out_dispatcher)) =
+      select_route_dispatcher(routes, &out_dispatchers)
     else {
       return Ok(None);
     };
     drop(out_dispatchers);
     let priority = matched.priority;
+    let dispatcher_label = out_dispatcher.diagnostic_label();
+    let started_at = Instant::now();
 
-    match out_dispatcher.associate(matched.resolved_exit).await {
-      Ok(outbound) => return Ok(Some((matched_exit, outbound))),
+    log::info!(
+      "UDP association selecting: first_destination={route_label}, requested_exit={matched_exit}, \
+       resolved_exit={}, priority={priority:?}, dispatcher={dispatcher_label}",
+      matched.resolved_exit,
+      matched_exit = matched_route.exit,
+    );
+
+    let associate = out_dispatcher.associate(matched.resolved_exit);
+    tokio::pin!(associate);
+    let mut diagnostic_interval = new_diagnostic_interval(PENDING_DIAGNOSTIC_INTERVAL);
+    let associate_result = loop {
+      tokio::select! {
+        result = &mut associate => break result,
+        _ = diagnostic_interval.tick() => {
+          log::debug!(
+            "UDP association pending for {} ms: first_destination={route_label}, \
+             requested_exit={matched_exit}, dispatcher=[{}]",
+            started_at.elapsed().as_millis(),
+            out_dispatcher.diagnostics(),
+            matched_exit = matched_route.exit,
+          );
+        }
+      }
+    };
+
+    match associate_result {
+      Ok(outbound) => {
+        log::info!(
+          "UDP association connected in {} ms: first_destination={route_label}, \
+           requested_exit={matched_exit}, dispatcher={dispatcher_label}",
+          started_at.elapsed().as_millis(),
+          matched_exit = matched_route.exit,
+        );
+        return Ok(Some((matched_route, outbound, out_dispatcher.is_local())));
+      }
       Err(Error::OutDispatcherUnavailable)
         if may_retry_peer_unavailable && priority == OutExitMatchPriority::PeerProvider =>
       {
         may_retry_peer_unavailable = false;
         log::debug!(
-          "peer OUT for UDP {} became unavailable before opening an association; selecting again.",
-          destination.route_label()
+          "peer OUT for UDP {destination} became unavailable before opening an association; \
+           selecting again."
         );
       }
       Err(error) => return Err(error),
@@ -386,16 +757,16 @@ async fn run_udp_association(
   (exit, result)
 }
 
-fn select_out_dispatcher(
-  exits: &[OutExit],
+fn select_route_dispatcher(
+  routes: &[RouteMatch],
   out_dispatchers: &[Arc<dyn OutDispatcher>],
-) -> Option<(OutExit, OutExitMatch, Arc<dyn OutDispatcher>)> {
-  exits.iter().find_map(|route| {
+) -> Option<(RouteMatch, OutExitMatch, Arc<dyn OutDispatcher>)> {
+  routes.iter().find_map(|route| {
     let mut matching_dispatchers = out_dispatchers
       .iter()
       .filter_map(|dispatcher| {
         dispatcher
-          .match_exit(route)
+          .match_exit(&route.exit)
           .map(|matched| (dispatcher, matched))
       })
       .collect_vec();
@@ -787,6 +1158,41 @@ mod tests {
 
   struct FailingUdpPacketStream;
 
+  struct TestInboundUdpPacketStream {
+    outgoing: VecDeque<OutgoingUdpPacket>,
+  }
+
+  impl Sink<IncomingUdpPacket> for TestInboundUdpPacketStream {
+    type Error = UdpPacketStreamError;
+
+    fn poll_ready(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _packet: IncomingUdpPacket) -> Result<(), Self::Error> {
+      Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _context: &mut Context) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+  }
+
+  impl Stream for TestInboundUdpPacketStream {
+    type Item = OutgoingUdpPacket;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context) -> Poll<Option<Self::Item>> {
+      self
+        .outgoing
+        .pop_front()
+        .map_or(Poll::Pending, |packet| Poll::Ready(Some(packet)))
+    }
+  }
+
   impl Sink<OutgoingUdpPacket> for FailingUdpPacketStream {
     type Error = UdpPacketStreamError;
 
@@ -824,6 +1230,8 @@ mod tests {
     exit: OutExit,
     match_priority: OutExitMatchPriority,
     received_payloads: Arc<Mutex<Vec<Vec<u8>>>>,
+    received_destinations: Arc<Mutex<Vec<SocketDestination>>>,
+    received_response_destinations: Arc<Mutex<Vec<Option<SocketAddr>>>>,
   }
 
   impl RecordingUdpTestDispatcher {
@@ -832,11 +1240,21 @@ mod tests {
         exit,
         match_priority,
         received_payloads: Arc::new(Mutex::new(vec![])),
+        received_destinations: Arc::new(Mutex::new(vec![])),
+        received_response_destinations: Arc::new(Mutex::new(vec![])),
       }
     }
 
     fn received_payloads(&self) -> Vec<Vec<u8>> {
       self.received_payloads.lock().unwrap().clone()
+    }
+
+    fn received_destinations(&self) -> Vec<SocketDestination> {
+      self.received_destinations.lock().unwrap().clone()
+    }
+
+    fn received_response_destinations(&self) -> Vec<Option<SocketAddr>> {
+      self.received_response_destinations.lock().unwrap().clone()
     }
   }
 
@@ -870,9 +1288,19 @@ mod tests {
           Box::new(peer),
         );
       let received_payloads = self.received_payloads.clone();
+      let received_destinations = self.received_destinations.clone();
+      let received_response_destinations = self.received_response_destinations.clone();
 
       tokio::spawn(async move {
         while let Some(packet) = peer.next().await {
+          received_response_destinations
+            .lock()
+            .unwrap()
+            .push(packet.response_destination);
+          received_destinations
+            .lock()
+            .unwrap()
+            .push(packet.destination);
           received_payloads.lock().unwrap().push(packet.payload);
         }
       });
@@ -959,6 +1387,90 @@ mod tests {
       port: 80,
       routing_domain: None,
     }
+  }
+
+  #[test]
+  fn remote_routes_promote_routing_domain_to_dial_target() {
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
+      port: 443,
+      routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+    };
+    let route = RouteMatch {
+      exit: OutExit::from("us"),
+      rule_kind: RuleKind::GeoIp,
+      matched_address: Some("182.140.143.139:443".parse().unwrap()),
+    };
+
+    assert_eq!(
+      destination_for_route(&destination, &route, false),
+      SocketDestination {
+        host: SocketDestinationHost::DomainName("c2c.cdn.weixin.qq.com".to_owned()),
+        port: 443,
+        routing_domain: None,
+      }
+    );
+  }
+
+  #[test]
+  fn local_routes_preserve_original_ip() {
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
+      port: 443,
+      routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+    };
+    let route = RouteMatch {
+      exit: OutExit::Direct,
+      rule_kind: RuleKind::Domain,
+      matched_address: Some("182.140.143.139:443".parse().unwrap()),
+    };
+
+    assert_eq!(
+      destination_for_route(&destination, &route, true),
+      destination
+    );
+  }
+
+  #[test]
+  fn remote_domain_targets_are_resolved_by_out() {
+    let destination = SocketDestination {
+      host: SocketDestinationHost::DomainName("example.com".to_owned()),
+      port: 443,
+      routing_domain: None,
+    };
+    let route = RouteMatch {
+      exit: OutExit::from("us"),
+      rule_kind: RuleKind::GeoIp,
+      matched_address: Some("203.0.113.8:443".parse().unwrap()),
+    };
+
+    assert_eq!(
+      destination_for_route(&destination, &route, false),
+      SocketDestination {
+        host: SocketDestinationHost::DomainName("example.com".to_owned()),
+        port: 443,
+        routing_domain: None,
+      }
+    );
+  }
+
+  #[test]
+  fn remote_unsniffed_ip_stays_ip() {
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+      port: 443,
+      routing_domain: None,
+    };
+    let route = RouteMatch {
+      exit: OutExit::from("us"),
+      rule_kind: RuleKind::GeoIp,
+      matched_address: Some("203.0.113.8:443".parse().unwrap()),
+    };
+
+    assert_eq!(
+      destination_for_route(&destination, &route, false),
+      destination
+    );
   }
 
   async fn run_selection(
@@ -1328,6 +1840,7 @@ mod tests {
           port: 1000,
           routing_domain: None,
         },
+        response_destination: None,
         payload: vec![1],
       })
       .await?;
@@ -1346,6 +1859,7 @@ mod tests {
           port: 2000,
           routing_domain: None,
         },
+        response_destination: None,
         payload: vec![2],
       })
       .await?;
@@ -1357,6 +1871,73 @@ mod tests {
     .await?;
 
     assert_eq!(dispatcher.associated_exits(), vec![us, okx]);
+
+    route_task.abort();
+    route_task.await.unwrap_err();
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn udp_remote_route_sends_domain_to_remote_dispatcher() -> anyhow::Result<()> {
+    use crate::{route::FallbackRule, test::test_dir, udp_forwarder::UdpPacketSource};
+
+    let exit = OutExit::from("us");
+    let dispatcher = Arc::new(RecordingUdpTestDispatcher::new(
+      exit.clone(),
+      OutExitMatchPriority::Provider,
+    ));
+    let node = Arc::new(StaticTestNode {
+      dispatchers: vec![dispatcher.clone()],
+    });
+    let router = Arc::new(Router::new(test_dir()));
+    router.register_local_rules(vec![FallbackRule { exits: vec![exit] }.into()]);
+    let route_task = tokio::spawn({
+      let node = node.clone();
+      let router = router.clone();
+      async move {
+        node
+          .route_udp(
+            &router,
+            Box::new(TestInboundUdpPacketStream {
+              outgoing: VecDeque::from([OutgoingUdpPacket {
+                source: UdpPacketSource {
+                  via: vec![],
+                  address: "127.0.0.1:50000".parse().unwrap(),
+                },
+                destination: SocketDestination {
+                  host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+                  port: 443,
+                  routing_domain: Some("www.example.com".to_owned()),
+                },
+                response_destination: None,
+                payload: vec![1],
+              }]),
+            }),
+          )
+          .await
+      }
+    });
+
+    timeout(Duration::from_secs(1), async {
+      while dispatcher.received_destinations().is_empty() {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await?;
+
+    assert_eq!(
+      dispatcher.received_destinations(),
+      vec![SocketDestination {
+        host: SocketDestinationHost::DomainName("www.example.com".to_owned()),
+        port: 443,
+        routing_domain: None,
+      }]
+    );
+    assert_eq!(
+      dispatcher.received_response_destinations(),
+      vec![Some("203.0.113.8:443".parse().unwrap())]
+    );
 
     route_task.abort();
     route_task.await.unwrap_err();
@@ -1398,6 +1979,7 @@ mod tests {
         address: "127.0.0.1:50000".parse()?,
       },
       destination: test_destination(),
+      response_destination: None,
       payload: vec![1],
     };
 
@@ -1453,6 +2035,7 @@ mod tests {
         address: "127.0.0.1:50000".parse().unwrap(),
       },
       destination: test_destination(),
+      response_destination: None,
       payload,
     };
 

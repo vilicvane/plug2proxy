@@ -80,6 +80,22 @@ impl OutDispatcher for NodeOutDispatcher {
       })
   }
 
+  fn diagnostic_label(&self) -> String {
+    format!(
+      "qomt(priority={:?}, cid={})",
+      self.match_priority,
+      self.qomt_connection.diagnostic_id()
+    )
+  }
+
+  fn diagnostics(&self) -> String {
+    format!(
+      "{} {}",
+      self.diagnostic_label(),
+      self.qomt_connection.diagnostics()
+    )
+  }
+
   fn load(&self) -> OutDispatcherLoad {
     let goodput = self.goodput_bytes_per_second.load(Ordering::Relaxed);
 
@@ -136,7 +152,12 @@ impl OutDispatcher for NodeOutDispatcher {
     }
 
     let mut stream = self.qomt_connection.open_stream();
+    let stream_id = stream.id();
 
+    log::debug!(
+      "QOMT {} stream {stream_id} sending CONNECT {destination} via {exit}.",
+      self.qomt_connection.diagnostic_id()
+    );
     let message = NodeMessageToOut::Connect(exit, destination);
 
     if let Err(error) = stream
@@ -149,6 +170,11 @@ impl OutDispatcher for NodeOutDispatcher {
 
       return Err(error.into());
     }
+
+    log::debug!(
+      "QOMT {} stream {stream_id} CONNECT request queued.",
+      self.qomt_connection.diagnostic_id()
+    );
 
     if self.qomt_connection.state() != QuicConnectionState::Established {
       return Err(Error::OutDispatcherUnavailable);
@@ -163,6 +189,11 @@ impl OutDispatcher for NodeOutDispatcher {
     }
 
     let mut stream = self.qomt_connection.open_stream();
+    let stream_id = stream.id();
+    log::debug!(
+      "QOMT {} stream {stream_id} sending ASSOCIATE via {exit}.",
+      self.qomt_connection.diagnostic_id()
+    );
     let message = NodeMessageToOut::Associate(exit);
 
     if let Err(error) = stream
@@ -175,6 +206,11 @@ impl OutDispatcher for NodeOutDispatcher {
 
       return Err(error.into());
     }
+
+    log::debug!(
+      "QOMT {} stream {stream_id} ASSOCIATE request queued.",
+      self.qomt_connection.diagnostic_id()
+    );
 
     if self.qomt_connection.state() != QuicConnectionState::Established {
       return Err(Error::OutDispatcherUnavailable);

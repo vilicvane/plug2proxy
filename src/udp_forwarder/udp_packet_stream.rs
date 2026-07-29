@@ -291,6 +291,7 @@ mod tests {
         port: 53,
         routing_domain: None,
       },
+      response_destination: Some("203.0.113.8:53".parse().unwrap()),
       payload: b"query".to_vec(),
     };
 
@@ -298,6 +299,7 @@ mod tests {
     let received = inbound.next().await.unwrap();
     assert_eq!(received.source, outgoing.source);
     assert_eq!(received.destination, outgoing.destination);
+    assert_eq!(received.response_destination, outgoing.response_destination);
     assert_eq!(received.payload, outgoing.payload);
 
     let incoming = IncomingUdpPacket {
@@ -331,6 +333,7 @@ mod tests {
           port: 53,
           routing_domain: None,
         },
+        response_destination: None,
         payload: b"query".to_vec(),
       })
       .await;

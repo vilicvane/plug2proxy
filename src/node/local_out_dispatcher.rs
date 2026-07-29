@@ -74,6 +74,17 @@ impl OutDispatcher for LocalOutDispatcher {
     self.exits.match_exit(route)
   }
 
+  fn is_local(&self) -> bool {
+    true
+  }
+
+  fn diagnostic_label(&self) -> String {
+    self.interface.as_ref().map_or_else(
+      || "local(default)".to_owned(),
+      |interface| format!("local(interface={interface})"),
+    )
+  }
+
   async fn connect(
     &self,
     _: OutExit,
@@ -82,15 +93,29 @@ impl OutDispatcher for LocalOutDispatcher {
     let tcp_stream = if let Some(interface) = &self.interface {
       connect_bound(&destination, interface).await?
     } else {
-      match destination.host {
+      match &destination.host {
         SocketDestinationHost::DomainName(domain) => {
-          TcpStream::connect((domain, destination.port)).await?
+          TcpStream::connect((domain.as_str(), destination.port)).await?
         }
         SocketDestinationHost::IpAddress(ip_addr) => {
-          TcpStream::connect((ip_addr, destination.port)).await?
+          TcpStream::connect((*ip_addr, destination.port)).await?
         }
       }
     };
+
+    log::debug!(
+      "local TCP socket connected: requested_destination={destination}, local_address={}, \
+       peer_address={}, interface={}",
+      tcp_stream
+        .local_addr()
+        .map(|address| address.to_string())
+        .unwrap_or_else(|error| format!("unknown({error})")),
+      tcp_stream
+        .peer_addr()
+        .map(|address| address.to_string())
+        .unwrap_or_else(|error| format!("unknown({error})")),
+      self.interface.as_deref().unwrap_or("default"),
+    );
 
     Ok(tcp_stream.wrap_box())
   }

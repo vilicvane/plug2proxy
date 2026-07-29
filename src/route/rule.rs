@@ -35,6 +35,23 @@ impl AnyRule {
   pub(super) fn uses_geosite(&self) -> bool {
     matches!(self, AnyRule::Domain(rule) if rule.uses_geosite())
   }
+
+  pub(super) fn kind(&self) -> RuleKind {
+    match self {
+      AnyRule::GeoIp(_) => RuleKind::GeoIp,
+      AnyRule::Address(_) => RuleKind::Address,
+      AnyRule::Domain(_) => RuleKind::Domain,
+      AnyRule::Fallback(_) => RuleKind::Fallback,
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub enum RuleKind {
+  GeoIp,
+  Address,
+  Domain,
+  Fallback,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

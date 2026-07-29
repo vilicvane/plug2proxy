@@ -64,6 +64,18 @@ impl Default for TcpSniffOptions {
 pub struct SniffedTcpStream<S> {
   pub domain: Option<SniffedDomain>,
   pub stream: ReplayStream<S>,
+  pub end_reason: TcpSniffEndReason,
+  pub bytes_read: usize,
+  pub elapsed: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcpSniffEndReason {
+  Domain,
+  NoDomain,
+  MaxBytes,
+  Timeout,
+  EndOfStream,
 }
 
 pub struct ReplayStream<S> {
@@ -130,13 +142,16 @@ where
   S: AsyncRead + AsyncWrite + Unpin,
 {
   let max_bytes = options.max_bytes.max(1);
+  let started = Instant::now();
   let deadline = Instant::now() + options.timeout;
   let mut prefix = Vec::with_capacity(4096.min(max_bytes));
-  let domain = loop {
+  let (domain, end_reason) = loop {
     match sniff_tcp_prefix(&prefix) {
-      SniffOutcome::Domain(domain) => break Some(domain),
-      SniffOutcome::NoDomain => break None,
-      SniffOutcome::NeedMoreData if prefix.len() >= max_bytes => break None,
+      SniffOutcome::Domain(domain) => break (Some(domain), TcpSniffEndReason::Domain),
+      SniffOutcome::NoDomain => break (None, TcpSniffEndReason::NoDomain),
+      SniffOutcome::NeedMoreData if prefix.len() >= max_bytes => {
+        break (None, TcpSniffEndReason::MaxBytes);
+      }
       SniffOutcome::NeedMoreData => {}
     }
 
@@ -144,19 +159,23 @@ where
     let mut buffer = vec![0; remaining.min(4096)];
     let read = match timeout_at(deadline, stream.read(&mut buffer)).await {
       Ok(result) => result?,
-      Err(_) => break None,
+      Err(_) => break (None, TcpSniffEndReason::Timeout),
     };
 
     if read == 0 {
-      break None;
+      break (None, TcpSniffEndReason::EndOfStream);
     }
 
     prefix.extend_from_slice(&buffer[..read]);
   };
 
+  let bytes_read = prefix.len();
   Ok(SniffedTcpStream {
     domain,
     stream: ReplayStream::new(prefix, stream),
+    end_reason,
+    bytes_read,
+    elapsed: started.elapsed(),
   })
 }
 

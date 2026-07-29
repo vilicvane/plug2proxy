@@ -246,6 +246,7 @@ impl Out {
 
   async fn handle_node(self: Arc<Self>, qomt_connection: QuicConnection) -> anyhow::Result<()> {
     let mut join_set = JoinSet::new();
+    let qomt_connection_id = qomt_connection.diagnostic_id();
 
     loop {
       let Some(mut stream) = qomt_connection.accept_stream().await? else {
@@ -253,6 +254,8 @@ impl Out {
       };
 
       let this = self.clone();
+      let stream_id = stream.id();
+      let qomt_connection_id = qomt_connection_id.clone();
 
       reap_finished_tasks(&mut join_set, "OUT stream task");
 
@@ -262,11 +265,18 @@ impl Out {
 
           match message {
             NodeMessageToOut::Connect(exit, destination) => {
+              log::debug!(
+                "QOMT {qomt_connection_id} stream {stream_id} received CONNECT: \
+                 destination={destination}, exit={exit}."
+              );
               this
                 .tcp_connect(vec![exit], destination, stream.wrap_box())
                 .await?;
             }
             NodeMessageToOut::Associate(exit) => {
+              log::debug!(
+                "QOMT {qomt_connection_id} stream {stream_id} received ASSOCIATE: exit={exit}."
+              );
               let packet_stream =
                 UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
               this.relay_udp(exit, Box::new(packet_stream)).await?;
@@ -503,6 +513,7 @@ mod tests {
             port: target_address.port(),
             routing_domain: None,
           },
+          response_destination: None,
           payload: b"udp ping".to_vec(),
         })
         .await?;

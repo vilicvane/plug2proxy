@@ -19,6 +19,18 @@ pub struct OutDispatcherLoad {
 pub trait OutDispatcher: Send + Sync {
   fn match_exit(&self, exit: &OutExit) -> Option<OutExitMatch>;
 
+  fn is_local(&self) -> bool {
+    false
+  }
+
+  fn diagnostic_label(&self) -> String {
+    "unknown".to_owned()
+  }
+
+  fn diagnostics(&self) -> String {
+    self.diagnostic_label()
+  }
+
   fn load(&self) -> OutDispatcherLoad {
     OutDispatcherLoad::default()
   }

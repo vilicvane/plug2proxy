@@ -259,6 +259,7 @@ async fn run_udp_socket(
                 address: source_address,
               },
               destination,
+              response_destination: None,
               payload: payload.to_vec(),
             };
 
@@ -311,13 +312,19 @@ async fn handle_incoming_connection(
       let stream: Box<dyn BidiStream> =
         if sniff && matches!(&destination.host, SocketDestinationHost::IpAddress(_)) {
           let sniffed = sniff_tcp_stream(stream, TcpSniffOptions::default()).await?;
+          log::debug!(
+            "TCP sniff: destination={}, result={:?}, elapsed_ms={}, bytes={}, domain={}",
+            destination,
+            sniffed.end_reason,
+            sniffed.elapsed.as_millis(),
+            sniffed.bytes_read,
+            sniffed
+              .domain
+              .as_ref()
+              .map(|domain| domain.domain.as_str())
+              .unwrap_or("-")
+          );
           if let Some(sniffed_domain) = sniffed.domain {
-            log::debug!(
-              "sniffed {:?} domain {} while preserving SOCKS5 destination {}",
-              sniffed_domain.protocol,
-              sniffed_domain.domain,
-              destination
-            );
             destination.set_routing_domain(Some(sniffed_domain.domain));
           }
           Box::new(sniffed.stream)

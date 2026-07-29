@@ -69,17 +69,22 @@ impl UdpForwarder {
   }
 
   async fn send_outgoing_packet(
-    sockets: Cache<UdpPacketSource, SocketTuple>,
+    sockets: Cache<UdpSocketKey, SocketTuple>,
     packet_sender: flume::Sender<IncomingUdpPacket>,
     interface: Option<&str>,
     OutgoingUdpPacket {
       source,
       destination,
+      response_destination,
       payload,
     }: OutgoingUdpPacket,
   ) -> Result<(), std::io::Error> {
+    let socket_key = UdpSocketKey {
+      source: source.clone(),
+      response_destination,
+    };
     let (socket, destination_address) = {
-      if let Some((socket, destination_map, _)) = sockets.get(&source) {
+      if let Some((socket, destination_map, _)) = sockets.get(&socket_key) {
         if let Some(destination_ip) = destination_map.lock().unwrap().get(&destination.host) {
           (
             socket.clone(),
@@ -122,6 +127,7 @@ impl UdpForwarder {
           packet_sender.clone(),
           source.clone(),
           socket.clone(),
+          response_destination,
         ));
 
         let socket_tuple = (
@@ -130,12 +136,16 @@ impl UdpForwarder {
           join_set.arc(),
         );
 
-        sockets.insert(source.clone(), socket_tuple);
+        sockets.insert(socket_key, socket_tuple);
 
         (socket, destination_socket_address)
       }
     };
 
+    log::trace!(
+      "UDP outbound destination resolved: requested={destination}, actual={destination_address}, \
+       response_destination={response_destination:?}"
+    );
     socket.send_to(&payload, destination_address).await?;
 
     Ok(())
@@ -145,6 +155,7 @@ impl UdpForwarder {
     packet_sender: flume::Sender<IncomingUdpPacket>,
     source: UdpPacketSource,
     socket: Arc<UdpSocket>,
+    response_destination: Option<SocketAddr>,
   ) {
     let mut buffer = vec![0; u16::MAX as usize];
 
@@ -160,7 +171,7 @@ impl UdpForwarder {
       packet_sender
         .send_async(IncomingUdpPacket {
           source: source.clone(),
-          destination: source_socket_address,
+          destination: response_destination.unwrap_or(source_socket_address),
           payload: buffer[..length].to_vec(),
         })
         .await
@@ -170,6 +181,12 @@ impl UdpForwarder {
         .ok();
     }
   }
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+struct UdpSocketKey {
+  source: UdpPacketSource,
+  response_destination: Option<SocketAddr>,
 }
 
 type SocketTuple = (
@@ -295,6 +312,7 @@ mod tests {
     let packet = OutgoingUdpPacket {
       source: create_source(source_address),
       destination: create_destination(server_address),
+      response_destination: None,
       payload: payload.clone(),
     };
 
@@ -309,6 +327,46 @@ mod tests {
     assert_eq!(incoming_packet.payload, payload);
     assert_eq!(incoming_packet.destination, server_address);
     assert_eq!(incoming_packet.source.address, source_address);
+  }
+
+  #[tokio::test]
+  async fn remote_domain_response_uses_transparent_destination() {
+    let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_address = server_socket.local_addr().unwrap();
+    let server_handle = tokio::spawn(async move {
+      let mut buffer = vec![0u8; 1500];
+      let (length, source) = server_socket.recv_from(&mut buffer).await.unwrap();
+      server_socket
+        .send_to(&buffer[..length], source)
+        .await
+        .unwrap();
+    });
+    let mut forwarder = UdpForwarder::new();
+    let source_address = "127.0.0.1:12346".parse().unwrap();
+    let transparent_destination = SocketAddr::from((
+      "203.0.113.8".parse::<IpAddr>().unwrap(),
+      server_address.port(),
+    ));
+
+    forwarder
+      .send(OutgoingUdpPacket {
+        source: create_source(source_address),
+        destination: SocketDestination {
+          host: SocketDestinationHost::DomainName("localhost".to_owned()),
+          port: server_address.port(),
+          routing_domain: None,
+        },
+        response_destination: Some(transparent_destination),
+        payload: b"remote DNS".to_vec(),
+      })
+      .await
+      .unwrap();
+
+    server_handle.await.unwrap();
+    let incoming_packet = forwarder.next().await.unwrap();
+    assert_eq!(incoming_packet.destination, transparent_destination);
+    assert_eq!(incoming_packet.source.address, source_address);
+    assert_eq!(incoming_packet.payload, b"remote DNS");
   }
 
   #[tokio::test]
@@ -331,6 +389,7 @@ mod tests {
       .send(OutgoingUdpPacket {
         source: create_source("[::1]:12349".parse().unwrap()),
         destination: create_destination(server_address),
+        response_destination: None,
         payload,
       })
       .await
@@ -379,6 +438,7 @@ mod tests {
       let packet = OutgoingUdpPacket {
         source: create_source(source_address),
         destination: create_destination(server_address),
+        response_destination: None,
         payload: payload.clone(),
       };
       forwarder.send(packet).await.unwrap();
@@ -434,12 +494,14 @@ mod tests {
     let packet_1 = OutgoingUdpPacket {
       source: create_source(source_address_1),
       destination: create_destination(server_address_1),
+      response_destination: None,
       payload: b"from source 1".to_vec(),
     };
 
     let packet_2 = OutgoingUdpPacket {
       source: create_source(source_address_2),
       destination: create_destination(server_address_2),
+      response_destination: None,
       payload: b"from source 2".to_vec(),
     };
 
@@ -484,6 +546,7 @@ mod tests {
         port: server_address.port(),
         routing_domain: None,
       },
+      response_destination: None,
       payload: payload.clone(),
     };
 
@@ -534,6 +597,7 @@ mod tests {
           port: server_address.port(),
           routing_domain: None,
         },
+        response_destination: None,
         payload: format!("packet {}", i).into_bytes(),
       };
       forwarder.send(packet).await.unwrap();

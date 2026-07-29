@@ -38,6 +38,10 @@ impl QuicStream {
       _drop_callback: drop_callback,
     }
   }
+
+  pub fn id(&self) -> u64 {
+    self.id
+  }
 }
 
 impl AsyncRead for QuicStream {

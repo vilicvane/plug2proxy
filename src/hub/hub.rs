@@ -205,6 +205,7 @@ impl Hub {
     qomt_connection: QuicConnection,
   ) {
     let qomt_connection = qomt_connection.arc();
+    let qomt_connection_id = qomt_connection.diagnostic_id();
     let (update_sender, mut update_receiver) = mpsc::unbounded_channel();
     let update_sender = Arc::new(update_sender);
 
@@ -261,6 +262,8 @@ impl Hub {
       };
 
       let this = self.clone();
+      let stream_id = stream.id();
+      let qomt_connection_id = qomt_connection_id.clone();
 
       reap_finished_tasks(&mut join_set, "HUB CONNECT task");
 
@@ -272,11 +275,19 @@ impl Hub {
 
           match message {
             NodeMessageToOut::Connect(exit, destination) => {
+              log::debug!(
+                "QOMT {qomt_connection_id} stream {stream_id} received CONNECT \
+                 from IN {node_id}: destination={destination}, exit={exit}."
+              );
               this
                 .tcp_connect(vec![exit], destination, stream.wrap_box())
                 .await?;
             }
             NodeMessageToOut::Associate(exit) => {
+              log::debug!(
+                "QOMT {qomt_connection_id} stream {stream_id} received ASSOCIATE \
+                 from IN {node_id}: exit={exit}."
+              );
               let packet_stream =
                 UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
               this.relay_udp(exit, Box::new(packet_stream)).await?;
