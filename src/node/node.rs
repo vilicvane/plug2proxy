@@ -213,19 +213,25 @@ fn destination_for_route(
   route: &RouteMatch,
   dispatcher_is_local: bool,
 ) -> SocketDestination {
-  if !dispatcher_is_local {
-    if let Some(domain) = destination.routing_domain() {
-      return SocketDestination {
-        host: SocketDestinationHost::DomainName(domain),
-        port: destination.port,
-        routing_domain: None,
-        routing_protocol: None,
-      };
-    }
+  let domain_matched = route.rule_kinds.contains(&RuleKind::Domain);
+
+  // 仅当命中 domain 规则且出口在远端时才把域名交给远端解析（抗 DNS 污染）；
+  // 其余情况保留客户端指定的字面 IP，避免远端把 IP 换成域名重新解析到不同地址。
+  if !dispatcher_is_local
+    && domain_matched
+    && let Some(domain) = destination.routing_domain()
+  {
+    return SocketDestination {
+      host: SocketDestinationHost::DomainName(domain),
+      port: destination.port,
+      routing_domain: None,
+      routing_protocol: None,
+    };
   }
 
-  if dispatcher_is_local
-    && !route.rule_kinds.contains(&RuleKind::Domain)
+  // 非 domain 命中的域名目标：携带匹配时已解析的地址，本地避免重复解析，
+  // 远端按原 IP 拨号而不重新解析。
+  if !domain_matched
     && matches!(destination.host, SocketDestinationHost::DomainName(_))
     && let Some(address) = route.matched_address
   {
@@ -1392,7 +1398,32 @@ mod tests {
   }
 
   #[test]
-  fn remote_routes_promote_routing_domain_to_dial_target() {
+  fn remote_domain_matched_routes_promote_routing_domain_to_dial_target() {
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
+      port: 443,
+      routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+      routing_protocol: Some(crate::primitives::SniffedProtocol::Tls),
+    };
+    let route = RouteMatch {
+      exit: OutExit::from("us"),
+      rule_kinds: vec![RuleKind::Domain],
+      matched_address: Some("182.140.143.139:443".parse().unwrap()),
+    };
+
+    assert_eq!(
+      destination_for_route(&destination, &route, false),
+      SocketDestination {
+        host: SocketDestinationHost::DomainName("c2c.cdn.weixin.qq.com".to_owned()),
+        port: 443,
+        routing_domain: None,
+        routing_protocol: None,
+      }
+    );
+  }
+
+  #[test]
+  fn remote_non_domain_routes_keep_literal_ip_dial_target() {
     let destination = SocketDestination {
       host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
       port: 443,
@@ -1407,12 +1438,7 @@ mod tests {
 
     assert_eq!(
       destination_for_route(&destination, &route, false),
-      SocketDestination {
-        host: SocketDestinationHost::DomainName("c2c.cdn.weixin.qq.com".to_owned()),
-        port: 443,
-        routing_domain: None,
-        routing_protocol: None,
-      }
+      destination
     );
   }
 
@@ -1437,7 +1463,7 @@ mod tests {
   }
 
   #[test]
-  fn remote_domain_targets_are_resolved_by_out() {
+  fn remote_non_domain_routes_carry_resolved_ip_for_domain_targets() {
     let destination = SocketDestination {
       host: SocketDestinationHost::DomainName("example.com".to_owned()),
       port: 443,
@@ -1447,6 +1473,31 @@ mod tests {
     let route = RouteMatch {
       exit: OutExit::from("us"),
       rule_kinds: vec![RuleKind::GeoIp],
+      matched_address: Some("203.0.113.8:443".parse().unwrap()),
+    };
+
+    assert_eq!(
+      destination_for_route(&destination, &route, false),
+      SocketDestination {
+        host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+        port: 443,
+        routing_domain: None,
+        routing_protocol: None,
+      }
+    );
+  }
+
+  #[test]
+  fn remote_domain_matched_routes_keep_domain_targets_for_remote_resolution() {
+    let destination = SocketDestination {
+      host: SocketDestinationHost::DomainName("example.com".to_owned()),
+      port: 443,
+      routing_domain: None,
+      routing_protocol: None,
+    };
+    let route = RouteMatch {
+      exit: OutExit::from("us"),
+      rule_kinds: vec![RuleKind::Domain],
       matched_address: Some("203.0.113.8:443".parse().unwrap()),
     };
 
@@ -1890,7 +1941,7 @@ mod tests {
 
   #[tokio::test]
   async fn udp_remote_route_sends_domain_to_remote_dispatcher() -> anyhow::Result<()> {
-    use crate::{route::FallbackRule, test::test_dir, udp_forwarder::UdpPacketSource};
+    use crate::{route::DomainRule, test::test_dir, udp_forwarder::UdpPacketSource};
 
     let exit = OutExit::from("us");
     let dispatcher = Arc::new(RecordingUdpTestDispatcher::new(
@@ -1901,7 +1952,13 @@ mod tests {
       dispatchers: vec![dispatcher.clone()],
     });
     let router = Arc::new(Router::new(test_dir()));
-    router.register_local_rules(vec![FallbackRule { exits: vec![exit] }.into()]);
+    router.register_local_rules(vec![DomainRule {
+      matchers: vec!["www.example.com".to_owned().into()],
+      priority: 0,
+      negate: false,
+      exits: vec![exit],
+    }
+    .into()]);
     let route_task = tokio::spawn({
       let node = node.clone();
       let router = router.clone();
