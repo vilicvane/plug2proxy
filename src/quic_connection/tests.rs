@@ -565,8 +565,14 @@ async fn dropped_stream_tasks_are_reaped() -> anyhow::Result<()> {
       hub_quic_connection.established()
     )?;
 
-    for _ in 0..32 {
-      drop(out_quic_connection.open_stream());
+    for index in 0..32 {
+      let mut stream = out_quic_connection.open_stream();
+
+      if index % 2 == 0 {
+        stream.write_all(b"request").await?;
+      }
+
+      drop(stream);
     }
 
     timeout(duration!("2s"), async {
@@ -582,6 +588,82 @@ async fn dropped_stream_tasks_are_reaped() -> anyhow::Result<()> {
     .map_err(|_| {
       anyhow::anyhow!(
         "dropped stream tasks were not reaped: out=[{}] hub=[{}]",
+        out_quic_connection.diagnostics(),
+        hub_quic_connection.diagnostics(),
+      )
+    })?;
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn dropped_request_response_stream_tasks_are_reaped() -> anyhow::Result<()> {
+  timeout(duration!("10s"), async {
+    let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+    let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
+    let connection_id = QuicConnection::generate_connection_id();
+
+    let out_quic_connection = QuicConnection::connect_with_sink_and_stream(
+      &connection_id,
+      &mut out_quiche_config,
+      out_to_hub_packet_sender.into_sink(),
+      hub_to_out_packet_receiver.into_stream(),
+    );
+
+    let hub_quic_connection = QuicConnection::accept_with_sink_and_stream(
+      out_quic_connection.id(),
+      &mut hub_quiche_config,
+      hub_to_out_packet_sender.into_sink(),
+      out_to_hub_packet_receiver.into_stream(),
+    );
+
+    tokio::try_join!(
+      out_quic_connection.established(),
+      hub_quic_connection.established()
+    )?;
+
+    let mut out_stream = out_quic_connection.open_stream();
+    out_stream.write_all(b"request").await?;
+
+    let mut hub_stream = hub_quic_connection
+      .accept_stream()
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("missing request stream"))?;
+    let mut request = [0; 7];
+    hub_stream.read_exact(&mut request).await?;
+    assert_eq!(&request, b"request");
+
+    hub_stream.write_all(b"response").await?;
+    drop(hub_stream);
+
+    let mut response = Vec::new();
+    out_stream.read_to_end(&mut response).await?;
+    assert_eq!(response, b"response");
+    drop(out_stream);
+
+    timeout(duration!("2s"), async {
+      loop {
+        if out_quic_connection.diagnostics().contains("streams=0 ")
+          && hub_quic_connection.diagnostics().contains("streams=0 ")
+        {
+          break;
+        }
+
+        sleep(duration!("20ms")).await;
+      }
+    })
+    .await
+    .map_err(|_| {
+      anyhow::anyhow!(
+        "dropped request/response tasks were not reaped: out=[{}] hub=[{}]",
         out_quic_connection.diagnostics(),
         hub_quic_connection.diagnostics(),
       )
