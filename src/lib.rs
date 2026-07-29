@@ -1,5 +1,6 @@
 pub mod cert;
 pub mod constants;
+pub mod dns;
 pub mod hub;
 pub mod r#in;
 pub mod inbound;

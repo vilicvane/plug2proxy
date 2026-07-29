@@ -7,7 +7,7 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream};
 
 use crate::{
-  node::{Error, OutDispatcher},
+  node::{Error, NodeResolveAnswers, OutDispatcher, ResolveQuery},
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitTag, OutExits, SocketDestination,
     SocketDestinationHost,
@@ -124,6 +124,10 @@ impl OutDispatcher for LocalOutDispatcher {
     Ok(Box::new(UdpForwarder::with_interface(
       self.interface.clone(),
     )))
+  }
+
+  async fn resolve(&self, _: OutExit, query: &ResolveQuery) -> Result<NodeResolveAnswers, Error> {
+    Ok(crate::dns::resolve_locally(query).await)
   }
 }
 

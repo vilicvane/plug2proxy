@@ -22,6 +22,11 @@ pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
     false
   }
 
+  /// 是否只在 DNS 阶段生效（不参与连接路由）。
+  fn dns_only(&self) -> bool {
+    false
+  }
+
   /// 返回 `Some(命中原因)` 表示命中；原因由匹配过程产出，复合规则
   /// （AND）的原因来自各子规则的命中结果。
   fn test(
@@ -156,6 +161,8 @@ pub struct DomainRule {
   pub priority: i64,
   pub negate: bool,
   pub exits: Vec<OutExit>,
+  #[serde(default)]
+  pub dns_only: bool,
 }
 
 impl Rule for DomainRule {
@@ -169,6 +176,10 @@ impl Rule for DomainRule {
 
   fn requires_geosite(&self) -> bool {
     self.matchers.iter().any(AnyDomainMatcher::requires_geosite)
+  }
+
+  fn dns_only(&self) -> bool {
+    self.dns_only
   }
 
   fn test(
@@ -479,6 +490,7 @@ mod tests {
       priority: 100,
       negate: false,
       exits: vec![OutExit::Direct],
+      dns_only: false,
     };
     let encoded = postcard::to_allocvec(&rule).unwrap();
     let decoded: DomainRule = postcard::from_bytes(&encoded).unwrap();
@@ -504,6 +516,7 @@ mod tests {
           priority: i64::MAX,
           negate: false,
           exits: vec![],
+          dns_only: false,
         }
         .into(),
         AddressRule {
@@ -556,6 +569,7 @@ mod tests {
           priority: i64::MAX,
           negate: true,
           exits: vec![],
+          dns_only: false,
         }
         .into(),
       ],

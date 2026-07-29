@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-  node::Error,
+  node::{Error, NodeResolveAnswers, ResolveQuery},
   primitives::{BidiStream, OutExit, OutExitMatch, SocketDestination},
   udp_forwarder::OutboundUdpPacketStream,
 };
@@ -50,6 +50,20 @@ pub trait OutDispatcher: Send + Sync {
       std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "UDP is not supported by this dispatcher",
+      )
+      .into(),
+    )
+  }
+
+  async fn resolve(
+    &self,
+    _exit: OutExit,
+    _query: &ResolveQuery,
+  ) -> Result<NodeResolveAnswers, Error> {
+    Err(
+      std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "DNS resolve is not supported by this dispatcher",
       )
       .into(),
     )

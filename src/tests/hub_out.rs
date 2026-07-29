@@ -10,7 +10,7 @@ use crate::{
   test::{get_free_local_tcp_address, test_dir},
 };
 use lits::duration;
-use lowkit::{UserInterruptExt, user_interrupt};
+use lowkit::{SelfWrapExt, UserInterruptExt, user_interrupt};
 use socks5_server::{
   AssociatedUdpSocket,
   proto::{Address, Reply, UdpHeader},
@@ -209,6 +209,138 @@ async fn test_hub_out() -> anyhow::Result<()> {
       assert_eq!(&payload[..], b"udp proxied");
       assert_eq!(header.address, Address::SocketAddress(http_address));
       udp_echo_server.await??;
+
+      user_interrupt()?;
+
+      anyhow::Ok(())
+    }
+  )
+  .user_interrupt_ok()?;
+
+  Ok(())
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_hub_out_resolve() -> anyhow::Result<()> {
+  use hickory_resolver::proto::{op::Message, rr::RData};
+  use std::net::Ipv4Addr;
+
+  use crate::{
+    node::{Node, NodeResolveAnswers, ResolveQuery},
+    route::RouteMatch,
+  };
+
+  let test_dir = test_dir().join("hub_out_resolve");
+
+  let hub_dir = test_dir.join("hub");
+  let in_dir = test_dir.join("in");
+  let out_dir = test_dir.join("out");
+
+  generate_ca_pem_file(&test_dir).await?;
+
+  generate_node_pem_file(&test_dir, "hub", true).await?;
+  generate_node_pem_file(&test_dir, "in", true).await?;
+  generate_node_pem_file(&test_dir, "out", true).await?;
+
+  let hub_tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+  let hub_address = hub_tcp_listener.local_addr()?;
+
+  let hub = Hub::new(
+    hub_tcp_listener,
+    vec![],
+    Router::new(&hub_dir),
+    HubOptions {
+      local_out_dispatchers: vec![LocalOutDispatcher::new_default(DefaultLocalExit::Private)],
+      context_dir: hub_dir,
+    },
+  )
+  .arc();
+
+  let in_node = In::new(
+    vec![],
+    Router::new(&in_dir),
+    InOptions {
+      context_dir: in_dir,
+      hub: InHubOptions {
+        address: hub_address,
+        connections: 2,
+      },
+    },
+  )
+  .arc();
+
+  tokio::try_join!(
+    hub.clone().run_shared(),
+    in_node.clone().run_shared(),
+    async {
+      sleep(duration!("500ms")).await;
+
+      let out = Out::new(OutOptions {
+        local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+          DefaultLocalExit::Advertised {
+            tags: vec!["system".into()],
+          },
+        )],
+        listen: None,
+        advertise: None,
+        context_dir: out_dir,
+        hub: OutHubOptions {
+          address: hub_address,
+          connections: 2,
+        },
+      });
+
+      out.run().await
+    },
+    async {
+      let query = ResolveQuery {
+        name: "localhost".to_owned(),
+        record_type: 1,
+      };
+
+      // IN -> HUB -> OUT("system") 全链路解析，等 OUT 注册完成后应成功。
+      let bytes = timeout(duration!("10s"), async {
+        loop {
+          match in_node
+            .resolve_routes(vec![RouteMatch::fixed(OutExit::from("system"))], &query)
+            .await
+          {
+            Ok(NodeResolveAnswers::Success(bytes)) => break bytes,
+            _ => sleep(duration!("50ms")).await,
+          }
+        }
+      })
+      .await
+      .map_err(|_| anyhow::anyhow!("timed out waiting for remote DNS resolve"))?;
+
+      let message = Message::from_vec(&bytes)?;
+      assert!(
+        message
+          .answers
+          .iter()
+          .any(|record| matches!(&record.data, RData::A(a) if a.0 == Ipv4Addr::LOCALHOST)),
+        "unexpected answers: {:?}",
+        message.answers
+      );
+
+      // DIRECT 出口在 IN 本机解析。
+      let NodeResolveAnswers::Success(bytes) = in_node
+        .resolve_routes(vec![RouteMatch::fixed(OutExit::Direct)], &query)
+        .await?
+      else {
+        anyhow::bail!("expected direct local resolve to succeed");
+      };
+
+      let message = Message::from_vec(&bytes)?;
+      assert!(
+        message
+          .answers
+          .iter()
+          .any(|record| matches!(&record.data, RData::A(a) if a.0 == Ipv4Addr::LOCALHOST)),
+        "unexpected answers: {:?}",
+        message.answers
+      );
 
       user_interrupt()?;
 

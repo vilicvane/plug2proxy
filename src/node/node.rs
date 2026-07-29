@@ -446,6 +446,37 @@ pub trait Node {
   ) -> Result<(), Error> {
     forward_udp(self, UdpRoute::Fixed(exit), packet_stream).await
   }
+
+  /// 按路由选择 dispatcher 执行 DNS 解析；relay 节点（HUB）收到 Resolve 后
+  /// 也是经此方法把原 exit 再匹配、转发给发布该 exit 的下一节点。
+  async fn resolve_routes(
+    &self,
+    routes: Vec<RouteMatch>,
+    query: &ResolveQuery,
+  ) -> Result<NodeResolveAnswers, Error> {
+    let out_dispatchers = self.get_out_dispatchers();
+
+    let Some((_route, matched, out_dispatcher)) =
+      select_route_dispatcher(&routes, &out_dispatchers)
+    else {
+      log::info!(
+        "DNS resolve {} type {} no out dispatcher matched.",
+        query.name,
+        query.record_type
+      );
+      return Ok(NodeResolveAnswers::Failure);
+    };
+
+    log::debug!(
+      "DNS resolve {} type {} -> exit {} via {}",
+      query.name,
+      query.record_type,
+      matched.resolved_exit,
+      out_dispatcher.diagnostic_label(),
+    );
+
+    out_dispatcher.resolve(matched.resolved_exit, query).await
+  }
 }
 
 enum UdpRoute<'a> {
@@ -887,6 +918,22 @@ pub struct NodeHelloAck(pub NodeId);
 pub enum NodeMessageToOut {
   Connect(OutExit, SocketDestination),
   Associate(OutExit),
+  // 新增变体必须保持在末尾，保证 postcard 线上兼容。
+  Resolve(OutExit, ResolveQuery),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolveQuery {
+  pub name: String,
+  pub record_type: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum NodeResolveAnswers {
+  /// DNS wire format 的完整应答 Message（保真 TTL/CNAME 链/各类型 rdata）。
+  Success(Vec<u8>),
+  NxDomain,
+  Failure,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -911,6 +958,8 @@ pub enum Error {
   OutDispatcherUnavailable,
   #[error("UDP packet stream error: {0}")]
   UdpPacketStream(#[from] UdpPacketStreamError),
+  #[error("postcard stream error: {0}")]
+  PostcardStream(#[from] crate::utils::postcard::PostcardStreamError),
 }
 
 #[cfg(test)]
@@ -1957,6 +2006,7 @@ mod tests {
       priority: 0,
       negate: false,
       exits: vec![exit],
+      dns_only: false,
     }
     .into()]);
     let route_task = tokio::spawn({
@@ -2193,5 +2243,45 @@ mod tests {
     );
 
     Ok(())
+  }
+
+  #[test]
+  fn resolve_messages_postcard_round_trip() {
+    let message = NodeMessageToOut::Resolve(
+      OutExit::from("wshq"),
+      ResolveQuery {
+        name: "example.com".to_owned(),
+        record_type: 28,
+      },
+    );
+
+    let bytes = postcard::to_allocvec(&message).unwrap();
+    let NodeMessageToOut::Resolve(exit, query) = postcard::from_bytes(&bytes).unwrap() else {
+      panic!("expected Resolve variant");
+    };
+
+    assert_eq!(exit, OutExit::from("wshq"));
+    assert_eq!(query.name, "example.com");
+    assert_eq!(query.record_type, 28);
+
+    let success = NodeResolveAnswers::Success(vec![1, 2, 3]);
+    let bytes = postcard::to_allocvec(&success).unwrap();
+    let NodeResolveAnswers::Success(bytes) = postcard::from_bytes(&bytes).unwrap() else {
+      panic!("expected Success variant");
+    };
+    assert_eq!(bytes, vec![1, 2, 3]);
+
+    for answers in [NodeResolveAnswers::NxDomain, NodeResolveAnswers::Failure] {
+      let bytes = postcard::to_allocvec(&answers).unwrap();
+      let decoded: NodeResolveAnswers = postcard::from_bytes(&bytes).unwrap();
+      assert!(
+        matches!(
+          (&answers, &decoded),
+          (NodeResolveAnswers::NxDomain, NodeResolveAnswers::NxDomain)
+            | (NodeResolveAnswers::Failure, NodeResolveAnswers::Failure)
+        ),
+        "round trip changed the variant"
+      );
+    }
   }
 }

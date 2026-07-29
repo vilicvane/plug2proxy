@@ -42,6 +42,7 @@ pub struct Router {
   rules_map: Mutex<HashMap<RulesKey, Vec<Arc<AnyRule>>>>,
   merged_rules_cache: Mutex<Vec<Arc<AnyRule>>>,
   cache: Cache<SocketDestination, Vec<RouteMatch>>,
+  dns_cache: Cache<String, Vec<RouteMatch>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, derive_more::From)]
@@ -54,6 +55,7 @@ impl Router {
   pub fn new(dir: impl AsRef<Path>) -> Self {
     let dir = dir.as_ref();
     let cache = Cache::builder().time_to_live(duration!("1h")).build();
+    let dns_cache = Cache::builder().time_to_live(duration!("1h")).build();
     let geolite2 = GeoLite2::new(dir);
     let geosite = Geosite::new(dir, cache.clone());
 
@@ -63,6 +65,7 @@ impl Router {
       rules_map: HashMap::new().mutex(),
       merged_rules_cache: Vec::new().mutex(),
       cache,
+      dns_cache,
     }
   }
 
@@ -102,6 +105,7 @@ impl Router {
 
     let routes = rules
       .iter()
+      .filter(|rule| !rule.dns_only())
       .filter_map(|rule| {
         rule
           .test(&address, &domain, &protocol, &region_codes, &self.geosite)
@@ -141,6 +145,51 @@ impl Router {
       .into_iter()
       .map(|route| route.exit)
       .collect()
+  }
+
+  /// DNS 阶段的匹配：只认 domain 规则，不做本地预解析。无命中时回退本地解析。
+  pub fn match_dns(&self, domain: &str) -> Vec<RouteMatch> {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+
+    if let Some(routes) = self.dns_cache.get(&domain) {
+      return routes;
+    }
+
+    let rules = self.merged_rules_cache.lock().unwrap();
+
+    let routes = rules
+      .iter()
+      .filter(|rule| matches!(***rule, AnyRule::Domain(_)))
+      .filter_map(|rule| {
+        rule
+          .test(&None, &Some(domain.clone()), &None, &None, &self.geosite)
+          .map(|rule_kinds| (rule, rule_kinds))
+      })
+      .fold(Vec::new(), |mut routes, (rule, rule_kinds)| {
+        for exit in rule.exits() {
+          if routes.iter().any(|route: &RouteMatch| route.exit == *exit) {
+            continue;
+          }
+
+          routes.push(RouteMatch {
+            exit: exit.clone(),
+            rule_kinds: rule_kinds.clone(),
+            matched_address: None,
+          });
+        }
+
+        routes
+      });
+
+    let routes = if routes.is_empty() {
+      vec![RouteMatch::fixed(OutExit::Direct)]
+    } else {
+      routes
+    };
+
+    self.dns_cache.insert(domain, routes.clone());
+
+    routes
   }
 
   pub fn register_local_rules(&self, rules: Vec<AnyRule>) {
@@ -199,6 +248,7 @@ impl Router {
     *self.merged_rules_cache.lock().unwrap() = rules;
 
     self.cache.invalidate_all();
+    self.dns_cache.invalidate_all();
   }
 }
 
@@ -258,6 +308,7 @@ mod tests {
         priority: 0,
         negate: false,
         exits: vec![OutExit::Proxy],
+        dns_only: false,
       }
       .into(),
       FallbackRule {
@@ -296,6 +347,7 @@ mod tests {
         priority: 10,
         negate: false,
         exits: vec![OutExit::Proxy],
+        dns_only: false,
       }
       .into(),
       AddressRule {
@@ -366,6 +418,7 @@ mod tests {
             priority: i64::MAX,
             negate: false,
             exits: vec![],
+            dns_only: false,
           }
           .into(),
           AddressRule {
@@ -386,6 +439,7 @@ mod tests {
         priority: 20,
         negate: false,
         exits: vec![OutExit::Direct],
+        dns_only: false,
       }
       .into(),
     ]);
@@ -431,6 +485,7 @@ mod tests {
             priority: i64::MAX,
             negate: false,
             exits: vec![],
+            dns_only: false,
           }
           .into(),
           AddressRule {
@@ -463,5 +518,65 @@ mod tests {
     let [AnyRule::And(_), AnyRule::Protocol(_)] = built_rules.as_slice() else {
       panic!("expected the AND rule and the protocol rule, without fallback");
     };
+  }
+
+  #[tokio::test]
+  async fn dns_only_rules_apply_to_dns_but_not_connections() {
+    let router = Router::new(test_dir());
+    router.register_local_rules(vec![
+      DomainRule {
+        matchers: vec!["example.com".to_owned().into()],
+        priority: 0,
+        negate: false,
+        exits: vec![OutExit::Proxy],
+        dns_only: true,
+      }
+      .into(),
+      FallbackRule {
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+    ]);
+
+    let destination = SocketDestination {
+      host: SocketDestinationHost::DomainName("example.com".to_owned()),
+      port: 443,
+      routing_domain: None,
+      routing_protocol: None,
+    };
+    // 连接路由阶段跳过 dns_only 规则，走 fallback。
+    assert_eq!(router.match_exits(&destination).await, vec![OutExit::Direct]);
+    // DNS 阶段命中 dns_only 规则。
+    assert_eq!(
+      router.match_dns("example.com"),
+      vec![RouteMatch {
+        exit: OutExit::Proxy,
+        rule_kinds: vec![RuleKind::Domain],
+        matched_address: None,
+      }]
+    );
+  }
+
+  #[tokio::test]
+  async fn dns_matching_ignores_non_domain_rules_and_falls_back_to_direct() {
+    let router = Router::new(test_dir());
+    router.register_local_rules(vec![AddressRule {
+      match_ips: None,
+      match_ports: Some(vec![443]),
+      priority: 0,
+      negate: false,
+      exits: vec![OutExit::Proxy],
+    }
+    .into()]);
+
+    // 无 domain 规则命中 → 本地解析。
+    assert_eq!(
+      router.match_dns("example.com"),
+      vec![RouteMatch {
+        exit: OutExit::Direct,
+        rule_kinds: vec![RuleKind::Fallback],
+        matched_address: None,
+      }]
+    );
   }
 }

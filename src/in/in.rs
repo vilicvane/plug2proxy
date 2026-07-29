@@ -134,12 +134,14 @@ impl In {
   }
 
   pub async fn run(self) -> anyhow::Result<()> {
-    let this = self.arc();
+    self.arc().run_shared().await
+  }
 
+  pub async fn run_shared(self: Arc<Self>) -> anyhow::Result<()> {
     tokio::try_join!(
-      this.clone().run_inbounds(),
-      this.clone().run_in(),
-      this.run_peer_out_tasks(),
+      self.clone().run_inbounds(),
+      self.clone().run_in(),
+      self.run_peer_out_tasks(),
     )?;
 
     Ok(())
@@ -603,6 +605,7 @@ pub async fn run_in(
     hub,
     route: route_config,
     inbounds: inbounds_config,
+    dns: dns_config,
   }: InConfig,
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
@@ -626,9 +629,19 @@ pub async fn run_in(
       hub: hub.into(),
       context_dir: context_dir.to_owned(),
     },
-  );
+  )
+  .arc();
 
-  in_node.run().await
+  match dns_config {
+    Some(dns_config) => {
+      tokio::try_join!(
+        in_node.clone().run_shared(),
+        crate::dns::run_dns_server(dns_config, in_node),
+      )?;
+      Ok(())
+    }
+    None => in_node.run_shared().await,
+  }
 }
 
 #[cfg(test)]

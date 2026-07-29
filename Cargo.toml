@@ -26,6 +26,8 @@ enum_dispatch = "0.3.13"
 env_logger = "0.11.8"
 flume = "0.12.0"
 futures = "0.3.31"
+hickory-resolver = { version = "0.26", features = ["system-config"] }
+hickory-server = { version = "0.26", features = ["resolver"] }
 ipnet = { version = "2.11.0", features = ["serde"] }
 itertools = "0.14.0"
 json-strip-comments = "3.1.2"

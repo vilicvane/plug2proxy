@@ -11,12 +11,13 @@ use lowkit::SelfWrapExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-  node::{Error, NodeMessageToOut, OutDispatcher, OutDispatcherLoad},
+  node::{Error, NodeMessageToOut, NodeResolveAnswers, OutDispatcher, OutDispatcherLoad, ResolveQuery},
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
   },
   quic_connection::{QuicConnection, State as QuicConnectionState},
   udp_forwarder::{IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket, UdpPacketStream},
+  utils::postcard::postcard_read_stream,
 };
 
 pub struct NodeOutDispatcher {
@@ -220,5 +221,43 @@ impl OutDispatcher for NodeOutDispatcher {
       OutgoingUdpPacket,
       IncomingUdpPacket,
     >::new(Box::new(stream))))
+  }
+
+  async fn resolve(&self, exit: OutExit, query: &ResolveQuery) -> Result<NodeResolveAnswers, Error> {
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return Err(Error::OutDispatcherUnavailable);
+    }
+
+    let mut stream = self.qomt_connection.open_stream();
+    let stream_id = stream.id();
+    log::debug!(
+      "QOMT {} stream {stream_id} sending RESOLVE {} type {} via {exit}.",
+      self.qomt_connection.diagnostic_id(),
+      query.name,
+      query.record_type,
+    );
+    let message = NodeMessageToOut::Resolve(exit, query.clone());
+
+    if let Err(error) = stream
+      .write_all(&postcard::to_allocvec(&message).unwrap())
+      .await
+    {
+      if self.qomt_connection.state() != QuicConnectionState::Established {
+        return Err(Error::OutDispatcherUnavailable);
+      }
+
+      return Err(error.into());
+    }
+
+    let answers = postcard_read_stream::<NodeResolveAnswers>(&mut stream).await?;
+
+    log::debug!(
+      "QOMT {} stream {stream_id} RESOLVE {} answered: {:?}.",
+      self.qomt_connection.diagnostic_id(),
+      query.name,
+      answers,
+    );
+
+    Ok(answers)
   }
 }

@@ -1,13 +1,14 @@
 use lowkit::SerdeSocketAddress;
 use serde::Deserialize;
 
-use crate::{r#in::InHubOptions, inbound::InboundsConfig, route::RouteConfig};
+use crate::{dns::DnsConfig, r#in::InHubOptions, inbound::InboundsConfig, route::RouteConfig};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct InConfig {
   pub hub: InHubConfig,
   pub route: Option<RouteConfig>,
   pub inbounds: Option<InboundsConfig>,
+  pub dns: Option<DnsConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -21,12 +21,13 @@ use crate::{
   mt_connections::{MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener},
   node::{
     LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToOut,
-    OutDispatcher,
+    NodeResolveAnswers, OutDispatcher,
   },
   out::{OutConfig, build_local_out_dispatchers},
   primitives::OutExits,
   qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept, qomt_connect},
   quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
+  route::RouteMatch,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
@@ -280,6 +281,21 @@ impl Out {
               let packet_stream =
                 UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
               this.relay_udp(exit, Box::new(packet_stream)).await?;
+            }
+            NodeMessageToOut::Resolve(exit, query) => {
+              log::debug!(
+                "QOMT {qomt_connection_id} stream {stream_id} received RESOLVE: \
+                 name={}, record_type={}, exit={exit}.",
+                query.name,
+                query.record_type,
+              );
+              let answers = this
+                .resolve_routes(vec![RouteMatch::fixed(exit)], &query)
+                .await
+                .unwrap_or(NodeResolveAnswers::Failure);
+              stream
+                .write_all(&postcard::to_allocvec(&answers).unwrap())
+                .await?;
             }
           }
 

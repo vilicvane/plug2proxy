@@ -28,13 +28,13 @@ use crate::{
   mt_connections::{MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener},
   node::{
     LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToIn,
-    NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, OutDispatcher,
+    NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, NodeResolveAnswers, OutDispatcher,
   },
   out::{PeerOut, build_local_out_dispatchers},
   primitives::OutExits,
   qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept},
   quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
-  route::Router,
+  route::{RouteMatch, Router},
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
@@ -107,9 +107,11 @@ impl Hub {
   }
 
   pub async fn run(self) -> anyhow::Result<()> {
-    let this = self.arc();
+    self.arc().run_shared().await
+  }
 
-    tokio::try_join!(this.clone().run_hub(), this.run_inbounds())?;
+  pub async fn run_shared(self: Arc<Self>) -> anyhow::Result<()> {
+    tokio::try_join!(self.clone().run_hub(), self.run_inbounds())?;
 
     Ok(())
   }
@@ -291,6 +293,21 @@ impl Hub {
               let packet_stream =
                 UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
               this.relay_udp(exit, Box::new(packet_stream)).await?;
+            }
+            NodeMessageToOut::Resolve(exit, query) => {
+              log::debug!(
+                "QOMT {qomt_connection_id} stream {stream_id} received RESOLVE \
+                 from IN {node_id}: name={}, record_type={}, exit={exit}.",
+                query.name,
+                query.record_type,
+              );
+              let answers = this
+                .resolve_routes(vec![RouteMatch::fixed(exit)], &query)
+                .await
+                .unwrap_or(NodeResolveAnswers::Failure);
+              stream
+                .write_all(&postcard::to_allocvec(&answers).unwrap())
+                .await?;
             }
           }
 
@@ -515,6 +532,7 @@ pub async fn run_hub(
     exits,
     route: route_config,
     inbounds: inbounds_config,
+    dns: dns_config,
   }: HubConfig,
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
@@ -560,9 +578,19 @@ pub async fn run_hub(
       local_out_dispatchers,
       context_dir: context_dir.to_path_buf(),
     },
-  );
+  )
+  .arc();
 
-  hub.run().await
+  match dns_config {
+    Some(dns_config) => {
+      tokio::try_join!(
+        hub.clone().run_shared(),
+        crate::dns::run_dns_server(dns_config, hub),
+      )?;
+      Ok(())
+    }
+    None => hub.run_shared().await,
+  }
 }
 
 #[cfg(test)]

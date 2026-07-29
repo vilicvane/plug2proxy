@@ -197,6 +197,9 @@ pub struct DomainFilterConfig {
   pub r#match: SerdeOneOrMany<DomainMatcherConfig>,
   #[serde(default)]
   pub negate: bool,
+  /// 仅在 DNS 阶段生效（不参与连接路由）。AND 组内条件下无意义。
+  #[serde(default)]
+  pub dns_only: bool,
 }
 
 impl DomainFilterConfig {
@@ -206,6 +209,7 @@ impl DomainFilterConfig {
       priority,
       negate: self.negate,
       exits,
+      dns_only: self.dns_only,
     }
     .into()
   }
