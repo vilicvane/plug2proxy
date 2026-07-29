@@ -219,6 +219,7 @@ fn destination_for_route(
         host: SocketDestinationHost::DomainName(domain),
         port: destination.port,
         routing_domain: None,
+        routing_protocol: None,
       };
     }
   }
@@ -1386,6 +1387,7 @@ mod tests {
       host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
       port: 80,
       routing_domain: None,
+      routing_protocol: None,
     }
   }
 
@@ -1395,6 +1397,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
       port: 443,
       routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+      routing_protocol: Some(crate::primitives::SniffedProtocol::Tls),
     };
     let route = RouteMatch {
       exit: OutExit::from("us"),
@@ -1408,6 +1411,7 @@ mod tests {
         host: SocketDestinationHost::DomainName("c2c.cdn.weixin.qq.com".to_owned()),
         port: 443,
         routing_domain: None,
+        routing_protocol: None,
       }
     );
   }
@@ -1418,6 +1422,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
       port: 443,
       routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+      routing_protocol: Some(crate::primitives::SniffedProtocol::Tls),
     };
     let route = RouteMatch {
       exit: OutExit::Direct,
@@ -1437,6 +1442,7 @@ mod tests {
       host: SocketDestinationHost::DomainName("example.com".to_owned()),
       port: 443,
       routing_domain: None,
+      routing_protocol: None,
     };
     let route = RouteMatch {
       exit: OutExit::from("us"),
@@ -1450,6 +1456,7 @@ mod tests {
         host: SocketDestinationHost::DomainName("example.com".to_owned()),
         port: 443,
         routing_domain: None,
+        routing_protocol: None,
       }
     );
   }
@@ -1460,6 +1467,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
       port: 443,
       routing_domain: None,
+      routing_protocol: None,
     };
     let route = RouteMatch {
       exit: OutExit::from("us"),
@@ -1839,6 +1847,7 @@ mod tests {
           host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
           port: 1000,
           routing_domain: None,
+          routing_protocol: None,
         },
         response_destination: None,
         payload: vec![1],
@@ -1858,6 +1867,7 @@ mod tests {
           host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
           port: 2000,
           routing_domain: None,
+          routing_protocol: None,
         },
         response_destination: None,
         payload: vec![2],
@@ -1909,6 +1919,7 @@ mod tests {
                   host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
                   port: 443,
                   routing_domain: Some("www.example.com".to_owned()),
+                  routing_protocol: Some(crate::primitives::SniffedProtocol::Tls),
                 },
                 response_destination: None,
                 payload: vec![1],
@@ -1932,6 +1943,7 @@ mod tests {
         host: SocketDestinationHost::DomainName("www.example.com".to_owned()),
         port: 443,
         routing_domain: None,
+        routing_protocol: None,
       }]
     );
     assert_eq!(
@@ -2092,6 +2104,7 @@ mod tests {
       host: crate::primitives::SocketDestinationHost::IpAddress("127.0.0.1".parse()?),
       port: 80,
       routing_domain: None,
+      routing_protocol: None,
     };
     let (node_stream, client_stream) = duplex(64);
 

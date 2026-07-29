@@ -4,7 +4,7 @@ use crate::{
   out::OutExitConfig,
   route::{
     AnyRule,
-    rule::{AddressRule, AnyDomainMatcher, DomainRule, FallbackRule, GeoIpRule},
+    rule::{AddressRule, AnyDomainMatcher, DomainRule, FallbackRule, GeoIpRule, ProtocolRule},
   },
   utils::serde::{SerdeIpNet, SerdeOneOrMany},
 };
@@ -35,6 +35,8 @@ pub enum RouteRuleConfig {
   Address(AddressRuleConfig),
   #[serde(rename = "domain")]
   Domain(DomainRuleConfig),
+  #[serde(rename = "protocol")]
+  Protocol(ProtocolRuleConfig),
   #[serde(rename = "fallback")]
   Fallback(FallbackRuleConfig),
 }
@@ -59,6 +61,13 @@ impl RouteRuleConfig {
       .into(),
       RouteRuleConfig::Domain(config) => DomainRule {
         matchers: config.r#match.into(),
+        priority: config.priority.unwrap_or(priority_default),
+        negate: config.negate,
+        exits: config.exit.into(),
+      }
+      .into(),
+      RouteRuleConfig::Protocol(config) => ProtocolRule {
+        matches: config.r#match.into(),
         priority: config.priority.unwrap_or(priority_default),
         negate: config.negate,
         exits: config.exit.into(),
@@ -94,6 +103,15 @@ pub struct AddressRuleConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct DomainRuleConfig {
   pub r#match: SerdeOneOrMany<DomainMatcherConfig>,
+  #[serde(default)]
+  pub negate: bool,
+  pub priority: Option<i64>,
+  pub exit: SerdeOneOrMany<OutExitConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProtocolRuleConfig {
+  pub r#match: SerdeOneOrMany<crate::primitives::SniffedProtocol>,
   #[serde(default)]
   pub negate: bool,
   pub priority: Option<i64>,
@@ -190,5 +208,51 @@ mod tests {
       )
       .is_err()
     );
+  }
+
+  #[test]
+  fn protocol_rule_accepts_lowercase_protocols() {
+    let config: RouteConfig = serde_json::from_str(
+      r#"{
+        "rules": [{
+          "type": "protocol",
+          "match": ["ssh", "tls"],
+          "priority": 5,
+          "exit": "DIRECT"
+        }]
+      }"#,
+    )
+    .unwrap();
+    let rules: Vec<AnyRule> = config.into();
+    let [AnyRule::Protocol(rule)] = rules.as_slice() else {
+      panic!("expected one protocol rule");
+    };
+
+    assert_eq!(
+      rule.matches,
+      [
+        crate::primitives::SniffedProtocol::Ssh,
+        crate::primitives::SniffedProtocol::Tls
+      ]
+    );
+    assert_eq!(rule.priority, 5);
+  }
+
+  #[test]
+  fn protocol_rule_rejects_unknown_or_uppercase_protocols() {
+    for protocol in ["smtp", "SSH"] {
+      assert!(
+        serde_json::from_str::<RouteConfig>(&format!(
+          r#"{{
+            "rules": [{{
+              "type": "protocol",
+              "match": "{protocol}",
+              "exit": "DIRECT"
+            }}]
+          }}"#
+        ))
+        .is_err()
+      );
+    }
   }
 }

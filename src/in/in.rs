@@ -824,6 +824,7 @@ mod tests {
         host: SocketDestinationHost::IpAddress(target_address.ip()),
         port: target_address.port(),
         routing_domain: None,
+        routing_protocol: None,
       };
 
       in_node.update_peer_outs(vec![peer_out.clone()]);

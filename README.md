@@ -108,13 +108,18 @@ sudo install -m 0755 \
 第一次 Cross 构建会编译 BoringSSL，耗时通常明显长于后续增量构建。
 IN、HUB 和 OUT 应使用同一份代码和 lockfile 构建的版本。
 
-第一次尝试建议只准备一个 HUB、一个 IN 和一个 OUT，先通过 HUB relay
-跑通 SOCKS5，再增加 tag 路由、peer 直连或透明代理。这样每次只引入一个
-新的网络变量，日志也更容易读懂。
+当前推荐配置使用一个 HUB、一个 IN 和两个 OUT：默认 US OUT 公布 peer
+listener，让 IN 优先直连；特殊 HK OUT 只通过 HUB relay；CN 流量从 IN
+本机 `DIRECT`。路由集中写在 HUB 并下发给 IN。这样可以在同一套配置中
+同时验证直连、relay、按域名分流和本机直出。
+
+长期观察时推荐设置
+`RUST_LOG=info,plug2proxy=debug`：Plug2Proxy 保留结构化 debug 诊断，
+依赖库仍保持 info。
 
 ## 文档
 
-- [Plug2Proxy 最简配置教程](docs/configuration.md)
+- [Plug2Proxy 推荐配置教程](docs/configuration.md)
 - [使用 Tailscale、sing-box 与 Plug2Proxy 建立最简 IPv4 exit node](docs/tailscale-sing-box.md)
 
 ## 一起折腾

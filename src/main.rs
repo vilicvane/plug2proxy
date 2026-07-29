@@ -122,4 +122,27 @@ mod tests {
     assert_eq!(config.listen.to_string(), "127.0.0.1:1122");
     assert!(config.inbounds.is_some());
   }
+
+  #[test]
+  fn parses_recommended_configuration_examples() {
+    let documentation = include_str!("../docs/configuration.md");
+    let mut parsed = 0;
+
+    for (index, section) in documentation.split("```jsonc\n").skip(1).enumerate() {
+      let (source, _) = section
+        .split_once("\n```")
+        .unwrap_or_else(|| panic!("JSONC block {} is not closed", index + 1));
+
+      // Some blocks intentionally show one field rather than a full config.
+      if !source.trim_start().starts_with('{') {
+        continue;
+      }
+
+      parse_config(source.to_owned())
+        .unwrap_or_else(|error| panic!("invalid config JSONC block {}: {error:#}", index + 1));
+      parsed += 1;
+    }
+
+    assert_eq!(parsed, 5, "unexpected number of complete config examples");
+  }
 }

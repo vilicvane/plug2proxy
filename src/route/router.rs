@@ -88,6 +88,7 @@ impl Router {
       .and_then(|addresses| addresses.first().copied());
 
     let domain = socket_destination.routing_domain();
+    let protocol = socket_destination.routing_protocol();
 
     let rules = self.merged_rules_cache.lock().unwrap();
 
@@ -99,7 +100,7 @@ impl Router {
 
     let routes = rules
       .iter()
-      .filter(|rule| rule.test(&address, &domain, &region_codes, &self.geosite))
+      .filter(|rule| rule.test(&address, &domain, &protocol, &region_codes, &self.geosite))
       .fold(Vec::new(), |mut routes, rule| {
         if matches!(**rule, AnyRule::Fallback(_)) && !routes.is_empty() {
           return routes;
@@ -199,8 +200,8 @@ impl Router {
 mod tests {
   use super::*;
   use crate::{
-    primitives::{SocketDestination, SocketDestinationHost},
-    route::{AddressRule, DomainRule, RuleKind},
+    primitives::{SniffedProtocol, SocketDestination, SocketDestinationHost},
+    route::{AddressRule, DomainRule, ProtocolRule, RuleKind},
     test::test_dir,
   };
 
@@ -211,6 +212,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
       port: 80,
       routing_domain: None,
+      routing_protocol: None,
     };
 
     router.register_local_rules(vec![
@@ -242,6 +244,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("182.140.143.139".parse().unwrap()),
       port: 443,
       routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+      routing_protocol: Some(crate::primitives::SniffedProtocol::Tls),
     };
     router.register_local_rules(vec![
       DomainRule {
@@ -279,6 +282,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
       port: 443,
       routing_domain: Some("example.com".to_owned()),
+      routing_protocol: None,
     };
     router.register_local_rules(vec![
       DomainRule {
@@ -304,6 +308,42 @@ mod tests {
         exit: OutExit::Proxy,
         rule_kind: RuleKind::Domain,
         matched_address: Some("203.0.113.8:443".parse().unwrap()),
+      }]
+    );
+  }
+
+  #[tokio::test]
+  async fn protocol_rules_match_sniffed_protocol_and_cache_it_separately() {
+    let router = Router::new(test_dir());
+    router.register_local_rules(vec![
+      ProtocolRule {
+        matches: vec![SniffedProtocol::Ssh],
+        priority: 0,
+        negate: false,
+        exits: vec![OutExit::Direct],
+      }
+      .into(),
+      FallbackRule {
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+    ]);
+
+    let mut destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+      port: 2222,
+      routing_domain: None,
+      routing_protocol: None,
+    };
+    assert_eq!(router.match_exits(&destination).await, vec![OutExit::Proxy]);
+
+    destination.routing_protocol = Some(SniffedProtocol::Ssh);
+    assert_eq!(
+      router.match_routes(&destination).await,
+      vec![RouteMatch {
+        exit: OutExit::Direct,
+        rule_kind: RuleKind::Protocol,
+        matched_address: Some("203.0.113.8:2222".parse().unwrap()),
       }]
     );
   }

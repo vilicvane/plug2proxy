@@ -11,18 +11,14 @@ use tokio::{
   time::{Instant, timeout_at},
 };
 
+use crate::primitives::SniffedProtocol;
+
 const MAX_TLS_RECORD_PAYLOAD: usize = 18_432;
 const MAX_TLS_CLIENT_HELLO: usize = 64 * 1024;
 const MAX_HTTP_HEADER: usize = 64 * 1024;
+const MAX_SSH_IDENTIFICATION: usize = 255;
 const MAX_QUIC_DATAGRAMS: usize = 16;
 const MAX_QUIC_BYTES: usize = 128 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SniffedProtocol {
-  Tls,
-  Http,
-  Quic,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SniffedDomain {
@@ -34,6 +30,7 @@ pub struct SniffedDomain {
 pub enum SniffOutcome {
   NeedMoreData,
   Domain(SniffedDomain),
+  Protocol(SniffedProtocol),
   NoDomain,
 }
 
@@ -62,6 +59,7 @@ impl Default for TcpSniffOptions {
 }
 
 pub struct SniffedTcpStream<S> {
+  pub protocol: Option<SniffedProtocol>,
   pub domain: Option<SniffedDomain>,
   pub stream: ReplayStream<S>,
   pub end_reason: TcpSniffEndReason,
@@ -72,6 +70,7 @@ pub struct SniffedTcpStream<S> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TcpSniffEndReason {
   Domain,
+  Protocol,
   NoDomain,
   MaxBytes,
   Timeout,
@@ -145,12 +144,21 @@ where
   let started = Instant::now();
   let deadline = Instant::now() + options.timeout;
   let mut prefix = Vec::with_capacity(4096.min(max_bytes));
-  let (domain, end_reason) = loop {
+  let (protocol, domain, end_reason) = loop {
     match sniff_tcp_prefix(&prefix) {
-      SniffOutcome::Domain(domain) => break (Some(domain), TcpSniffEndReason::Domain),
-      SniffOutcome::NoDomain => break (None, TcpSniffEndReason::NoDomain),
+      SniffOutcome::Domain(domain) => {
+        break (
+          Some(domain.protocol),
+          Some(domain),
+          TcpSniffEndReason::Domain,
+        );
+      }
+      SniffOutcome::Protocol(protocol) => {
+        break (Some(protocol), None, TcpSniffEndReason::Protocol);
+      }
+      SniffOutcome::NoDomain => break (None, None, TcpSniffEndReason::NoDomain),
       SniffOutcome::NeedMoreData if prefix.len() >= max_bytes => {
-        break (None, TcpSniffEndReason::MaxBytes);
+        break (None, None, TcpSniffEndReason::MaxBytes);
       }
       SniffOutcome::NeedMoreData => {}
     }
@@ -159,11 +167,11 @@ where
     let mut buffer = vec![0; remaining.min(4096)];
     let read = match timeout_at(deadline, stream.read(&mut buffer)).await {
       Ok(result) => result?,
-      Err(_) => break (None, TcpSniffEndReason::Timeout),
+      Err(_) => break (None, None, TcpSniffEndReason::Timeout),
     };
 
     if read == 0 {
-      break (None, TcpSniffEndReason::EndOfStream);
+      break (None, None, TcpSniffEndReason::EndOfStream);
     }
 
     prefix.extend_from_slice(&buffer[..read]);
@@ -171,6 +179,7 @@ where
 
   let bytes_read = prefix.len();
   Ok(SniffedTcpStream {
+    protocol,
     domain,
     stream: ReplayStream::new(prefix, stream),
     end_reason,
@@ -184,11 +193,62 @@ pub fn sniff_tcp_prefix(buffer: &[u8]) -> SniffOutcome {
     return SniffOutcome::NeedMoreData;
   }
 
+  if let Some(outcome) = sniff_ssh_identification(buffer) {
+    return outcome;
+  }
+
   if buffer[0] == 22 {
     return sniff_tls_client_hello(buffer);
   }
 
   sniff_http_request(buffer)
+}
+
+fn sniff_ssh_identification(buffer: &[u8]) -> Option<SniffOutcome> {
+  const PREFIX: &[u8] = b"SSH-";
+
+  if buffer.len() < PREFIX.len() {
+    return PREFIX
+      .starts_with(buffer)
+      .then_some(SniffOutcome::NeedMoreData);
+  }
+  if !buffer.starts_with(PREFIX) {
+    return None;
+  }
+
+  let Some(line_feed) = buffer.iter().position(|byte| *byte == b'\n') else {
+    return Some(if buffer.len() < MAX_SSH_IDENTIFICATION {
+      SniffOutcome::NeedMoreData
+    } else {
+      SniffOutcome::NoDomain
+    });
+  };
+  if line_feed + 1 > MAX_SSH_IDENTIFICATION {
+    return Some(SniffOutcome::NoDomain);
+  }
+
+  let identification = buffer[..line_feed]
+    .strip_suffix(b"\r")
+    .unwrap_or(&buffer[..line_feed]);
+  let Some(software_and_comments) = identification
+    .strip_prefix(b"SSH-2.0-")
+    .or_else(|| identification.strip_prefix(b"SSH-1.99-"))
+  else {
+    return Some(SniffOutcome::NoDomain);
+  };
+  let software = software_and_comments
+    .split(|byte| *byte == b' ')
+    .next()
+    .unwrap();
+  if software.is_empty()
+    || !software
+      .iter()
+      .all(|byte| byte.is_ascii_graphic() && *byte != b'-')
+  {
+    return Some(SniffOutcome::NoDomain);
+  }
+
+  Some(SniffOutcome::Protocol(SniffedProtocol::Ssh))
 }
 
 fn sniff_tls_client_hello(buffer: &[u8]) -> SniffOutcome {
@@ -663,6 +723,43 @@ mod tests {
   }
 
   #[test]
+  fn sniffs_ssh_identification_and_waits_for_every_prefix() {
+    let identification = b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.8\r\n";
+
+    for length in 0..identification.len() {
+      assert_eq!(
+        sniff_tcp_prefix(&identification[..length]),
+        SniffOutcome::NeedMoreData,
+        "prefix length {length}"
+      );
+    }
+    assert_eq!(
+      sniff_tcp_prefix(identification),
+      SniffOutcome::Protocol(SniffedProtocol::Ssh)
+    );
+    assert_eq!(
+      sniff_tcp_prefix(b"SSH-1.99-dropbear_2025.88\n"),
+      SniffOutcome::Protocol(SniffedProtocol::Ssh)
+    );
+  }
+
+  #[test]
+  fn rejects_invalid_ssh_identification() {
+    assert_eq!(
+      sniff_tcp_prefix(b"SSH-1.5-legacy\r\n"),
+      SniffOutcome::NoDomain
+    );
+    assert_eq!(
+      sniff_tcp_prefix(b"SSH-2.0-software-with-hyphen\r\n"),
+      SniffOutcome::NoDomain
+    );
+
+    let mut too_long = b"SSH-2.0-".to_vec();
+    too_long.extend(std::iter::repeat_n(b'a', MAX_SSH_IDENTIFICATION));
+    assert_eq!(sniff_tcp_prefix(&too_long), SniffOutcome::NoDomain);
+  }
+
+  #[test]
   fn reassembles_client_hello_across_tls_records() {
     let packet = tls_client_hello("example.com");
     let handshake = &packet[5..];
@@ -786,6 +883,7 @@ mod tests {
         domain: "example.com".to_owned(),
       })
     );
+    assert_eq!(sniffed.protocol, Some(SniffedProtocol::Tls));
 
     let mut replay = sniffed.stream;
     let mut received = vec![0; payload.len()];
@@ -811,6 +909,7 @@ mod tests {
     )
     .await?;
     assert_eq!(sniffed.domain, None);
+    assert_eq!(sniffed.protocol, None);
 
     let mut replay = sniffed.stream;
     let mut received = vec![0; partial.len()];

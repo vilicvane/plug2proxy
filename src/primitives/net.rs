@@ -6,6 +6,15 @@ use tokio::net::lookup_host;
 
 use crate::utils::net::SocketAddressExt;
 
+#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq, Clone, Copy, derive_more::Display)]
+#[serde(rename_all = "lowercase")]
+pub enum SniffedProtocol {
+  Tls,
+  Http,
+  Quic,
+  Ssh,
+}
+
 #[derive(Serialize, Deserialize, Debug, derive_more::Display, Hash, Eq, PartialEq, Clone)]
 #[display("{host}:{port}")]
 pub struct SocketDestination {
@@ -13,6 +22,8 @@ pub struct SocketDestination {
   pub port: u16,
   #[serde(skip)]
   pub routing_domain: Option<String>,
+  #[serde(skip)]
+  pub routing_protocol: Option<SniffedProtocol>,
 }
 
 impl SocketDestination {
@@ -25,6 +36,14 @@ impl SocketDestination {
 
   pub fn set_routing_domain(&mut self, domain: Option<String>) {
     self.routing_domain = domain;
+  }
+
+  pub fn routing_protocol(&self) -> Option<SniffedProtocol> {
+    self.routing_protocol
+  }
+
+  pub fn set_routing_protocol(&mut self, protocol: Option<SniffedProtocol>) {
+    self.routing_protocol = protocol;
   }
 
   pub fn route_label(&self) -> String {
@@ -84,6 +103,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress("182.140.143.139".parse()?),
       port: 443,
       routing_domain: Some("c2c.cdn.weixin.qq.com".to_owned()),
+      routing_protocol: Some(SniffedProtocol::Tls),
     };
 
     assert_eq!(
@@ -103,6 +123,7 @@ mod tests {
     assert_eq!(decoded.host, destination.host);
     assert_eq!(decoded.port, 443);
     assert_eq!(decoded.routing_domain, None);
+    assert_eq!(decoded.routing_protocol, None);
     Ok(())
   }
 
@@ -112,6 +133,7 @@ mod tests {
       host: SocketDestinationHost::DomainName("Example.COM".to_owned()),
       port: 443,
       routing_domain: None,
+      routing_protocol: None,
     };
 
     assert_eq!(destination.routing_domain().as_deref(), Some("Example.COM"));

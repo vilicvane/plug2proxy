@@ -470,6 +470,7 @@ mod tests {
           host: SocketDestinationHost::IpAddress(target_address.ip()),
           port: target_address.port(),
           routing_domain: None,
+          routing_protocol: None,
         },
       );
 
@@ -512,6 +513,7 @@ mod tests {
             host: SocketDestinationHost::IpAddress(target_address.ip()),
             port: target_address.port(),
             routing_domain: None,
+            routing_protocol: None,
           },
           response_destination: None,
           payload: b"udp ping".to_vec(),

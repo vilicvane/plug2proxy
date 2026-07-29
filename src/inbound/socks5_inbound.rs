@@ -26,7 +26,7 @@ use tokio::{
 
 use crate::{
   inbound::{Error, Inbound},
-  primitives::{BidiStream, SocketDestination, SocketDestinationHost},
+  primitives::{BidiStream, SniffedProtocol, SocketDestination, SocketDestinationHost},
   sniff::{QuicSniffer, TcpSniffOptions, sniff_tcp_stream},
   udp_forwarder::{
     InboundUdpPacketStream, IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource,
@@ -309,28 +309,33 @@ async fn handle_incoming_connection(
 
       let mut destination: SocketDestination = address.into();
       let stream = Socks5TcpStream { stream: connect };
-      let stream: Box<dyn BidiStream> =
-        if sniff && matches!(&destination.host, SocketDestinationHost::IpAddress(_)) {
-          let sniffed = sniff_tcp_stream(stream, TcpSniffOptions::default()).await?;
-          log::debug!(
-            "TCP sniff: destination={}, result={:?}, elapsed_ms={}, bytes={}, domain={}",
-            destination,
-            sniffed.end_reason,
-            sniffed.elapsed.as_millis(),
-            sniffed.bytes_read,
-            sniffed
-              .domain
-              .as_ref()
-              .map(|domain| domain.domain.as_str())
-              .unwrap_or("-")
-          );
-          if let Some(sniffed_domain) = sniffed.domain {
-            destination.set_routing_domain(Some(sniffed_domain.domain));
-          }
-          Box::new(sniffed.stream)
-        } else {
-          Box::new(stream)
-        };
+      let stream: Box<dyn BidiStream> = if sniff {
+        let sniffed = sniff_tcp_stream(stream, TcpSniffOptions::default()).await?;
+        log::debug!(
+          "TCP sniff: destination={}, result={:?}, elapsed_ms={}, bytes={}, protocol={}, domain={}",
+          destination,
+          sniffed.end_reason,
+          sniffed.elapsed.as_millis(),
+          sniffed.bytes_read,
+          sniffed
+            .protocol
+            .map(|protocol| protocol.to_string())
+            .as_deref()
+            .unwrap_or("-"),
+          sniffed
+            .domain
+            .as_ref()
+            .map(|domain| domain.domain.as_str())
+            .unwrap_or("-")
+        );
+        destination.set_routing_protocol(sniffed.protocol);
+        if let Some(sniffed_domain) = sniffed.domain {
+          destination.set_routing_domain(Some(sniffed_domain.domain));
+        }
+        Box::new(sniffed.stream)
+      } else {
+        Box::new(stream)
+      };
 
       tcp_connect_sender.send((destination, stream)).unwrap()
     }
@@ -367,6 +372,7 @@ const MAX_QUIC_FLOWS: usize = 4096;
 struct QuicFlowSniffState {
   sniffer: Option<QuicSniffer>,
   domain: Option<String>,
+  protocol: Option<SniffedProtocol>,
   last_seen: Instant,
 }
 
@@ -388,6 +394,7 @@ fn sniff_udp_destination(
   let state = flows.entry(key).or_insert_with(|| QuicFlowSniffState {
     sniffer: Some(QuicSniffer::new()),
     domain: None,
+    protocol: None,
     last_seen: Instant::now(),
   });
   state.last_seen = Instant::now();
@@ -404,6 +411,11 @@ fn sniff_udp_destination(
             destination
           );
           state.domain = Some(sniffed.domain);
+          state.protocol = Some(sniffed.protocol);
+          state.sniffer = None;
+        }
+        crate::sniff::SniffOutcome::Protocol(protocol) => {
+          state.protocol = Some(protocol);
           state.sniffer = None;
         }
         crate::sniff::SniffOutcome::NoDomain => {
@@ -415,6 +427,7 @@ fn sniff_udp_destination(
   }
 
   destination.set_routing_domain(state.domain.clone());
+  destination.set_routing_protocol(state.protocol);
 }
 
 fn expire_quic_flows(flows: &mut HashMap<(SocketAddr, SocketDestination), QuicFlowSniffState>) {
@@ -439,11 +452,13 @@ impl From<socks5_server::proto::Address> for SocketDestination {
         host: SocketDestinationHost::DomainName(String::from_utf8_lossy(&domain).into_owned()),
         port,
         routing_domain: None,
+        routing_protocol: None,
       },
       socks5_server::proto::Address::SocketAddress(socket_address) => SocketDestination {
         host: SocketDestinationHost::IpAddress(socket_address.ip()),
         port: socket_address.port(),
         routing_domain: None,
+        routing_protocol: None,
       },
     }
   }
@@ -589,10 +604,54 @@ mod tests {
       destination.routing_domain.as_deref(),
       Some("c2c.cdn.weixin.qq.com")
     );
+    assert_eq!(destination.routing_protocol, Some(SniffedProtocol::Tls));
 
     let mut replayed = vec![0; client_hello.len()];
     stream.read_exact(&mut replayed).await?;
     assert_eq!(replayed, client_hello);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn tcp_sniff_detects_ssh_for_domain_destination() -> anyhow::Result<()> {
+    let inbound = Socks5Inbound::new(Socks5InboundOptions {
+      listen: "127.0.0.1:0".parse()?,
+      sniff: true,
+    })
+    .await?;
+    let mut client_stream = TcpStream::connect(inbound.listen_address()).await?;
+
+    socks5_server::proto::handshake::Request::new(vec![
+      socks5_server::proto::handshake::Method::NONE,
+    ])
+    .write_to(&mut client_stream)
+    .await?;
+    socks5_server::proto::handshake::Response::read_from(&mut client_stream).await?;
+    socks5_server::proto::Request::new(
+      socks5_server::proto::Command::Connect,
+      Address::DomainAddress(b"ssh.example.com".to_vec(), 2222),
+    )
+    .write_to(&mut client_stream)
+    .await?;
+    let response = socks5_server::proto::Response::read_from(&mut client_stream).await?;
+    assert!(matches!(response.reply, Reply::Succeeded));
+
+    let identification = b"SSH-2.0-OpenSSH_9.6p1\r\n";
+    client_stream.write_all(identification).await?;
+
+    let (destination, mut stream) =
+      timeout(Duration::from_secs(3), inbound.accept_tcp_connect()).await??;
+    assert_eq!(
+      destination.host,
+      SocketDestinationHost::DomainName("ssh.example.com".to_owned())
+    );
+    assert_eq!(destination.port, 2222);
+    assert_eq!(destination.routing_domain, None);
+    assert_eq!(destination.routing_protocol, Some(SniffedProtocol::Ssh));
+
+    let mut replayed = vec![0; identification.len()];
+    stream.read_exact(&mut replayed).await?;
+    assert_eq!(replayed, identification);
     Ok(())
   }
 
@@ -731,6 +790,10 @@ mod tests {
       outgoing.destination.routing_domain.as_deref(),
       Some("passkeys.example.com")
     );
+    assert_eq!(
+      outgoing.destination.routing_protocol,
+      Some(SniffedProtocol::Quic)
+    );
     assert_eq!(outgoing.payload, initial[..initial_length]);
 
     udp_socket
@@ -746,6 +809,10 @@ mod tests {
     assert_eq!(
       follow_up.destination.routing_domain.as_deref(),
       Some("passkeys.example.com")
+    );
+    assert_eq!(
+      follow_up.destination.routing_protocol,
+      Some(SniffedProtocol::Quic)
     );
     assert_eq!(follow_up.payload, b"\x40encrypted-follow-up");
     Ok(())

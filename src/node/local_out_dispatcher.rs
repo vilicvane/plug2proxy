@@ -303,6 +303,7 @@ mod tests {
       host: SocketDestinationHost::DomainName("localhost".to_owned()),
       port: listener.local_addr()?.port(),
       routing_domain: None,
+      routing_protocol: None,
     };
     let dispatcher = LocalOutDispatcher::new_bound(vec![], interface.to_owned())?;
 

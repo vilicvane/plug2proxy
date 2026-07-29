@@ -282,6 +282,7 @@ mod tests {
       host: SocketDestinationHost::IpAddress(address.ip()),
       port: address.port(),
       routing_domain: None,
+      routing_protocol: None,
     }
   }
 
@@ -355,6 +356,7 @@ mod tests {
           host: SocketDestinationHost::DomainName("localhost".to_owned()),
           port: server_address.port(),
           routing_domain: None,
+          routing_protocol: None,
         },
         response_destination: Some(transparent_destination),
         payload: b"remote DNS".to_vec(),
@@ -545,6 +547,7 @@ mod tests {
         host: SocketDestinationHost::DomainName("localhost".to_string()),
         port: server_address.port(),
         routing_domain: None,
+        routing_protocol: None,
       },
       response_destination: None,
       payload: payload.clone(),
@@ -596,6 +599,7 @@ mod tests {
           host: SocketDestinationHost::DomainName("localhost".to_string()),
           port: server_address.port(),
           routing_domain: None,
+          routing_protocol: None,
         },
         response_destination: None,
         payload: format!("packet {}", i).into_bytes(),

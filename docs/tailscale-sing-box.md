@@ -2,7 +2,7 @@
 
 本文假设：
 
-- 已按[最简配置教程](configuration.md)跑通 Plug2Proxy；
+- 已按[推荐配置教程](configuration.md)跑通 Plug2Proxy；
 - IN 已加入现有 tailnet；
 - IN 使用 Linux、systemd 和 nftables；
 - IN 已安装 sing-box `1.12.25`。
@@ -43,9 +43,11 @@ User=plug2proxy
 Group=plug2proxy
 WorkingDirectory=/etc/plug2proxy
 ExecStart=/usr/sbin/plug2proxy
-Environment=RUST_LOG=info
+Environment=RUST_LOG=info,plug2proxy=debug
 Restart=always
 RestartSec=2s
+TimeoutStopSec=15s
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -60,7 +62,7 @@ id -u plug2proxy
 ```
 
 第一条命令应输出 `sing-box`，不能是空值或 `root`。确保
-`/etc/plug2proxy` 中的配置、证书和 GeoLite2 数据库具有
+`/etc/plug2proxy` 中的配置、证书、GeoLite2 和 Geosite 数据库具有
 `plug2proxy` 用户所需的读写权限。
 
 ## 2. 配置 sing-box
@@ -78,15 +80,19 @@ id -u plug2proxy
   "dns": {
     "servers": [
       {
-        "type": "udp",
-        "tag": "cloudflare",
-        "server": "1.1.1.1",
-        "server_port": 53,
-        // DNS 也通过 Plug2Proxy，避免使用 IN 所在网络的本地 DNS。
+        "type": "tls",
+        "tag": "alidns",
+        "server": "223.5.5.5",
+        "server_port": 853,
+        "tls": {
+          "enabled": true,
+          "server_name": "dns.alidns.com"
+        },
+        // 初始解析使用经认证的本地视角；远端域名最终由 OUT 重新解析。
         "detour": "plug2proxy"
       }
     ],
-    "final": "cloudflare",
+    "final": "alidns",
     "strategy": "ipv4_only"
   },
   "inbounds": [
@@ -98,11 +104,9 @@ id -u plug2proxy
       "mtu": 9000,
       "auto_route": true,
       "auto_redirect": true,
-      "auto_redirect_input_mark": "0x2023",
-      "auto_redirect_output_mark": "0x2024",
       "stack": "system",
-      "sniff": true,
-      "sniff_override_destination": true,
+      // 保留透明连接的原始目标 IP。TCP/QUIC 域名由 Plug2Proxy 嗅探。
+      "sniff": false,
       // 只排除两个代理服务，不排除 root。
       "exclude_uid": [
         SING_BOX_UID,
@@ -131,8 +135,13 @@ id -u plug2proxy
 }
 ```
 
-Plug2Proxy IN 的 SOCKS5 必须监听 `127.0.0.1:1080`。域名由 sing-box
-嗅探后交给 Plug2Proxy，本教程不使用 FakeIP。
+Plug2Proxy IN 的 SOCKS5 必须监听 `127.0.0.1:1080`。推荐配置中的路由
+仍由 HUB 下发，IN 不需要复制一份。
+
+这里有意禁用 sing-box sniff。sing-box 把原始 IP 交给 Plug2Proxy，
+Plug2Proxy 再从 TCP 或 QUIC 首包恢复路由域名：选择 `DIRECT` 时仍连接
+原始 IP，选择远端 OUT 时则可让 OUT 重新解析域名。这样不会因为 sing-box
+提前覆盖目标而破坏透明代理语义。本教程不使用 FakeIP。
 
 ## 3. 绕过 tailscaled 外层连接
 
@@ -245,7 +254,7 @@ journalctl -f -u sing-box -u plug2proxy
 
 ## 参考
 
-- [Plug2Proxy 最简配置教程](configuration.md)
+- [Plug2Proxy 推荐配置教程](configuration.md)
 - [sing-box TUN inbound](https://sing-box.sagernet.org/configuration/inbound/tun/)
 - [Tailscale exit node](https://tailscale.com/docs/features/exit-nodes)
 - [Tailscale netfilter modes](https://tailscale.com/docs/reference/netfilter-modes)

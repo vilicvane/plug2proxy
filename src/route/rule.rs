@@ -5,7 +5,11 @@ use lowkit::SerdeRegex;
 use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{primitives::OutExit, route::Geosite, utils::serde::SerdeIpNet};
+use crate::{
+  primitives::{OutExit, SniffedProtocol},
+  route::Geosite,
+  utils::serde::SerdeIpNet,
+};
 
 #[enum_dispatch(AnyRule)]
 pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
@@ -17,6 +21,7 @@ pub trait Rule: Serialize + DeserializeOwned + Send + Sync {
     &self,
     address: &Option<SocketAddr>,
     domain: &Option<String>,
+    protocol: &Option<SniffedProtocol>,
     region_codes: &Option<Vec<String>>,
     geosite: &Geosite,
   ) -> bool;
@@ -28,6 +33,7 @@ pub enum AnyRule {
   GeoIp(GeoIpRule),
   Address(AddressRule),
   Domain(DomainRule),
+  Protocol(ProtocolRule),
   Fallback(FallbackRule),
 }
 
@@ -41,6 +47,7 @@ impl AnyRule {
       AnyRule::GeoIp(_) => RuleKind::GeoIp,
       AnyRule::Address(_) => RuleKind::Address,
       AnyRule::Domain(_) => RuleKind::Domain,
+      AnyRule::Protocol(_) => RuleKind::Protocol,
       AnyRule::Fallback(_) => RuleKind::Fallback,
     }
   }
@@ -51,6 +58,7 @@ pub enum RuleKind {
   GeoIp,
   Address,
   Domain,
+  Protocol,
   Fallback,
 }
 
@@ -75,6 +83,7 @@ impl Rule for GeoIpRule {
     &self,
     _address: &Option<SocketAddr>,
     _domain: &Option<String>,
+    _protocol: &Option<SniffedProtocol>,
     region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
   ) -> bool {
@@ -115,6 +124,7 @@ impl Rule for AddressRule {
     &self,
     address: &Option<SocketAddr>,
     _domain: &Option<String>,
+    _protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
   ) -> bool {
@@ -175,6 +185,7 @@ impl Rule for DomainRule {
     &self,
     _address: &Option<SocketAddr>,
     domain: &Option<String>,
+    _protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     geosite: &Geosite,
   ) -> bool {
@@ -193,6 +204,40 @@ impl Rule for DomainRule {
     } else {
       false
     }
+  }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProtocolRule {
+  pub matches: Vec<SniffedProtocol>,
+  pub priority: i64,
+  pub negate: bool,
+  pub exits: Vec<OutExit>,
+}
+
+impl Rule for ProtocolRule {
+  fn priority(&self) -> i64 {
+    self.priority
+  }
+
+  fn exits(&self) -> &[OutExit] {
+    &self.exits
+  }
+
+  fn test(
+    &self,
+    _address: &Option<SocketAddr>,
+    _domain: &Option<String>,
+    protocol: &Option<SniffedProtocol>,
+    _region_codes: &Option<Vec<String>>,
+    _geosite: &Geosite,
+  ) -> bool {
+    let Some(protocol) = protocol else {
+      return false;
+    };
+
+    let condition = self.matches.contains(protocol);
+    if self.negate { !condition } else { condition }
   }
 }
 
@@ -338,6 +383,7 @@ impl Rule for FallbackRule {
     &self,
     _address: &Option<SocketAddr>,
     _domain: &Option<String>,
+    _protocol: &Option<SniffedProtocol>,
     _region_codes: &Option<Vec<String>>,
     _geosite: &Geosite,
   ) -> bool {
