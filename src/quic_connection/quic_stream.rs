@@ -1,6 +1,6 @@
 use std::{
   pin::Pin,
-  task::{Context, Poll, Waker},
+  task::{Context, Poll},
 };
 
 use lowkit::DropCallback;
@@ -69,16 +69,5 @@ impl AsyncWrite for QuicStream {
 
   fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), std::io::Error>> {
     Pin::new(&mut self.write).poll_shutdown(cx)
-  }
-}
-
-impl Drop for QuicStream {
-  fn drop(&mut self) {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-
-    // Explicitly close the in-memory write side so the QUIC send task can
-    // drain buffered bytes, emit FIN, and terminate.
-    let _ = Pin::new(&mut self.write).poll_shutdown(&mut context);
   }
 }

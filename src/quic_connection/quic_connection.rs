@@ -9,7 +9,7 @@ use std::{
 };
 
 use colored::Colorize;
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use lits::bytes;
 use lowkit::{DropCallback, SelfWrapExt, tokio_join_set};
 use tokio::{
@@ -28,7 +28,7 @@ use crate::{
 
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
-const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
+const STREAM_PIPE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 // Upper bound for how long the send loop may park after quiche reports
@@ -41,7 +41,6 @@ const SEND_DONE_BACKSTOP: Duration = Duration::from_secs(1);
 struct StreamSignals {
   recv: Notify,
   send: Notify,
-  external_drop: Notify,
   created: AtomicBool,
   external_dropped: AtomicBool,
   active_tasks: AtomicUsize,
@@ -52,7 +51,6 @@ impl StreamSignals {
     Self {
       recv: Notify::new(),
       send: Notify::new(),
-      external_drop: Notify::new(),
       created: AtomicBool::new(created),
       external_dropped: AtomicBool::new(false),
       active_tasks: AtomicUsize::new(2),
@@ -415,8 +413,8 @@ impl QuicConnection {
         // Duplex ends close both directions on drop, so a dead stream task
         // fails the external writer (BrokenPipe) and reader (EOF) instead
         // of leaving them blocked on the in-memory pipe forever.
-        let (external_read, mut write) = duplex(SIMPLEX_MAX_BUFFER_SIZE);
-        let (mut read, external_write) = duplex(SIMPLEX_MAX_BUFFER_SIZE);
+        let (external_read, mut write) = duplex(STREAM_PIPE_BUFFER_SIZE);
+        let (mut read, external_write) = duplex(STREAM_PIPE_BUFFER_SIZE);
 
         let stream_signals = StreamSignals::new(side == ConnectionSide::Server).arc();
 
@@ -442,20 +440,12 @@ impl QuicConnection {
             let mut buffer = [0; READ_WRITE_BUFFER_SIZE];
 
             'outer: loop {
-              let read_result = if stream_signals
-                .external_dropped
-                .load(atomic::Ordering::Acquire)
-              {
-                // No external writer remains. Drain any bytes that were
-                // already accepted by the in-memory pipe, then emit FIN
-                // without depending on the split writer's close wakeup.
-                read.read(&mut buffer).now_or_never().unwrap_or(Ok(0))
-              } else {
-                tokio::select! {
-                  result = read.read(&mut buffer) => result,
-                  _ = stream_signals.external_drop.notified() => continue,
-                  _ = connection_signals.state_updater.wait(State::Closed) => break,
-                }
+              // When the external writer is dropped, the duplex pipe
+              // delivers any buffered bytes and then EOF, so this read
+              // alone drives the drain-then-FIN shutdown.
+              let read_result = tokio::select! {
+                result = read.read(&mut buffer) => result,
+                _ = connection_signals.state_updater.wait(State::Closed) => break,
               };
 
               match read_result {
@@ -702,7 +692,6 @@ impl QuicConnection {
             stream_signals
               .external_dropped
               .store(true, atomic::Ordering::Release);
-            stream_signals.external_drop.notify_one();
             stream_signals.recv.notify_one();
             stream_signals.send.notify_one();
           }) as Box<dyn Fn() + Send>
@@ -1005,23 +994,6 @@ impl QuicConnection {
                     .then_some(id)
                 })
                 .collect::<Vec<_>>();
-
-              // Dropping the external stream can race with a send task that
-              // has just consumed its one-shot writable notification. Re-arm
-              // dropped senders until their buffered bytes and FIN are
-              // accepted, so backpressure cannot strand the task forever.
-              let externally_dropped_streams = connection_signals
-                .streams
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|signals| signals.external_dropped.load(atomic::Ordering::Acquire))
-                .cloned()
-                .collect::<Vec<_>>();
-
-              for signals in externally_dropped_streams {
-                signals.send.notify_one();
-              }
 
               let finished = {
                 let connection = connection.lock().unwrap();
