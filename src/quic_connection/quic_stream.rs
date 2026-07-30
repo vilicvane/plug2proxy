@@ -4,7 +4,7 @@ use std::{
 };
 
 use lowkit::DropCallback;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, SimplexStream, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
 use crate::primitives::ConnectionSide;
 
@@ -16,8 +16,8 @@ pub struct QuicStream {
   #[debug("{}", side)]
   side: ConnectionSide,
   id: u64,
-  read: ReadHalf<SimplexStream>,
-  write: WriteHalf<SimplexStream>,
+  read: DuplexStream,
+  write: DuplexStream,
   #[debug(ignore)]
   _drop_callback: QuicStreamDropCallback,
 }
@@ -26,8 +26,8 @@ impl QuicStream {
   pub fn new(
     side: ConnectionSide,
     id: u64,
-    read: ReadHalf<SimplexStream>,
-    write: WriteHalf<SimplexStream>,
+    read: DuplexStream,
+    write: DuplexStream,
     drop_callback: QuicStreamDropCallback,
   ) -> Self {
     Self {
@@ -77,9 +77,8 @@ impl Drop for QuicStream {
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
 
-    // Dropping a split SimplexStream write half does not close it. Explicitly
-    // close the in-memory write side so the QUIC send task can drain buffered
-    // bytes, emit FIN, and terminate.
+    // Explicitly close the in-memory write side so the QUIC send task can
+    // drain buffered bytes, emit FIN, and terminate.
     let _ = Pin::new(&mut self.write).poll_shutdown(&mut context);
   }
 }

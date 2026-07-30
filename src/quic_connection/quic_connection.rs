@@ -13,7 +13,7 @@ use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt};
 use lits::bytes;
 use lowkit::{DropCallback, SelfWrapExt, tokio_join_set};
 use tokio::{
-  io::{AsyncReadExt, AsyncWriteExt, simplex},
+  io::{AsyncReadExt, AsyncWriteExt, duplex},
   sync::{Notify, mpsc, watch},
   task::JoinSet,
   time::{Duration, Instant as TokioInstant, MissedTickBehavior, interval_at, sleep, sleep_until},
@@ -30,6 +30,13 @@ const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 const SIMPLEX_MAX_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+// Upper bound for how long the send loop may park after quiche reports
+// Done. quiche's own timer can legitimately be far in the future (the
+// one-hour idle timeout) or unset, so a missed wakeup would otherwise
+// freeze the connection indefinitely. on_timeout() is a no-op when no
+// quiche timer is due, making the extra wakeups cheap.
+const SEND_DONE_BACKSTOP: Duration = Duration::from_secs(1);
 
 struct StreamSignals {
   recv: Notify,
@@ -405,8 +412,11 @@ impl QuicConnection {
       move |side: ConnectionSide, id: u64| {
         log::debug!("{side} {id}: quic stream create");
 
-        let (external_read, mut write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
-        let (mut read, external_write) = simplex(SIMPLEX_MAX_BUFFER_SIZE);
+        // Duplex ends close both directions on drop, so a dead stream task
+        // fails the external writer (BrokenPipe) and reader (EOF) instead
+        // of leaving them blocked on the in-memory pipe forever.
+        let (external_read, mut write) = duplex(SIMPLEX_MAX_BUFFER_SIZE);
+        let (mut read, external_write) = duplex(SIMPLEX_MAX_BUFFER_SIZE);
 
         let stream_signals = StreamSignals::new(side == ConnectionSide::Server).arc();
 
@@ -489,8 +499,31 @@ impl QuicConnection {
                       Ok(None) => {
                         log::trace!("{side} {id}: stream send done");
 
+                        // If the stream was collected or stopped while we
+                        // were blocked on flow control, stream_send will
+                        // return Done forever. Detect that terminal state
+                        // and give up instead of retrying pointlessly.
+                        let terminal = matches!(
+                            connection.lock().unwrap().stream_capacity(id),
+                            Err(quiche::Error::InvalidStreamState(_))
+                                | Err(quiche::Error::StreamStopped(_))
+                        );
+                        if terminal {
+                            log::debug!(
+                                "{side} {id}: stream gone while blocked; abandoning send"
+                            );
+                            break 'outer;
+                        }
+
+                        // Beyond the notification-driven wakeup, re-arm on a
+                        // timer: the writable dispatch is packet-driven and
+                        // quiche's send capacity snapshot can go stale once
+                        // packets stop entirely, so a parked task would
+                        // otherwise never observe that the stream was
+                        // stopped or that capacity returned.
                         tokio::select! {
                           _ = stream_signals.send.notified() => {}
+                          _ = sleep(Duration::from_secs(1)) => {}
                           _ = connection_signals.state_updater.wait(State::Closed) => {
                             break 'outer;
                           }
@@ -526,6 +559,15 @@ impl QuicConnection {
               }
             }
 
+            // The recv task waits for the send side to settle before it
+            // touches quiche for this stream (e.g. to shut down a dropped
+            // stream). Always mark it settled and wake the recv task, even
+            // when the send loop failed, so an early error cannot strand it.
+            stream_signals
+              .created
+              .store(true, atomic::Ordering::Release);
+            stream_signals.recv.notify_one();
+
             connection_signals.stream_task_finished(id, &stream_signals);
             log::debug!("{side} {id}: stream send loop ended");
           }
@@ -541,6 +583,19 @@ impl QuicConnection {
             let mut buffer = vec![0; READ_WRITE_BUFFER_SIZE];
 
             loop {
+              // Wait until the send task has settled and quiche knows the
+              // stream before acting on an external drop. Shutting down
+              // before the first stream_send() creates the stream fails
+              // with Error::Done and would silently lose the STOP_SENDING,
+              // leaving the peer free to stream into a dead stream until
+              // flow control wedges the whole connection.
+              if !stream_signals.created.load(atomic::Ordering::Acquire) {
+                tokio::select! {
+                  _ = stream_signals.recv.notified() => continue,
+                  _ = connection_signals.state_updater.wait(State::Closed) => break,
+                }
+              }
+
               if stream_signals
                 .external_dropped
                 .load(atomic::Ordering::Acquire)
@@ -558,13 +613,6 @@ impl QuicConnection {
 
                 connection_signals.connection_send.notify_one();
                 break;
-              }
-
-              if !stream_signals.created.load(atomic::Ordering::Acquire) {
-                tokio::select! {
-                  _ = stream_signals.recv.notified() => continue,
-                  _ = connection_signals.state_updater.wait(State::Closed) => break,
-                }
               }
 
               let stream_recv_result = {
@@ -746,21 +794,21 @@ impl QuicConnection {
 
                   let timeout_instant = connection.lock().unwrap().timeout_instant();
 
-                  if let Some(timeout_instant) = timeout_instant {
-                    tokio::select! {
-                      _ = connection_signals.connection_send.notified() => {}
-                      _ = sleep_until(timeout_instant.into()) => {
-                        let mut connection = connection.lock().unwrap();
-                        connection.on_timeout();
-                        state_updater.update(&connection);
-                      }
-                      _ = state_updater.wait(State::Closed) => break,
+                  let backstop = TokioInstant::now() + SEND_DONE_BACKSTOP;
+
+                  let deadline = timeout_instant
+                    .map(Into::into)
+                    .unwrap_or(backstop)
+                    .min(backstop);
+
+                  tokio::select! {
+                    _ = connection_signals.connection_send.notified() => {}
+                    _ = sleep_until(deadline) => {
+                      let mut connection = connection.lock().unwrap();
+                      connection.on_timeout();
+                      state_updater.update(&connection);
                     }
-                  } else {
-                    tokio::select! {
-                      _ = connection_signals.connection_send.notified() => {}
-                      _ = state_updater.wait(State::Closed) => break,
-                    }
+                    _ = state_updater.wait(State::Closed) => break,
                   }
                 }
                 Err(error) => {
@@ -891,6 +939,22 @@ impl QuicConnection {
                     {
                       signals.recv.notify_one();
                     } else {
+                      // Only a peer-initiated stream can legitimately be
+                      // unknown to us. A locally-initiated id missing from
+                      // the map is a leftover of a torn-down stream (RFC
+                      // 9000 §2.1: bit 0x1 marks the initiator);
+                      // re-creating it would spawn a ghost stream that
+                      // nobody consumes and that never gets reaped.
+                      let locally_initiated =
+                        (id & 0x1) == u64::from(matches!(side, ConnectionSide::Server));
+
+                      if locally_initiated {
+                        log::debug!(
+                          "{side} {id}: ignoring readable for torn-down local stream"
+                        );
+                        continue;
+                      }
+
                       let stream = create_stream(ConnectionSide::Server, id);
 
                       if stream_sender

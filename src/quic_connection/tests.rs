@@ -1,6 +1,9 @@
 use std::{
   path::PathBuf,
-  sync::{Arc, LazyLock},
+  sync::{
+    Arc, LazyLock,
+    atomic::{self, AtomicUsize},
+  },
 };
 
 use futures::{SinkExt, StreamExt};
@@ -900,4 +903,210 @@ async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()
     anyhow::Ok(())
   })
   .await?
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn concurrent_bulk_streams_survive_lossy_transport() -> anyhow::Result<()> {
+  const BULK_STREAM_COUNT: usize = 1;
+  const DROPPED_STREAM_COUNT: usize = 64;
+
+  let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+  // Shrink flow-control windows so bulk streams congest and senders block
+  // mid-transfer, matching production QOMT pressure.
+  for config in [&mut hub_quiche_config, &mut out_quiche_config] {
+    config.set_initial_max_data(bytes!("64 MiB"));
+    config.set_initial_max_stream_data_bidi_local(bytes!("256 KiB"));
+    config.set_initial_max_stream_data_bidi_remote(bytes!("256 KiB"));
+    config.set_initial_max_stream_data_uni(bytes!("256 KiB"));
+  }
+
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+    flume::bounded::<QuicBytesPacket>(0);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+    flume::bounded::<QuicBytesPacket>(0);
+
+  // Deterministic 2% packet loss in both directions to exercise QUIC loss
+  // recovery on multiplexed bulk streams.
+  let lossy_transport = |receiver: flume::Receiver<QuicBytesPacket>| {
+    let mut rng_state = 0x9e37_79b9_7f4a_7c15u64;
+
+    Box::pin(
+      receiver.into_stream().filter_map(move |packet| {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+
+        let keep = rng_state % 50 != 0;
+
+        async move { keep.then_some(packet) }
+      }),
+    )
+  };
+
+  let lossy_hub_packets = lossy_transport(hub_to_out_packet_receiver);
+  let lossy_out_packets = lossy_transport(out_to_hub_packet_receiver);
+
+  let connection_id = QuicConnection::generate_connection_id();
+
+  let out_quic_connection = Arc::new(QuicConnection::connect_with_sink_and_stream(
+    &connection_id,
+    &mut out_quiche_config,
+    out_to_hub_packet_sender.into_sink(),
+    lossy_hub_packets,
+  ));
+
+  let hub_quic_connection = Arc::new(QuicConnection::accept_with_sink_and_stream(
+    out_quic_connection.id(),
+    &mut hub_quiche_config,
+    hub_to_out_packet_sender.into_sink(),
+    lossy_out_packets,
+  ));
+
+  tokio::try_join!(
+    out_quic_connection.established(),
+    hub_quic_connection.established()
+  )?;
+
+  let bulk_completed = Arc::new(AtomicUsize::new(0));
+  let server_completed = Arc::new(AtomicUsize::new(0));
+
+  let work = async {
+    tokio::try_join!(
+      async {
+        let mut tasks = JoinSet::new();
+
+        // Bulk streams must transfer intact despite loss and churn.
+        for _ in 0..BULK_STREAM_COUNT {
+          let connection = out_quic_connection.clone();
+          let bulk_completed = bulk_completed.clone();
+
+          tasks.spawn(async move {
+            let mut stream = connection.open_stream();
+            stream.write_all(&RANDOM_DATA_1).await?;
+            stream.shutdown().await?;
+
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            anyhow::ensure!(response == *RANDOM_DATA_2);
+
+            bulk_completed.fetch_add(1, atomic::Ordering::Relaxed);
+
+            anyhow::Ok(())
+          });
+        }
+
+        // Churn streams are dropped mid-transfer without shutdown, exercising
+        // the drain/rearm/reap paths next to the bulk streams.
+        for _ in 0..DROPPED_STREAM_COUNT {
+          let connection = out_quic_connection.clone();
+
+          tasks.spawn(async move {
+            let mut stream = connection.open_stream();
+            stream
+              .write_all(&RANDOM_DATA_1[..bytes!("8 KiB") as usize])
+              .await?;
+            drop(stream);
+
+            anyhow::Ok(())
+          });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+          result??;
+        }
+
+        anyhow::Ok(())
+      },
+      async {
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..BULK_STREAM_COUNT + DROPPED_STREAM_COUNT {
+          let connection = hub_quic_connection.clone();
+          let server_completed = server_completed.clone();
+
+          tasks.spawn(async move {
+            let mut stream = connection
+              .accept_stream()
+              .await?
+              .ok_or_else(|| anyhow::anyhow!("missing request stream"))?;
+
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).await?;
+
+            if request == *RANDOM_DATA_1 {
+              stream.write_all(&RANDOM_DATA_2).await?;
+              stream.shutdown().await?;
+            } else {
+              // Dropped churn streams may already be stopped by the peer.
+              _ = stream.write_all(&RANDOM_DATA_2).await;
+            }
+
+            server_completed.fetch_add(1, atomic::Ordering::Relaxed);
+
+            anyhow::Ok(())
+          });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+          result??;
+        }
+
+        anyhow::Ok(())
+      },
+    )
+  };
+
+  let progress = async {
+    loop {
+      sleep(duration!("15s")).await;
+
+      eprintln!(
+        "progress: bulk={}/{BULK_STREAM_COUNT} server={}/{}\n  out=[{}]\n  hub=[{}]",
+        bulk_completed.load(atomic::Ordering::Relaxed),
+        server_completed.load(atomic::Ordering::Relaxed),
+        BULK_STREAM_COUNT + DROPPED_STREAM_COUNT,
+        out_quic_connection.diagnostics(),
+        hub_quic_connection.diagnostics(),
+      );
+    }
+  };
+
+  let work_result = tokio::select! {
+    result = work => Some(result),
+    _ = timeout(duration!("105s"), progress) => None,
+  };
+
+  let work_completed = work_result.is_some();
+
+  if let Some(work_result) = work_result {
+    work_result?;
+  }
+
+  let reap_result = timeout(duration!("10s"), async {
+    loop {
+      if out_quic_connection.diagnostics().contains("streams=0 ")
+        && hub_quic_connection.diagnostics().contains("streams=0 ")
+      {
+        break;
+      }
+
+      sleep(duration!("20ms")).await;
+    }
+  })
+  .await;
+
+  anyhow::ensure!(
+    work_completed && reap_result.is_ok(),
+    "bulk lossy transport wedged: bulk={}/{BULK_STREAM_COUNT} server={}/{} out=[{}] hub=[{}]",
+    bulk_completed.load(atomic::Ordering::Relaxed),
+    server_completed.load(atomic::Ordering::Relaxed),
+    BULK_STREAM_COUNT + DROPPED_STREAM_COUNT,
+    out_quic_connection.diagnostics(),
+    hub_quic_connection.diagnostics(),
+  );
+
+  Ok(())
 }
