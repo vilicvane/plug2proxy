@@ -494,15 +494,13 @@ impl QuicConnection {
                         // return Done forever. Detect that terminal state
                         // and give up instead of retrying pointlessly.
                         let terminal = matches!(
-                            connection.lock().unwrap().stream_capacity(id),
-                            Err(quiche::Error::InvalidStreamState(_))
-                                | Err(quiche::Error::StreamStopped(_))
+                          connection.lock().unwrap().stream_capacity(id),
+                          Err(quiche::Error::InvalidStreamState(_))
+                            | Err(quiche::Error::StreamStopped(_))
                         );
                         if terminal {
-                            log::debug!(
-                                "{side} {id}: stream gone while blocked; abandoning send"
-                            );
-                            break 'outer;
+                          log::debug!("{side} {id}: stream gone while blocked; abandoning send");
+                          break 'outer;
                         }
 
                         // Beyond the notification-driven wakeup, re-arm on a
@@ -938,9 +936,7 @@ impl QuicConnection {
                         (id & 0x1) == u64::from(matches!(side, ConnectionSide::Server));
 
                       if locally_initiated {
-                        log::debug!(
-                          "{side} {id}: ignoring readable for torn-down local stream"
-                        );
+                        log::debug!("{side} {id}: ignoring readable for torn-down local stream");
                         continue;
                       }
 

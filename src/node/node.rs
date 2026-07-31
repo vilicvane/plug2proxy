@@ -2001,14 +2001,16 @@ mod tests {
       dispatchers: vec![dispatcher.clone()],
     });
     let router = Arc::new(Router::new(test_dir()));
-    router.register_local_rules(vec![DomainRule {
-      matchers: vec!["www.example.com".to_owned().into()],
-      priority: 0,
-      negate: false,
-      exits: vec![exit],
-      dns_only: false,
-    }
-    .into()]);
+    router.register_local_rules(vec![
+      DomainRule {
+        matchers: vec!["www.example.com".to_owned().into()],
+        priority: 0,
+        negate: false,
+        exits: vec![exit],
+        dns_only: false,
+      }
+      .into(),
+    ]);
     let route_task = tokio::spawn({
       let node = node.clone();
       let router = router.clone();

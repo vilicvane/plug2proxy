@@ -11,7 +11,9 @@ use lowkit::SelfWrapExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-  node::{Error, NodeMessageToOut, NodeResolveAnswers, OutDispatcher, OutDispatcherLoad, ResolveQuery},
+  node::{
+    Error, NodeMessageToOut, NodeResolveAnswers, OutDispatcher, OutDispatcherLoad, ResolveQuery,
+  },
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
   },
@@ -223,7 +225,11 @@ impl OutDispatcher for NodeOutDispatcher {
     >::new(Box::new(stream))))
   }
 
-  async fn resolve(&self, exit: OutExit, query: &ResolveQuery) -> Result<NodeResolveAnswers, Error> {
+  async fn resolve(
+    &self,
+    exit: OutExit,
+    query: &ResolveQuery,
+  ) -> Result<NodeResolveAnswers, Error> {
     if self.qomt_connection.state() != QuicConnectionState::Established {
       return Err(Error::OutDispatcherUnavailable);
     }

@@ -545,7 +545,10 @@ mod tests {
       routing_protocol: None,
     };
     // 连接路由阶段跳过 dns_only 规则，走 fallback。
-    assert_eq!(router.match_exits(&destination).await, vec![OutExit::Direct]);
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::Direct]
+    );
     // DNS 阶段命中 dns_only 规则。
     assert_eq!(
       router.match_dns("example.com"),
@@ -560,14 +563,16 @@ mod tests {
   #[tokio::test]
   async fn dns_matching_ignores_non_domain_rules_and_falls_back_to_direct() {
     let router = Router::new(test_dir());
-    router.register_local_rules(vec![AddressRule {
-      match_ips: None,
-      match_ports: Some(vec![443]),
-      priority: 0,
-      negate: false,
-      exits: vec![OutExit::Proxy],
-    }
-    .into()]);
+    router.register_local_rules(vec![
+      AddressRule {
+        match_ips: None,
+        match_ports: Some(vec![443]),
+        priority: 0,
+        negate: false,
+        exits: vec![OutExit::Proxy],
+      }
+      .into(),
+    ]);
 
     // 无 domain 规则命中 → 本地解析。
     assert_eq!(

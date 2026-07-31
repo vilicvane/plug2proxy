@@ -24,8 +24,8 @@ use hickory_server::{
 use moka::{Expiry, sync::Cache};
 
 use crate::{
-  node::{NodeResolveAnswers, ResolveQuery},
   r#in::InLike,
+  node::{NodeResolveAnswers, ResolveQuery},
 };
 
 /// 应答缓存有效期上限：记录 TTL 超过该值时按该值缓存。
@@ -84,10 +84,7 @@ impl RoutingZoneHandler {
         let message = Arc::new(message);
         self.cache.insert(key, message.clone());
 
-        Ok(Lookup::new_with_max_ttl(
-          query,
-          message.answers.to_vec(),
-        ))
+        Ok(Lookup::new_with_max_ttl(query, message.answers.to_vec()))
       }
       NodeResolveAnswers::NxDomain => Err(LookupError::from(ResponseCode::NXDomain)),
       NodeResolveAnswers::Failure => Err(LookupError::from(ResponseCode::ServFail)),
@@ -231,13 +228,9 @@ impl Expiry<QueryKey, Arc<Message>> for AnswerExpiry {
   }
 }
 
-
 #[cfg(test)]
 mod tests {
-  use std::{
-    net::Ipv4Addr,
-    sync::Mutex,
-  };
+  use std::{net::Ipv4Addr, sync::Mutex};
 
   use hickory_server::proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
@@ -292,11 +285,7 @@ mod tests {
       routes: Vec<RouteMatch>,
       query: &ResolveQuery,
     ) -> Result<NodeResolveAnswers, Error> {
-      self
-        .queries
-        .lock()
-        .unwrap()
-        .push((routes, query.clone()));
+      self.queries.lock().unwrap().push((routes, query.clone()));
       tokio::time::sleep(self.delay).await;
       Ok(self.answers.clone())
     }
@@ -346,10 +335,7 @@ mod tests {
   ) -> Message {
     let mut request = Message::new(1234, MessageType::Query, OpCode::Query);
     request.metadata.recursion_desired = true;
-    request.add_query(Query::query(
-      Name::from_str(name).unwrap(),
-      record_type,
-    ));
+    request.add_query(Query::query(Name::from_str(name).unwrap(), record_type));
 
     socket
       .send_to(&request.to_vec().unwrap(), server)
@@ -368,14 +354,16 @@ mod tests {
   #[tokio::test]
   async fn a_query_is_routed_and_cached() {
     let router = Router::new(test_dir());
-    router.register_local_rules(vec![DomainRule {
-      matchers: vec!["proxied.example.com".to_owned().into()],
-      priority: 0,
-      negate: false,
-      exits: vec![OutExit::from("us")],
-      dns_only: true,
-    }
-    .into()]);
+    router.register_local_rules(vec![
+      DomainRule {
+        matchers: vec!["proxied.example.com".to_owned().into()],
+        priority: 0,
+        negate: false,
+        exits: vec![OutExit::from("us")],
+        dns_only: true,
+      }
+      .into(),
+    ]);
 
     let node = Arc::new(MockDnsNode::new(
       router,
@@ -386,7 +374,13 @@ mod tests {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
     // dns_only 规则命中的域名按规则出口解析。
-    let response = query(&client, server_address, "proxied.example.com.", RecordType::A).await;
+    let response = query(
+      &client,
+      server_address,
+      "proxied.example.com.",
+      RecordType::A,
+    )
+    .await;
     assert_eq!(response.metadata.response_code, ResponseCode::NoError);
     assert!(
       response
@@ -408,12 +402,24 @@ mod tests {
     }
 
     // 第二次查询命中缓存，不再转发。
-    let response = query(&client, server_address, "proxied.example.com.", RecordType::A).await;
+    let response = query(
+      &client,
+      server_address,
+      "proxied.example.com.",
+      RecordType::A,
+    )
+    .await;
     assert_eq!(response.metadata.response_code, ResponseCode::NoError);
     assert_eq!(node.queries.lock().unwrap().len(), 1);
 
     // 无规则命中的域名回退 DIRECT（本地解析）。
-    let response = query(&client, server_address, "other.example.com.", RecordType::AAAA).await;
+    let response = query(
+      &client,
+      server_address,
+      "other.example.com.",
+      RecordType::AAAA,
+    )
+    .await;
     assert_eq!(response.metadata.response_code, ResponseCode::NoError);
     {
       let queries = node.queries.lock().unwrap();
@@ -502,7 +508,13 @@ mod tests {
     let (server_address, _server) = start_test_server(node).await;
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-    let response = query(&client, server_address, "missing.example.com.", RecordType::A).await;
+    let response = query(
+      &client,
+      server_address,
+      "missing.example.com.",
+      RecordType::A,
+    )
+    .await;
     assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
 
     let node = Arc::new(MockDnsNode::new(
@@ -511,7 +523,13 @@ mod tests {
     ));
     let (server_address, _server) = start_test_server(node).await;
 
-    let response = query(&client, server_address, "broken.example.com.", RecordType::A).await;
+    let response = query(
+      &client,
+      server_address,
+      "broken.example.com.",
+      RecordType::A,
+    )
+    .await;
     assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
   }
 }

@@ -905,7 +905,6 @@ async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()
   .await?
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 #[test_log::test]
 async fn concurrent_bulk_streams_survive_lossy_transport() -> anyhow::Result<()> {
@@ -923,27 +922,23 @@ async fn concurrent_bulk_streams_survive_lossy_transport() -> anyhow::Result<()>
     config.set_initial_max_stream_data_uni(bytes!("256 KiB"));
   }
 
-  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
-    flume::bounded::<QuicBytesPacket>(0);
-  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
-    flume::bounded::<QuicBytesPacket>(0);
+  let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
+  let (out_to_hub_packet_sender, out_to_hub_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
 
   // Deterministic 2% packet loss in both directions to exercise QUIC loss
   // recovery on multiplexed bulk streams.
   let lossy_transport = |receiver: flume::Receiver<QuicBytesPacket>| {
     let mut rng_state = 0x9e37_79b9_7f4a_7c15u64;
 
-    Box::pin(
-      receiver.into_stream().filter_map(move |packet| {
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
+    Box::pin(receiver.into_stream().filter_map(move |packet| {
+      rng_state ^= rng_state << 13;
+      rng_state ^= rng_state >> 7;
+      rng_state ^= rng_state << 17;
 
-        let keep = rng_state % 50 != 0;
+      let keep = rng_state % 50 != 0;
 
-        async move { keep.then_some(packet) }
-      }),
-    )
+      async move { keep.then_some(packet) }
+    }))
   };
 
   let lossy_hub_packets = lossy_transport(hub_to_out_packet_receiver);
