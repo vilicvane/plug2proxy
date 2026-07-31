@@ -31,10 +31,8 @@ use crate::{
   },
   out::PeerOut,
   primitives::OutExits,
-  qomt::qomt_connect,
-  quic_connection::{
-    QuicConnection, QuicStream, State as QuicConnectionState, create_quiche_config,
-  },
+  qomt::{QomtConnection, QomtStream, State as QuicConnectionState, qomt_connect},
+  quic_connection::create_quiche_config,
   route::Router,
   utils::postcard::postcard_read_stream,
 };
@@ -252,8 +250,8 @@ impl In {
   async fn handle_hub_node(
     self: Arc<Self>,
     node_id: NodeId,
-    mut update_stream: QuicStream,
-    qomt_connection: Arc<QuicConnection>,
+    mut update_stream: QomtStream,
+    qomt_connection: Arc<QomtConnection>,
   ) -> anyhow::Result<()> {
     let out_dispatcher = NodeOutDispatcher::new(OutExits::default(), qomt_connection.clone()).arc();
     let registered_out_dispatcher: Arc<dyn OutDispatcher> = out_dispatcher.clone();

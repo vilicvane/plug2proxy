@@ -11,7 +11,10 @@ use crate::{
   mt_connections::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnections, MtConnectionsPacket, mt_connections_connect,
   },
-  quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicConnection},
+  qomt::QomtStream,
+  quic_connection::{
+    MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicConnection, QuicConnectionError, State,
+  },
 };
 
 pub const MAX_PENDING_QOMT_HANDSHAKES: usize = 64;
@@ -56,11 +59,57 @@ impl MtConnectionsPacket for QuicBytesPacket {
   }
 }
 
+/// QomT 连接，包装底层 QUIC 连接（承载于 mTCP 之上）。
+///
+/// 现阶段仅透传；后续将在此之上管理 reliable / unreliable 包路由
+/// （UDP QUIC datagram 旁路等），并承载 QomtStream 的语义选择。
+pub struct QomtConnection {
+  inner: QuicConnection,
+}
+
+impl QomtConnection {
+  pub fn new(inner: QuicConnection) -> Self {
+    Self { inner }
+  }
+
+  pub async fn established(&self) -> Result<(), QuicConnectionError> {
+    self.inner.established().await
+  }
+
+  pub fn open_stream(&self) -> QomtStream {
+    QomtStream::new(self.inner.open_stream())
+  }
+
+  pub async fn accept_stream(&self) -> Result<Option<QomtStream>, QuicConnectionError> {
+    self
+      .inner
+      .accept_stream()
+      .await
+      .map(|stream| stream.map(QomtStream::new))
+  }
+
+  pub fn state(&self) -> State {
+    self.inner.state()
+  }
+
+  pub fn id(&self) -> &quiche::ConnectionId<'static> {
+    self.inner.id()
+  }
+
+  pub fn diagnostic_id(&self) -> String {
+    self.inner.diagnostic_id()
+  }
+
+  pub fn diagnostics(&self) -> String {
+    self.inner.diagnostics()
+  }
+}
+
 pub async fn qomt_connect(
   quiche_config: &mut quiche::Config,
   address: SocketAddr,
   connections: usize,
-) -> anyhow::Result<QuicConnection> {
+) -> anyhow::Result<QomtConnection> {
   let (mut mt_connections, extend_signal_sender) =
     mt_connections_connect::<QuicBytesPacket>(address, connections)
       .await
@@ -81,13 +130,13 @@ pub async fn qomt_connect(
 
   extend_signal_sender.send(()).ok();
 
-  Ok(qomt_connection)
+  Ok(QomtConnection::new(qomt_connection))
 }
 
 pub async fn qomt_accept(
   quiche_config: &mut quiche::Config,
   mut mt_connections: MtConnections<QuicBytesPacket>,
-) -> anyhow::Result<QuicConnection> {
+) -> anyhow::Result<QomtConnection> {
   let first_packet = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, mt_connections.next())
     .await
     .context("timed out waiting for QUIC connection ID")?
@@ -110,5 +159,5 @@ pub async fn qomt_accept(
   .await
   .context("timed out establishing QUIC connection")??;
 
-  Ok(qomt_connection)
+  Ok(QomtConnection::new(qomt_connection))
 }

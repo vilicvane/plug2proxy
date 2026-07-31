@@ -6,7 +6,10 @@ use std::{
 
 use lits::{bytes, duration};
 
-pub const MAX_DATAGRAM_SIZE: usize = bytes!("64 KiB") as usize;
+// quiche 把 DATAGRAM 帧长度固定编码为 2 字节 varint，单帧上限 16383；
+// 超过即 BufferTooShort，且 quiche 不做自动分片。
+// 该值同时作为 mTCP 帧（QUIC 包）长度上限，需与 quiche 配置一致。
+pub const MAX_DATAGRAM_SIZE: usize = bytes!("16 KiB") as usize - 1;
 
 pub const MAX_DATA_BUFFER_SIZE_PER_STREAM: u64 = bytes!("64 MiB");
 pub const MAX_DATA_BUFFER_SIZE: u64 = MAX_DATA_BUFFER_SIZE_PER_STREAM * 8;

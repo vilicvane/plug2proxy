@@ -32,8 +32,8 @@ use crate::{
   },
   out::{PeerOut, build_local_out_dispatchers},
   primitives::OutExits,
-  qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept},
-  quic_connection::{QuicBytesPacket, QuicConnection, QuicStream, create_quiche_config},
+  qomt::{MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, QomtStream, qomt_accept},
+  quic_connection::{QuicBytesPacket, create_quiche_config},
   route::{RouteMatch, Router},
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
@@ -203,8 +203,8 @@ impl Hub {
   async fn handle_in_node(
     self: Arc<Self>,
     node_id: NodeId,
-    mut stream: QuicStream,
-    qomt_connection: QuicConnection,
+    mut stream: QomtStream,
+    qomt_connection: QomtConnection,
   ) {
     let qomt_connection = qomt_connection.arc();
     let qomt_connection_id = qomt_connection.diagnostic_id();
@@ -341,7 +341,7 @@ impl Hub {
     }: NodeHelloOut,
     session_id: NodeId,
     remote_address: SocketAddr,
-    qomt_connection: QuicConnection,
+    qomt_connection: QomtConnection,
   ) {
     let exits = exits.for_advertising();
     let peer_endpoint =

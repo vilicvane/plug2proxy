@@ -25,8 +25,8 @@ use crate::{
   },
   out::{OutConfig, build_local_out_dispatchers},
   primitives::OutExits,
-  qomt::{MAX_PENDING_QOMT_HANDSHAKES, qomt_accept, qomt_connect},
-  quic_connection::{QuicBytesPacket, QuicConnection, create_quiche_config},
+  qomt::{MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, qomt_accept, qomt_connect},
+  quic_connection::{QuicBytesPacket, create_quiche_config},
   route::RouteMatch,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
   utils::{
@@ -245,7 +245,7 @@ impl Out {
     }
   }
 
-  async fn handle_node(self: Arc<Self>, qomt_connection: QuicConnection) -> anyhow::Result<()> {
+  async fn handle_node(self: Arc<Self>, qomt_connection: QomtConnection) -> anyhow::Result<()> {
     let mut join_set = JoinSet::new();
     let qomt_connection_id = qomt_connection.diagnostic_id();
 

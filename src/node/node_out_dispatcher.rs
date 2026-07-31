@@ -17,7 +17,7 @@ use crate::{
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
   },
-  quic_connection::{QuicConnection, State as QuicConnectionState},
+  qomt::{QomtConnection, State as QuicConnectionState},
   udp_forwarder::{IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket, UdpPacketStream},
   utils::postcard::postcard_read_stream,
 };
@@ -25,7 +25,7 @@ use crate::{
 pub struct NodeOutDispatcher {
   exits: Mutex<OutExits>,
   match_priority: OutExitMatchPriority,
-  qomt_connection: Arc<QuicConnection>,
+  qomt_connection: Arc<QomtConnection>,
   active_transfers: AtomicUsize,
   goodput_bytes_per_second: AtomicU64,
 }
@@ -33,18 +33,18 @@ pub struct NodeOutDispatcher {
 impl NodeOutDispatcher {
   const MIN_GOODPUT_SAMPLE_BYTES: u64 = 64 * 1024;
 
-  pub fn new(exits: OutExits, qomt_connection: Arc<QuicConnection>) -> Self {
+  pub fn new(exits: OutExits, qomt_connection: Arc<QomtConnection>) -> Self {
     Self::with_match_priority(exits, OutExitMatchPriority::Provider, qomt_connection)
   }
 
-  pub fn new_peer(exits: OutExits, qomt_connection: Arc<QuicConnection>) -> Self {
+  pub fn new_peer(exits: OutExits, qomt_connection: Arc<QomtConnection>) -> Self {
     Self::with_match_priority(exits, OutExitMatchPriority::PeerProvider, qomt_connection)
   }
 
   fn with_match_priority(
     exits: OutExits,
     match_priority: OutExitMatchPriority,
-    qomt_connection: Arc<QuicConnection>,
+    qomt_connection: Arc<QomtConnection>,
   ) -> Self {
     Self {
       exits: exits.for_advertising().mutex(),

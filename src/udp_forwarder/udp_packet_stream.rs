@@ -10,10 +10,13 @@ use tokio::io::ReadBuf;
 
 use crate::{
   primitives::BidiStream,
+  quic_connection::MAX_DATAGRAM_SIZE,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket},
 };
 
-const MAX_UDP_PACKET_FRAME_SIZE: usize = 128 * 1024;
+// UDP 帧上限取 MAX_DATAGRAM_SIZE（quiche 单 DATAGRAM 帧上限，16383）：
+// 帧必须能整体装进单个 QUIC datagram，超出无法走 datagram 旁路，且
+// quiche 不做自动分片。发送侧仍以 dgram_max_writable_len() 为准。
 
 pub trait InboundUdpPacketStream:
   Sink<IncomingUdpPacket, Error = UdpPacketStreamError>
@@ -145,7 +148,7 @@ where
 
     let payload = postcard::to_allocvec(&packet)?;
 
-    if payload.len() > MAX_UDP_PACKET_FRAME_SIZE {
+    if payload.len() > MAX_DATAGRAM_SIZE {
       return Err(UdpPacketStreamError::FrameTooLarge(payload.len()));
     }
 
@@ -233,7 +236,7 @@ where
         ReadState::Length { encoded, .. } => {
           let length = u32::from_be_bytes(encoded) as usize;
 
-          if length > MAX_UDP_PACKET_FRAME_SIZE {
+          if length > MAX_DATAGRAM_SIZE {
             return this.stop_reading(UdpPacketStreamError::FrameTooLarge(length));
           }
 
@@ -277,7 +280,7 @@ mod tests {
 
   #[tokio::test]
   async fn transports_udp_packets_in_both_directions() {
-    let (left, right) = duplex(MAX_UDP_PACKET_FRAME_SIZE * 2);
+    let (left, right) = duplex(MAX_DATAGRAM_SIZE * 2);
     let mut outbound = UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(left));
     let mut inbound = UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(right));
     let source = UdpPacketSource {
