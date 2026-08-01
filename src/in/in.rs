@@ -32,7 +32,7 @@ use crate::{
   out::PeerOut,
   primitives::OutExits,
   qomt::{QomtConnection, QomtStream, State as QuicConnectionState, qomt_connect},
-  quic_connection::create_quiche_config,
+  quic_connection::{create_quiche_config, create_udp_quiche_config},
   route::Router,
   utils::postcard::postcard_read_stream,
 };
@@ -174,12 +174,15 @@ impl In {
   }
 
   async fn run_in(self: Arc<Self>) -> anyhow::Result<()> {
-    let mut quiche_config = create_quiche_config(self.context_dir.join(NODE_PEM_FILE_NAME))?;
+    let pem_path = self.context_dir.join(NODE_PEM_FILE_NAME);
+    let mut quiche_config = create_quiche_config(&pem_path)?;
 
     loop {
       async {
+        let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
         let qomt_connection = qomt_connect(
           &mut quiche_config,
+          udp_quiche_config,
           self.hub_options.address,
           self.hub_options.connections,
         )
@@ -468,8 +471,15 @@ impl In {
     let pem_path = in_node_arc.context_dir.join(NODE_PEM_FILE_NAME);
     drop(in_node_arc);
 
-    let mut quiche_config = create_quiche_config(pem_path)?;
-    let qomt_connection = qomt_connect(&mut quiche_config, key.address, connections).await?;
+    let mut quiche_config = create_quiche_config(&pem_path)?;
+    let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
+    let qomt_connection = qomt_connect(
+      &mut quiche_config,
+      udp_quiche_config,
+      key.address,
+      connections,
+    )
+    .await?;
     let qomt_connection = qomt_connection.arc();
 
     let NodeHelloAck(provider_id) = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
@@ -648,7 +658,7 @@ mod tests {
   use lowkit::SelfWrapExt;
   use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, duplex},
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     time::{sleep, timeout},
   };
 
@@ -807,7 +817,9 @@ mod tests {
       })
       .arc();
       let provider_id = out.id();
-      let mut peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener));
+      let udp_socket = UdpSocket::bind(peer_listener.local_addr()?).await.ok();
+
+      let mut peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener, udp_socket));
 
       let in_node = In::new(
         vec![],
@@ -859,8 +871,16 @@ mod tests {
       peer_listener_task.await.ok();
       wait_for_peer_dispatcher(&in_node, key, false).await?;
 
-      let peer_listener = TcpListener::bind(peer_endpoint).await?;
-      peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener));
+      // 旧 listener 释放是异步的，轮询等待端口可用。
+      let peer_listener = loop {
+        match TcpListener::bind(peer_endpoint).await {
+          Ok(listener) => break listener,
+          Err(_) => sleep(duration!("20ms")).await,
+        }
+      };
+      let udp_socket = UdpSocket::bind(peer_listener.local_addr()?).await.ok();
+
+      peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener, udp_socket));
 
       wait_for_peer_dispatcher(&in_node, key, true).await?;
       assert_proxied_ping(&in_node, destination).await?;

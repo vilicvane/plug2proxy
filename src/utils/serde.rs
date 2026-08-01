@@ -1,8 +1,38 @@
 use std::{net::IpAddr, ops::Deref};
 
 use ipnet::IpNet;
-use lowkit::SelfWrapExt;
+use lowkit::{SelfWrapExt, SerdeSocketAddress};
 use serde::{Deserialize, Deserializer, Serialize, de};
+
+pub fn deserialize_listen_socket_address<'de, TDeserializer>(
+  deserializer: TDeserializer,
+) -> Result<SerdeSocketAddress, TDeserializer::Error>
+where
+  TDeserializer: Deserializer<'de>,
+{
+  let address = SerdeSocketAddress::deserialize(deserializer)?;
+
+  if address.port() == 0 {
+    return Err(de::Error::custom("listen port must be non-zero"));
+  }
+
+  Ok(address)
+}
+
+pub fn deserialize_optional_listen_socket_address<'de, TDeserializer>(
+  deserializer: TDeserializer,
+) -> Result<Option<SerdeSocketAddress>, TDeserializer::Error>
+where
+  TDeserializer: Deserializer<'de>,
+{
+  let address = Option::<SerdeSocketAddress>::deserialize(deserializer)?;
+
+  if address.as_ref().is_some_and(|address| address.port() == 0) {
+    return Err(de::Error::custom("listen port must be non-zero"));
+  }
+
+  Ok(address)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]

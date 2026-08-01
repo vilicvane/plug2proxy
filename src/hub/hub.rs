@@ -14,7 +14,7 @@ use colored::Colorize;
 use lowkit::SelfWrapExt;
 use tokio::{
   io::AsyncWriteExt,
-  net::TcpListener,
+  net::{TcpListener, UdpSocket},
   sync::{Semaphore, mpsc},
   task::JoinSet,
   time::timeout,
@@ -32,10 +32,10 @@ use crate::{
   },
   out::{PeerOut, build_local_out_dispatchers},
   primitives::OutExits,
-  qomt::{MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, QomtStream, qomt_accept},
-  quic_connection::{QuicBytesPacket, create_quiche_config},
+  qomt::{MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, QomtPacketStream, QomtStream, qomt_accept},
+  quic_connection::{QuicBytesPacket, create_quiche_config, create_udp_quiche_config},
   route::{RouteMatch, Router},
-  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
+  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
     task::reap_finished_tasks,
@@ -73,6 +73,7 @@ pub struct HubOptions {
 impl Hub {
   pub fn new(
     tcp_listener: TcpListener,
+    udp_socket: Option<UdpSocket>,
     inbounds: Vec<AnyInbound>,
     router: Router,
     HubOptions {
@@ -93,7 +94,7 @@ impl Hub {
     Self {
       id: NodeId::new(),
       exits,
-      mt_connections_listener: MtConnectionsListener::new(tcp_listener).tokio_mutex(),
+      mt_connections_listener: MtConnectionsListener::new(tcp_listener, udp_socket).tokio_mutex(),
       local_out_dispatchers,
       connected_out_dispatcher_map: HashMap::new().mutex(),
       out_dispatcher_revision: AtomicU64::new(0),
@@ -141,7 +142,10 @@ impl Hub {
       join_set.spawn(async move {
         async {
           let mut quiche_config = create_quiche_config(this.context_dir.join(NODE_PEM_FILE_NAME))?;
-          let qomt_connection = qomt_accept(&mut quiche_config, mt_connections).await?;
+          let udp_quiche_config =
+            create_udp_quiche_config(this.context_dir.join(NODE_PEM_FILE_NAME)).ok();
+          let qomt_connection =
+            qomt_accept(&mut quiche_config, udp_quiche_config, mt_connections).await?;
 
           let (hello, stream) = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
             let mut stream = qomt_connection
@@ -264,6 +268,7 @@ impl Hub {
       };
 
       let this = self.clone();
+      let qomt_connection = qomt_connection.clone();
       let stream_id = stream.id();
       let qomt_connection_id = qomt_connection_id.clone();
 
@@ -290,8 +295,11 @@ impl Hub {
                 "QOMT {qomt_connection_id} stream {stream_id} received ASSOCIATE \
                  from IN {node_id}: exit={exit}."
               );
-              let packet_stream =
-                UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
+              let packet_stream = QomtPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::accept(
+                qomt_connection,
+                stream,
+              )
+              .await?;
               this.relay_udp(exit, Box::new(packet_stream)).await?;
             }
             NodeMessageToOut::Resolve(exit, query) => {
@@ -549,11 +557,21 @@ pub async fn run_hub(
   }
 
   let tcp_listener = TcpListener::bind(*listen).await?;
+  let listen_address = tcp_listener.local_addr()?;
+
+  // UDP listener 与 TCP listener 是平行资源，使用 TCP 实际绑定地址
+  // 保持两者地址和端口一致。
+  let udp_socket = UdpSocket::bind(listen_address)
+    .await
+    .inspect_err(|error| {
+      log::warn!("error binding UDP listener at {listen_address}: {error}");
+    })
+    .ok();
 
   log::info!(
     "{} is listening on {}...",
     "HUB".cyan(),
-    tcp_listener.local_addr()?.to_string().yellow()
+    listen_address.to_string().yellow()
   );
 
   let inbounds = if let Some(inbounds_config) = inbounds_config {
@@ -572,6 +590,7 @@ pub async fn run_hub(
 
   let hub = Hub::new(
     tcp_listener,
+    udp_socket,
     inbounds,
     router,
     HubOptions {
@@ -712,8 +731,11 @@ mod tests {
 
       let hub_listener = TcpListener::bind("127.0.0.1:0").await?;
       let hub_address = hub_listener.local_addr()?;
+      let udp_socket = UdpSocket::bind(hub_listener.local_addr()?).await.ok();
+
       let hub = Hub::new(
         hub_listener,
+        udp_socket,
         vec![],
         Router::new(&hub_dir),
         HubOptions {
@@ -727,7 +749,9 @@ mod tests {
       let hub_task = tokio::spawn(hub.run_hub());
 
       let mut in_quiche_config = create_quiche_config(in_dir.join(NODE_PEM_FILE_NAME))?;
-      let in_connection = qomt_connect(&mut in_quiche_config, hub_address, 1).await?;
+      let udp_in_quiche_config = create_udp_quiche_config(in_dir.join(NODE_PEM_FILE_NAME)).ok();
+      let in_connection =
+        qomt_connect(&mut in_quiche_config, udp_in_quiche_config, hub_address, 1).await?;
       let mut in_update_stream = in_connection.open_stream();
       in_update_stream
         .write_all(&postcard::to_allocvec(&NodeHello::In(NodeId::new())).unwrap())
@@ -742,7 +766,14 @@ mod tests {
       let advertised_port = 2233;
       let advertised_exits = OutExits::new([OutExit::Proxy]);
       let mut out_quiche_config = create_quiche_config(out_dir.join(NODE_PEM_FILE_NAME))?;
-      let out_connection = qomt_connect(&mut out_quiche_config, hub_address, 1).await?;
+      let udp_out_quiche_config = create_udp_quiche_config(out_dir.join(NODE_PEM_FILE_NAME)).ok();
+      let out_connection = qomt_connect(
+        &mut out_quiche_config,
+        udp_out_quiche_config,
+        hub_address,
+        1,
+      )
+      .await?;
       let mut out_hello_stream = out_connection.open_stream();
       out_hello_stream
         .write_all(

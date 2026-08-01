@@ -17,8 +17,8 @@ use crate::{
   primitives::{
     BidiStream, OutExit, OutExitMatch, OutExitMatchPriority, OutExits, SocketDestination,
   },
-  qomt::{QomtConnection, State as QuicConnectionState},
-  udp_forwarder::{IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket, UdpPacketStream},
+  qomt::{QomtConnection, QomtPacketStream, State as QuicConnectionState},
+  udp_forwarder::{IncomingUdpPacket, OutboundUdpPacketStream, OutgoingUdpPacket},
   utils::postcard::postcard_read_stream,
 };
 
@@ -219,10 +219,13 @@ impl OutDispatcher for NodeOutDispatcher {
       return Err(Error::OutDispatcherUnavailable);
     }
 
-    Ok(Box::new(UdpPacketStream::<
-      OutgoingUdpPacket,
-      IncomingUdpPacket,
-    >::new(Box::new(stream))))
+    Ok(Box::new(
+      QomtPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::connect(
+        self.qomt_connection.clone(),
+        stream,
+      )
+      .await?,
+    ))
   }
 
   async fn resolve(

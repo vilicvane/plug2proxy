@@ -771,6 +771,7 @@ async fn run_udp_association(
       tokio::select! {
         outgoing = outgoing_receiver.recv() => {
           let Some(outgoing) = outgoing else {
+            outbound.close().await?;
             break;
           };
 

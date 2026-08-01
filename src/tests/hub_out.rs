@@ -67,8 +67,11 @@ async fn test_hub_out() -> anyhow::Result<()> {
         .into(),
       ]);
 
+      let udp_socket = UdpSocket::bind(hub_tcp_listener.local_addr()?).await.ok();
+
       let hub = Hub::new(
         hub_tcp_listener,
+        udp_socket,
         vec![],
         router,
         HubOptions {
@@ -246,8 +249,11 @@ async fn test_hub_out_resolve() -> anyhow::Result<()> {
   let hub_tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
   let hub_address = hub_tcp_listener.local_addr()?;
 
+  let udp_socket = UdpSocket::bind(hub_tcp_listener.local_addr()?).await.ok();
+
   let hub = Hub::new(
     hub_tcp_listener,
+    udp_socket,
     vec![],
     Router::new(&hub_dir),
     HubOptions {

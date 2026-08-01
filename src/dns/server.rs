@@ -13,7 +13,9 @@ use hickory_server::{
 use lowkit::SerdeSocketAddress;
 use serde::Deserialize;
 
-use crate::{dns::RoutingZoneHandler, r#in::InLike};
+use crate::{
+  dns::RoutingZoneHandler, r#in::InLike, utils::serde::deserialize_listen_socket_address,
+};
 
 const TCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_RESPONSE_BUFFER_SIZE: usize = 16 * 1024;
@@ -21,6 +23,7 @@ const TCP_RESPONSE_BUFFER_SIZE: usize = 16 * 1024;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsConfig {
+  #[serde(deserialize_with = "deserialize_listen_socket_address")]
   pub listen: SerdeSocketAddress,
 }
 
@@ -110,5 +113,17 @@ impl RequestHandler for RoutingRequestHandler {
       .catalog
       .handle_request::<R, T>(request, response_handle)
       .await
+  }
+}
+
+#[cfg(test)]
+mod config_tests {
+  use super::*;
+
+  #[test]
+  fn rejects_zero_listen_port() {
+    let error = serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:0"}"#).unwrap_err();
+
+    assert!(error.to_string().contains("listen port must be non-zero"));
   }
 }

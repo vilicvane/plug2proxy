@@ -8,6 +8,7 @@ use crate::{
   node::{DefaultLocalExit, LocalOutDispatcher},
   out::OutHubOptions,
   primitives::{OutExit, OutExitTag},
+  utils::serde::deserialize_optional_listen_socket_address,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -15,6 +16,10 @@ pub struct OutConfig {
   pub hub: OutHubConfig,
   #[serde(default)]
   pub exits: Vec<ExitConfig>,
+  #[serde(
+    default,
+    deserialize_with = "deserialize_optional_listen_socket_address"
+  )]
   pub listen: Option<SerdeSocketAddress>,
   pub advertise: Option<SerdeSocketAddress>,
 }
@@ -202,8 +207,8 @@ mod tests {
   }
 
   #[test]
-  fn leaves_omitted_advertise_unresolved_for_listener_port() {
-    let config: OutConfig = serde_json::from_str(
+  fn rejects_zero_listen_port() {
+    let error = serde_json::from_str::<OutConfig>(
       r#"{
         "hub": {
           "address": "127.0.0.1:1122"
@@ -211,12 +216,9 @@ mod tests {
         "listen": "0.0.0.0:0"
       }"#,
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(
-      config.peer_addresses().unwrap(),
-      Some(("0.0.0.0:0".parse().unwrap(), None))
-    );
+    assert!(error.to_string().contains("listen port must be non-zero"));
   }
 
   #[test]

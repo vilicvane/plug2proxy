@@ -57,7 +57,7 @@ where
   };
 
   let (mut mt_connections, tcp_stream_sender, mut tcp_stream_close_receiver) =
-    MtConnections::<TPacket>::new(tcp_stream, ConnectionSide::Client);
+    MtConnections::<TPacket>::new(tcp_stream, ConnectionSide::Client, id);
 
   let (extend_signal_sender, extend_signal_receiver) = oneshot::channel();
 

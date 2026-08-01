@@ -9,4 +9,4 @@ pub use quic_stream::*;
 pub use quiche_config::*;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

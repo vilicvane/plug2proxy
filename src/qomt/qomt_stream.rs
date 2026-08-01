@@ -9,9 +9,9 @@ use crate::quic_connection::QuicStream;
 
 /// QomT 层的流，包装底层 QUIC 流。
 ///
-/// 现阶段仅透传读写；后续将在此基础上为发送端增加
-/// reliable / unreliable 语义（reliable 始终走 QUIC stream over mTCP，
-/// unreliable 在 RTT 恶化时改走 UDP QUIC datagram 旁路）。
+/// 该类型始终表示 reliable byte stream，并固定走 QUIC stream over mTCP。
+/// unreliable 由平级的 `QomtPacketStream` packet API 承载：
+/// `AsyncWrite` 允许 partial write 且不保留包边界，不能安全表达丢包语义。
 pub struct QomtStream {
   inner: QuicStream,
 }

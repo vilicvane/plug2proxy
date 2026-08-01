@@ -7,7 +7,7 @@ use rand::Rng;
 use socket2::SockRef;
 use tokio::{
   io::copy_bidirectional,
-  net::{TcpListener, TcpStream},
+  net::{TcpListener, TcpStream, UdpSocket},
   sync::{mpsc, oneshot},
   task::AbortHandle,
   time::{sleep, timeout},
@@ -84,7 +84,7 @@ async fn test_mt_connections() -> anyhow::Result<()> {
 
       let address = listener.local_addr()?;
 
-      let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(listener);
+      let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(listener, None);
 
       listener_ready_sender.send(address).unwrap();
 
@@ -190,7 +190,7 @@ async fn reconnects_a_dropped_tcp_connection() -> anyhow::Result<()> {
     });
 
     let server_future = async {
-      let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(backend_listener);
+      let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(backend_listener, None);
       let mt_connections = listener.accept().await?;
 
       anyhow::Ok((listener, mt_connections))
@@ -254,6 +254,139 @@ async fn reconnects_a_dropped_tcp_connection() -> anyhow::Result<()> {
 
     listener_task.abort();
     proxy_task.abort();
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+/// listener 全局 UDP socket 按 MtConnectionsId 分发：connect 侧与 listener 侧
+/// 各自 take 到 UDP duplex 后双向互发互收。
+#[tokio::test]
+#[test_log::test]
+async fn udp_side_channel_is_delivered_between_sides() -> anyhow::Result<()> {
+  timeout(duration!("10s"), async {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+
+    let udp_socket = UdpSocket::bind(listener.local_addr()?).await.ok();
+
+    let mut mt_connections_listener =
+      MtConnectionsListener::<QuicBytesPacket>::new(listener, udp_socket);
+
+    // listener 留在测试作用域，UDP 分发循环存活至测试结束（Drop 会 abort 它）。
+    let client_task =
+      tokio::spawn(async move { mt_connections_connect::<QuicBytesPacket>(address, 1).await });
+
+    let server_connections = mt_connections_listener.accept().await?;
+
+    let (client_connections, _extend_signal_sender) = client_task.await??;
+
+    assert_eq!(mt_connections_listener.udp_dispatch_count(), 1);
+
+    let mut client_udp_duplex =
+      MtConnectionsSideUdpDuplex::<QuicBytesPacket>::connect_side(address, client_connections.id())
+        .await?;
+
+    let client_packet = vec![0x01, 0x02, 0x03];
+    let server_packet = vec![0x04, 0x05];
+
+    // 首包既触发 route/duplex 创建，也必须进入有界队列，不能依赖 QUIC
+    // 重传来掩盖 dispatcher 的调度窗口。
+    client_udp_duplex.send(client_packet.clone().into()).await?;
+
+    // listener 侧 duplex 由分发循环在首个 UDP 包到达时创建，轮询等待。
+    let mut server_udp_duplex = loop {
+      if let Some(duplex) = server_connections.take_udp_duplex() {
+        break duplex;
+      }
+
+      tokio::task::yield_now().await;
+    };
+
+    let received_by_server = timeout(duration!("2s"), server_udp_duplex.next())
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("server UDP duplex closed"))?;
+
+    // route 固定到第一个有效来源地址；同 IP 不同端口不能注入同 ID。
+    let attacker = UdpSocket::bind("127.0.0.1:0").await?;
+    let injected_packet: QuicBytesPacket = vec![0x99].into();
+    let injected_frame = encode_udp_frame(&client_udp_duplex.id(), &injected_packet).unwrap();
+    attacker.send_to(&injected_frame, address).await?;
+
+    assert!(
+      timeout(duration!("100ms"), server_udp_duplex.next())
+        .await
+        .is_err(),
+      "packet from a different UDP source must be dropped",
+    );
+
+    // 负向 timeout 之后再用合法来源发 sentinel；如果注入包被误投递，
+    // 它会排在 sentinel 前并让这个正向断言失败。
+    let source_sentinel = vec![0x7a, 0x7b];
+    client_udp_duplex
+      .send(source_sentinel.clone().into())
+      .await?;
+
+    let received_sentinel = timeout(duration!("2s"), server_udp_duplex.next())
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("server UDP duplex closed before source sentinel"))?;
+
+    assert_eq!(&*received_sentinel, &source_sentinel);
+
+    let received_by_client = {
+      let receive = client_udp_duplex.next();
+      tokio::pin!(receive);
+
+      server_udp_duplex.send(server_packet.clone().into()).await?;
+
+      timeout(duration!("2s"), &mut receive)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("client UDP duplex closed"))?
+    };
+
+    assert_eq!(&*received_by_server, &client_packet[..]);
+    assert_eq!(&*received_by_client, &server_packet[..]);
+
+    // Ending one UDP generation must retain the stable MtConnectionsId route.
+    // Keep the old client socket open so the replacement is guaranteed to use
+    // a different source port, matching a real reconnect.
+    let first_client_address = client_udp_duplex.local_addr()?;
+    drop(server_udp_duplex);
+    let mut replacement_client_udp =
+      MtConnectionsSideUdpDuplex::<QuicBytesPacket>::connect_side(address, client_connections.id())
+        .await?;
+    assert_ne!(replacement_client_udp.local_addr()?, first_client_address);
+
+    let replacement_packet = vec![0x42, 0x43, 0x44];
+    replacement_client_udp
+      .send(replacement_packet.clone().into())
+      .await?;
+    let mut replacement_server_udp = timeout(duration!("2s"), server_connections.wait_udp_duplex())
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("replacement server UDP duplex missing"))?;
+    let received_replacement = timeout(duration!("2s"), replacement_server_udp.next())
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("replacement server UDP duplex closed"))?;
+
+    assert_eq!(&*received_replacement, &replacement_packet);
+    assert_eq!(
+      mt_connections_listener.udp_dispatch_count(),
+      1,
+      "UDP generation replacement must retain one stable dispatch route",
+    );
+
+    drop(client_udp_duplex);
+    drop(replacement_server_udp);
+    drop(replacement_client_udp);
+    drop(server_connections);
+    drop(client_connections);
+
+    assert_eq!(
+      mt_connections_listener.udp_dispatch_count(),
+      0,
+      "dropping MtConnections must unregister its UDP route",
+    );
 
     anyhow::Ok(())
   })

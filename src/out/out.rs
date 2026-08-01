@@ -10,7 +10,7 @@ use lowkit::SelfWrapExt;
 use serde::{Deserialize, Serialize};
 use tokio::{
   io::AsyncWriteExt,
-  net::TcpListener,
+  net::{TcpListener, UdpSocket},
   sync::Semaphore,
   task::JoinSet,
   time::{sleep, timeout},
@@ -25,10 +25,12 @@ use crate::{
   },
   out::{OutConfig, build_local_out_dispatchers},
   primitives::OutExits,
-  qomt::{MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, qomt_accept, qomt_connect},
-  quic_connection::{QuicBytesPacket, create_quiche_config},
+  qomt::{
+    MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, QomtPacketStream, qomt_accept, qomt_connect,
+  },
+  quic_connection::{QuicBytesPacket, create_quiche_config, create_udp_quiche_config},
   route::RouteMatch,
-  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStream},
+  udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket},
   utils::{
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
     task::reap_finished_tasks,
@@ -110,7 +112,15 @@ impl Out {
 
       log::info!("OUT peer listener is listening on {listen_address} (advertised as {advertise}).");
 
-      join_set.spawn(this.clone().run_out(tcp_listener));
+      // 使用 TCP 实际绑定地址，保持 TCP/UDP 地址和端口一致。
+      let udp_socket = UdpSocket::bind(listen_address)
+        .await
+        .inspect_err(|error| {
+          log::warn!("error binding UDP listener at {listen_address}: {error}");
+        })
+        .ok();
+
+      join_set.spawn(this.clone().run_out(tcp_listener, udp_socket));
 
       Some(advertise)
     } else {
@@ -135,11 +145,19 @@ impl Out {
     index: usize,
     peer_endpoint: Option<SocketAddr>,
   ) -> anyhow::Result<()> {
-    let mut quiche_config = create_quiche_config(self.context_dir.join(NODE_PEM_FILE_NAME))?;
+    let pem_path = self.context_dir.join(NODE_PEM_FILE_NAME);
+    let mut quiche_config = create_quiche_config(&pem_path)?;
 
     loop {
       async {
-        let qomt_connection = qomt_connect(&mut quiche_config, self.hub_options.address, 1).await?;
+        let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
+        let qomt_connection = qomt_connect(
+          &mut quiche_config,
+          udp_quiche_config,
+          self.hub_options.address,
+          1,
+        )
+        .await?;
 
         log::info!("connection pool slot {index} to HUB established.");
 
@@ -183,8 +201,13 @@ impl Out {
     }
   }
 
-  pub async fn run_out(self: Arc<Self>, tcp_listener: TcpListener) -> anyhow::Result<()> {
-    let mut mt_connections_listener = MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener);
+  pub async fn run_out(
+    self: Arc<Self>,
+    tcp_listener: TcpListener,
+    udp_socket: Option<UdpSocket>,
+  ) -> anyhow::Result<()> {
+    let mut mt_connections_listener =
+      MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener, udp_socket);
     let pending_handshakes = Arc::new(Semaphore::new(MAX_PENDING_QOMT_HANDSHAKES));
     let mut join_set = JoinSet::new();
 
@@ -202,7 +225,10 @@ impl Out {
       join_set.spawn(async move {
         async {
           let mut quiche_config = create_quiche_config(this.context_dir.join(NODE_PEM_FILE_NAME))?;
-          let qomt_connection = qomt_accept(&mut quiche_config, mt_connections).await?;
+          let udp_quiche_config =
+            create_udp_quiche_config(this.context_dir.join(NODE_PEM_FILE_NAME)).ok();
+          let qomt_connection =
+            qomt_accept(&mut quiche_config, udp_quiche_config, mt_connections).await?;
 
           let node_id = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
             let mut stream = qomt_connection
@@ -246,6 +272,7 @@ impl Out {
   }
 
   async fn handle_node(self: Arc<Self>, qomt_connection: QomtConnection) -> anyhow::Result<()> {
+    let qomt_connection = qomt_connection.arc();
     let mut join_set = JoinSet::new();
     let qomt_connection_id = qomt_connection.diagnostic_id();
 
@@ -255,6 +282,7 @@ impl Out {
       };
 
       let this = self.clone();
+      let qomt_connection = qomt_connection.clone();
       let stream_id = stream.id();
       let qomt_connection_id = qomt_connection_id.clone();
 
@@ -278,8 +306,11 @@ impl Out {
               log::debug!(
                 "QOMT {qomt_connection_id} stream {stream_id} received ASSOCIATE: exit={exit}."
               );
-              let packet_stream =
-                UdpPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::new(Box::new(stream));
+              let packet_stream = QomtPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::accept(
+                qomt_connection,
+                stream,
+              )
+              .await?;
               this.relay_udp(exit, Box::new(packet_stream)).await?;
             }
             NodeMessageToOut::Resolve(exit, query) => {
@@ -382,7 +413,7 @@ mod tests {
     node::DefaultLocalExit,
     primitives::{OutExit, OutExitTag, SocketDestination, SocketDestinationHost},
     test::test_dir,
-    udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource, UdpPacketStream},
+    udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource},
   };
 
   #[test]
@@ -455,7 +486,9 @@ mod tests {
       })
       .arc();
       let out_id = out.id;
-      let peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener));
+      let udp_socket = UdpSocket::bind(peer_listener.local_addr()?).await.ok();
+
+      let peer_listener_task = tokio::spawn(out.clone().run_out(peer_listener, udp_socket));
       let target_task = tokio::spawn(async move {
         let (mut stream, _) = target_listener.accept().await?;
         let mut request = [0; 4];
@@ -467,7 +500,10 @@ mod tests {
       });
 
       let mut quiche_config = create_quiche_config(in_dir.join(NODE_PEM_FILE_NAME))?;
-      let qomt_connection = qomt_connect(&mut quiche_config, peer_endpoint, 1).await?;
+      let udp_quiche_config = create_udp_quiche_config(in_dir.join(NODE_PEM_FILE_NAME)).ok();
+      let qomt_connection = qomt_connect(&mut quiche_config, udp_quiche_config, peer_endpoint, 1)
+        .await?
+        .arc();
       let mut hello_stream = qomt_connection.open_stream();
 
       hello_stream
@@ -515,8 +551,11 @@ mod tests {
           &postcard::to_allocvec(&NodeMessageToOut::Associate(OutExit::from("system"))).unwrap(),
         )
         .await?;
-      let mut udp_stream =
-        UdpPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::new(Box::new(stream));
+      let mut udp_stream = QomtPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::connect(
+        qomt_connection.clone(),
+        stream,
+      )
+      .await?;
       let source = UdpPacketSource {
         via: vec![],
         address: "127.0.0.1:12345".parse()?,

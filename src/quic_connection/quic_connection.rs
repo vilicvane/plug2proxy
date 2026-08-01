@@ -1,11 +1,13 @@
 use std::{
   collections::HashMap,
   fmt::Write as _,
+  future::Future,
+  pin::Pin,
   sync::{
     Arc, Mutex,
     atomic::{self, AtomicBool, AtomicU64, AtomicUsize},
   },
-  time::Instant,
+  time::{Duration, Instant},
 };
 
 use colored::Colorize;
@@ -16,13 +18,16 @@ use tokio::{
   io::{AsyncReadExt, AsyncWriteExt, duplex},
   sync::{Notify, mpsc, watch},
   task::JoinSet,
-  time::{Duration, Instant as TokioInstant, MissedTickBehavior, interval_at, sleep, sleep_until},
+  time::{Instant as TokioInstant, MissedTickBehavior, interval_at, sleep, sleep_until},
 };
 
 use crate::{
   constants::SERVER_COMMON_NAME,
   primitives::ConnectionSide,
-  quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket, QuicStream, UNSPECIFIED_SOCKET_ADDRESS},
+  quic_connection::{
+    MAX_DATAGRAM_SIZE, QUIC_DATAGRAM_QUEUE_CAPACITY, QuicBytesPacket, QuicStream,
+    UNSPECIFIED_SOCKET_ADDRESS,
+  },
   utils::task::reap_finished_tasks,
 };
 
@@ -37,6 +42,33 @@ const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // freeze the connection indefinitely. on_timeout() is a no-op when no
 // quiche timer is due, making the extra wakeups cheap.
 const SEND_DONE_BACKSTOP: Duration = Duration::from_secs(1);
+
+/// A structured snapshot of the active QUIC path metrics used by QomT's
+/// packet-path selection. All values come from one `path_stats()` snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuicPathMetrics {
+  pub rtt: Duration,
+  pub min_rtt: Option<Duration>,
+  pub rttvar: Duration,
+  pub dgram_sent: usize,
+  pub dgram_recv: usize,
+  pub dgram_lost: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QuicDatagramSendError {
+  #[error("QUIC DATAGRAM is unavailable on this connection")]
+  Unavailable,
+  #[error("QUIC DATAGRAM is too large: {length} bytes (maximum: {maximum:?})")]
+  TooLarge {
+    length: usize,
+    maximum: Option<usize>,
+  },
+  #[error("QUIC DATAGRAM send queue is full")]
+  QueueFull,
+  #[error("QUIC DATAGRAM send failed: {0}")]
+  Quiche(quiche::Error),
+}
 
 struct StreamSignals {
   recv: Notify,
@@ -140,6 +172,179 @@ impl ConnectionSignals {
 
   fn driver_failed(&self) -> bool {
     self.driver_failed.load(atomic::Ordering::Acquire)
+  }
+}
+
+/// Cloneable connection-level access to QUIC DATAGRAM frames.
+///
+/// Clones share one bounded receive queue. `recv()` therefore distributes
+/// each datagram to exactly one waiting clone, which matches the intended
+/// single QomT connection-level router consumer.
+#[derive(Clone)]
+pub struct QuicDatagramSocket {
+  connection: Arc<Mutex<quiche::Connection>>,
+  connection_signals: Arc<ConnectionSignals>,
+  connection_alive: Arc<AtomicBool>,
+  receiver: flume::Receiver<Vec<u8>>,
+}
+
+impl QuicDatagramSocket {
+  pub fn try_send(&self, datagram: &[u8]) -> Result<(), QuicDatagramSendError> {
+    if !self.is_available() {
+      return Err(QuicDatagramSendError::Unavailable);
+    }
+
+    let (result, maximum) = {
+      let mut connection = self.connection.lock().unwrap();
+      if !self.connection_alive.load(atomic::Ordering::Acquire)
+        || self.connection_signals.state_updater.state() != State::Established
+        || self.connection_signals.transport_closed()
+        || self.connection_signals.driver_failed()
+        || !connection.is_established()
+        || connection.is_draining()
+        || connection.is_closed()
+      {
+        return Err(QuicDatagramSendError::Unavailable);
+      }
+      let maximum = connection.dgram_max_writable_len();
+
+      (connection.dgram_send(datagram), maximum)
+    };
+
+    match result {
+      Ok(()) => {
+        // dgram_send() only queues the frame inside quiche. Wake the driver so
+        // latency does not depend on the send loop's one-second backstop.
+        self.connection_signals.connection_send.notify_one();
+        Ok(())
+      }
+      Err(quiche::Error::Done) => Err(QuicDatagramSendError::QueueFull),
+      Err(quiche::Error::InvalidState) => Err(QuicDatagramSendError::Unavailable),
+      Err(quiche::Error::BufferTooShort) => Err(QuicDatagramSendError::TooLarge {
+        length: datagram.len(),
+        maximum,
+      }),
+      Err(error) => Err(QuicDatagramSendError::Quiche(error)),
+    }
+  }
+
+  pub async fn recv(&self) -> Option<Vec<u8>> {
+    loop {
+      if !self.connection_alive.load(atomic::Ordering::Acquire)
+        || self.connection_signals.transport_closed()
+        || self.connection_signals.driver_failed()
+      {
+        return None;
+      }
+
+      match self.connection_signals.state_updater.state() {
+        State::Initial => {
+          if self
+            .connection_signals
+            .state_updater
+            .wait(State::Established)
+            .await
+            != State::Established
+          {
+            return None;
+          }
+        }
+        State::Established => {
+          return tokio::select! {
+            datagram = self.receiver.recv_async() => datagram.ok(),
+            _ = self.connection_signals.state_updater.wait(State::Draining) => None,
+          };
+        }
+        State::Draining | State::Closed => return None,
+      }
+    }
+  }
+
+  pub fn max_writable_len(&self) -> Option<usize> {
+    if !self.is_available() {
+      return None;
+    }
+
+    let connection = self.connection.lock().unwrap();
+    if !self.connection_alive.load(atomic::Ordering::Acquire)
+      || self.connection_signals.state_updater.state() != State::Established
+      || self.connection_signals.transport_closed()
+      || self.connection_signals.driver_failed()
+      || !connection.is_established()
+      || connection.is_draining()
+      || connection.is_closed()
+    {
+      return None;
+    }
+
+    connection.dgram_max_writable_len()
+  }
+
+  pub fn path_metrics(&self) -> Option<QuicPathMetrics> {
+    if !self.is_available() {
+      return None;
+    }
+
+    let connection = self.connection.lock().unwrap();
+    if !self.connection_alive.load(atomic::Ordering::Acquire)
+      || self.connection_signals.state_updater.state() != State::Established
+      || self.connection_signals.transport_closed()
+      || self.connection_signals.driver_failed()
+      || !connection.is_established()
+      || connection.is_draining()
+      || connection.is_closed()
+    {
+      return None;
+    }
+    let path = connection
+      .path_stats()
+      .find(|path| path.active)
+      .or_else(|| connection.path_stats().next())?;
+
+    Some(QuicPathMetrics {
+      rtt: path.rtt,
+      min_rtt: path.min_rtt,
+      rttvar: path.rttvar,
+      dgram_sent: path.dgram_sent,
+      dgram_recv: path.dgram_recv,
+      dgram_lost: path.dgram_lost,
+    })
+  }
+
+  fn is_available(&self) -> bool {
+    self.connection_alive.load(atomic::Ordering::Acquire)
+      && self.connection_signals.state_updater.state() == State::Established
+      && !self.connection_signals.transport_closed()
+      && !self.connection_signals.driver_failed()
+  }
+}
+
+fn drain_received_datagrams(
+  connection: &mut quiche::Connection,
+  sender: &flume::Sender<Vec<u8>>,
+  side: ConnectionSide,
+) {
+  loop {
+    let datagram = match connection.dgram_recv_buf() {
+      Ok(datagram) => datagram,
+      Err(quiche::Error::Done) => break,
+      Err(error) => {
+        log::warn!("{side}: error receiving QUIC DATAGRAM: {error}");
+        break;
+      }
+    };
+
+    match sender.try_send(datagram) {
+      Ok(()) => {}
+      Err(flume::TrySendError::Full(_)) => {
+        // DATAGRAM delivery is deliberately lossy; never block the underlying
+        // QUIC recv driver behind an application consumer.
+        log::trace!("{side}: dropping QUIC DATAGRAM because wrapper queue is full");
+      }
+      Err(flume::TrySendError::Disconnected(_)) => {
+        log::trace!("{side}: dropping QUIC DATAGRAM because receiver is gone");
+      }
+    }
   }
 }
 
@@ -283,6 +488,7 @@ pub struct QuicConnection {
   connection_signals: Arc<ConnectionSignals>,
   create_stream: Arc<dyn Fn(ConnectionSide, u64) -> QuicStream + Send + Sync>,
   stream_receiver: tokio::sync::Mutex<mpsc::UnboundedReceiver<QuicStream>>,
+  datagram_socket: QuicDatagramSocket,
   _join_set: JoinSet<()>,
 }
 
@@ -330,6 +536,7 @@ impl QuicConnection {
       connection,
       connection_id.clone(),
       ConnectionSide::Client,
+      None,
       underlying_sink,
       underlying_stream,
     )
@@ -365,6 +572,50 @@ impl QuicConnection {
     TSink::Error: std::fmt::Display,
     TStream: Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
   {
+    Self::accept_with_optional_first_packet_and_sink_and_stream(
+      connection_id,
+      quiche_config,
+      None,
+      underlying_sink,
+      underlying_stream,
+    )
+  }
+
+  /// 同 [`accept`]，但预置一个已从底层流读出的包
+  /// （如应用层为解析连接 ID 而读走的首包），recv 循环先处理它再继续。
+  pub fn accept_with_first_packet<TStream>(
+    connection_id: &quiche::ConnectionId<'static>,
+    quiche_config: &mut quiche::Config,
+    first_packet: QuicBytesPacket,
+    underlying_stream: TStream,
+  ) -> Self
+  where
+    TStream: Sink<QuicBytesPacket> + Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
+    TStream::Error: std::fmt::Display,
+  {
+    let (underlying_sink, underlying_stream) = underlying_stream.split();
+
+    Self::accept_with_optional_first_packet_and_sink_and_stream(
+      connection_id,
+      quiche_config,
+      Some(first_packet),
+      underlying_sink,
+      underlying_stream,
+    )
+  }
+
+  fn accept_with_optional_first_packet_and_sink_and_stream<TSink, TStream>(
+    connection_id: &quiche::ConnectionId<'static>,
+    quiche_config: &mut quiche::Config,
+    first_packet: Option<QuicBytesPacket>,
+    underlying_sink: TSink,
+    underlying_stream: TStream,
+  ) -> Self
+  where
+    TSink: Sink<QuicBytesPacket> + Unpin + Send + 'static,
+    TSink::Error: std::fmt::Display,
+    TStream: Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
+  {
     let connection = quiche::accept(
       connection_id,
       None,
@@ -378,6 +629,7 @@ impl QuicConnection {
       connection,
       connection_id.clone(),
       ConnectionSide::Server,
+      first_packet,
       underlying_sink,
       underlying_stream,
     )
@@ -387,6 +639,7 @@ impl QuicConnection {
     connection: quiche::Connection,
     id: quiche::ConnectionId<'static>,
     side: ConnectionSide,
+    first_packet: Option<QuicBytesPacket>,
     mut underlying_sink: TSink,
     mut underlying_stream: TStream,
   ) -> Self
@@ -401,6 +654,14 @@ impl QuicConnection {
     let diagnostic_connection_id = format_connection_id(&id);
 
     let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
+    let (datagram_sender, datagram_receiver) = flume::bounded(QUIC_DATAGRAM_QUEUE_CAPACITY);
+    let connection_alive = Arc::new(AtomicBool::new(true));
+    let datagram_socket = QuicDatagramSocket {
+      connection: connection.clone(),
+      connection_signals: connection_signals.clone(),
+      connection_alive,
+      receiver: datagram_receiver,
+    };
 
     let create_stream = {
       let connection = connection.clone();
@@ -709,6 +970,7 @@ impl QuicConnection {
       create_stream: create_stream.clone(),
       next_stream_id_index: AtomicU64::new(0),
       stream_receiver: stream_receiver.tokio_mutex(),
+      datagram_socket,
       _join_set: {
         let send_loop = {
           let connection = connection.clone();
@@ -824,17 +1086,24 @@ impl QuicConnection {
             let mut packet_count = 0;
             let mut byte_count = 0;
 
-            'recv_loop: loop {
-              let mut packet = tokio::select! {
-                packet = underlying_stream.next() => {
-                  let Some(packet) = packet else {
-                    connection_signals.mark_transport_closed();
-                    break;
-                  };
+            // 预置首包（应用层为解析连接 ID 读走的包）先处理，再进入循环。
+            let mut pending_first_packet = first_packet;
 
-                  packet
+            'recv_loop: loop {
+              let mut packet = if let Some(first_packet) = pending_first_packet.take() {
+                first_packet
+              } else {
+                tokio::select! {
+                  packet = underlying_stream.next() => {
+                    let Some(packet) = packet else {
+                      connection_signals.mark_transport_closed();
+                      break;
+                    };
+
+                    packet
+                  }
+                  _ = state_updater.wait(State::Closed) => break,
                 }
-                _ = state_updater.wait(State::Closed) => break,
               };
 
               packet_count += 1;
@@ -856,6 +1125,7 @@ impl QuicConnection {
                 let result = connection.recv(&mut packet, receive_info);
 
                 state_updater.update(&connection);
+                drain_received_datagrams(&mut connection, &datagram_sender, side);
 
                 result
               };
@@ -1076,6 +1346,46 @@ impl QuicConnection {
     )
   }
 
+  pub fn datagram_socket(&self) -> QuicDatagramSocket {
+    self.datagram_socket.clone()
+  }
+
+  /// Ask quiche to emit an ack-eliciting packet on the active path.
+  ///
+  /// quiche turns this into a PING only when the next packet would otherwise
+  /// contain no ack-eliciting frame. This is used by the UDP QomT branch as a
+  /// transport-native keepalive: if the peer stops acknowledging packets,
+  /// quiche's idle timer is what eventually moves the connection to a
+  /// terminal state.
+  pub fn send_ack_eliciting(&self) -> quiche::Result<()> {
+    if self.state_updater.state() != State::Established
+      || self.connection_signals.transport_closed()
+      || self.connection_signals.driver_failed()
+    {
+      return Err(quiche::Error::InvalidState);
+    }
+
+    self.connection.lock().unwrap().send_ack_eliciting()?;
+    self.connection_signals.connection_send.notify_one();
+
+    Ok(())
+  }
+
+  /// Wait until quiche has fully classified the connection as closed.
+  pub async fn wait_closed(&self) {
+    self.state_updater.wait(State::Closed).await;
+  }
+
+  /// An owned close signal for tasks whose lifetime must be bounded by this
+  /// QUIC connection without retaining the [`QuicConnection`] owner itself.
+  pub(crate) fn closed_future(&self) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    let state_updater = self.state_updater.clone();
+
+    Box::pin(async move {
+      state_updater.wait(State::Closed).await;
+    })
+  }
+
   pub async fn accept_stream(&self) -> Result<Option<QuicStream>, QuicConnectionError> {
     let mut stream_receiver = self.stream_receiver.lock().await;
 
@@ -1127,6 +1437,23 @@ impl QuicConnection {
     } else {
       Ok(ok)
     }
+  }
+}
+
+impl Drop for QuicConnection {
+  fn drop(&mut self) {
+    // Close the owner gate before joining any in-flight DATAGRAM operation,
+    // so new socket calls cannot keep joining the mutex waiters while Drop is
+    // trying to quiesce the connection.
+    self
+      .datagram_socket
+      .connection_alive
+      .store(false, atomic::Ordering::Release);
+    let _connection = self
+      .connection
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    self.state_updater.set(State::Closed);
   }
 }
 

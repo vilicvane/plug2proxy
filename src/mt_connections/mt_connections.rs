@@ -2,7 +2,7 @@ use std::{
   net::SocketAddr,
   pin::Pin,
   sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{self, AtomicU64, AtomicUsize},
   },
   task::{Context, Poll},
@@ -10,19 +10,22 @@ use std::{
 };
 
 use futures::{Sink, Stream};
-use lowkit::{SelfWrapExt, TurnArcWeak, tokio_join_set};
+use lowkit::{DropCallback, SelfWrapExt, TurnArcWeak, tokio_join_set};
 use serde::{Deserialize, Serialize};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::{
   io::{AsyncRead, AsyncWrite},
   net::TcpStream,
-  sync::mpsc,
+  sync::{Notify, mpsc},
   task::JoinSet,
   time::{Instant as TokioInstant, MissedTickBehavior, interval_at, timeout},
 };
 use uuid::{Uuid, serde::compact};
 
+use super::mt_connections_side_udp::{MtConnectionsSideUdpDuplex, MtConnectionsUdpPacket};
 use crate::{primitives::ConnectionSide, utils::task::reap_finished_tasks};
+
+type UdpDispatchRegistration = DropCallback<Box<dyn Fn() + Send>>;
 
 pub const MT_CONNECTIONS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MT_CONNECTIONS_PACKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -144,11 +147,64 @@ pub struct MtConnections<TPacket>
 where
   TPacket: 'static,
 {
+  id: MtConnectionsId,
   peer_address: SocketAddr,
   packet_sink: flume::r#async::SendSink<'static, TPacket>,
   packet_stream: flume::r#async::RecvStream<'static, TPacket>,
   connection_count: Arc<AtomicUsize>,
+  udp_duplex: Arc<UdpDuplexSlot<TPacket>>,
+  _udp_registration: Option<UdpDispatchRegistration>,
   join_set: JoinSet<()>,
+}
+
+/// UDP 侧双工通道的共享槽位：duplex 由 connect 侧建立、listener 侧分发
+/// 循环写入；qomt 通过 `wait`/`take` 取出。独立于 MtConnections 存活，
+/// 以便 MtConnections 被 move 进 QUIC 连接后仍可等待/取出。
+pub struct UdpDuplexSlot<TPacket>
+where
+  TPacket: 'static,
+{
+  duplex: Mutex<Option<MtConnectionsSideUdpDuplex<TPacket>>>,
+  notify: Notify,
+}
+
+impl<TPacket> UdpDuplexSlot<TPacket> {
+  fn new() -> Self {
+    Self {
+      duplex: Mutex::new(None),
+      notify: Notify::new(),
+    }
+  }
+}
+
+impl<TPacket> UdpDuplexSlot<TPacket>
+where
+  TPacket: MtConnectionsUdpPacket,
+{
+  pub(crate) fn set(&self, duplex: MtConnectionsSideUdpDuplex<TPacket>) {
+    *self.duplex.lock().unwrap() = Some(duplex);
+    self.notify.notify_one();
+  }
+
+  pub(crate) fn take(&self) -> Option<MtConnectionsSideUdpDuplex<TPacket>> {
+    self.duplex.lock().unwrap().take()
+  }
+
+  /// 等待 duplex 就绪（listener 侧由分发循环在首包到达时创建，可能在
+  /// accept 返回之后；connect 侧通常在返回前已就绪）。无超时，由调用方
+  /// 包 `timeout`；已就绪时立即返回。
+  pub(crate) async fn wait(&self) -> Option<MtConnectionsSideUdpDuplex<TPacket>> {
+    loop {
+      let notified = self.notify.notified();
+      tokio::pin!(notified);
+
+      if let Some(duplex) = self.take() {
+        return Some(duplex);
+      }
+
+      notified.await;
+    }
+  }
 }
 
 impl<TPacket> MtConnections<TPacket>
@@ -158,6 +214,7 @@ where
   pub fn new(
     initial_tcp_stream: TcpStream,
     side: ConnectionSide,
+    id: MtConnectionsId,
   ) -> (
     Self,
     mpsc::UnboundedSender<TcpStream>,
@@ -309,10 +366,13 @@ where
     };
 
     let mt_connections = Self {
+      id,
       peer_address,
       packet_sink: external_packet_sender.into_sink(),
       packet_stream: external_packet_receiver.into_stream(),
       connection_count: connection_count.clone(),
+      udp_duplex: Arc::new(UdpDuplexSlot::new()),
+      _udp_registration: None,
       join_set: tokio_join_set!(manager, diagnostics_loop),
     };
 
@@ -323,12 +383,55 @@ where
     self.peer_address
   }
 
+  pub fn id(&self) -> MtConnectionsId {
+    self.id
+  }
+
   pub fn spawn(&mut self, task: impl Future<Output = ()> + Send + 'static) {
     self.join_set.spawn(task);
   }
 
   pub fn connection_count(&self) -> usize {
     self.connection_count.load(atomic::Ordering::Relaxed)
+  }
+
+  pub(crate) fn set_udp_registration(&mut self, registration: UdpDispatchRegistration) {
+    assert!(
+      self._udp_registration.replace(registration).is_none(),
+      "UDP dispatch registration may only be installed once",
+    );
+  }
+}
+
+impl<TPacket> MtConnections<TPacket>
+where
+  TPacket: MtConnectionsPacket + MtConnectionsUdpPacket,
+{
+  /// 设置 UDP 侧双工通道（connect 侧建立后、listener 侧分发到达后调用）。
+  pub fn set_udp_duplex(&self, udp_duplex: MtConnectionsSideUdpDuplex<TPacket>) {
+    self.udp_duplex.set(udp_duplex);
+  }
+
+  /// 取出 UDP 侧双工通道，供上层（qomt）创建并行的 QUIC connection over UDP。
+  ///
+  /// UDP 通道建立失败（如本地 bind 失败）时为 `None`，上层静默缺席。
+  pub fn take_udp_duplex(&self) -> Option<MtConnectionsSideUdpDuplex<TPacket>> {
+    self.udp_duplex.take()
+  }
+
+  /// 等待 UDP 侧双工通道就绪（listener 侧由分发循环在首包到达时创建，
+  /// 可能在 accept 返回之后；connect 侧通常在返回前已就绪）。
+  ///
+  /// 无超时：由调用方包 `timeout`。通道已就绪时立即返回。
+  pub async fn wait_udp_duplex(&self) -> Option<MtConnectionsSideUdpDuplex<TPacket>> {
+    self.udp_duplex.wait().await
+  }
+
+  /// 共享的 UDP duplex 槽位（listener 侧登记用）：listener 分发循环可
+  /// 在 accept 之后把到达的 UDP 通道写入该槽位，由本侧 wait/take 取出。
+  /// 独立于 MtConnections 存活：本实例被 move 进 QUIC 连接后仍可用。
+  pub(crate) fn udp_duplex_slot(&self) -> Arc<UdpDuplexSlot<TPacket>> {
+    self.udp_duplex.clone()
   }
 }
 
@@ -384,6 +487,14 @@ pub struct MtConnectionsId(#[serde(with = "compact")] Uuid);
 impl MtConnectionsId {
   pub fn new() -> Self {
     Self(Uuid::new_v4())
+  }
+
+  pub fn as_bytes(&self) -> &[u8; 16] {
+    self.0.as_bytes()
+  }
+
+  pub fn from_bytes(bytes: [u8; 16]) -> Self {
+    Self(Uuid::from_bytes(bytes))
   }
 }
 
