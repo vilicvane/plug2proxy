@@ -24,6 +24,41 @@ OUT 可以只连接 HUB，由 HUB 中继数据；也可以公布 peer listener�
 协调 IN 与 OUT 建立直连。可用的 peer 路径优先，失效时仍可使用 HUB
 relay。
 
+## QomT 是什么
+
+QomT 是 Plug2Proxy 的节点间逐跳传输层。它保留一条可靠的 QUIC over mTCP
+主路径，并在同一个逻辑连接上维护一条可选的 QUIC over UDP 旁路：
+
+```text
+QomtConnection
+├── main QUIC over parallel TCP ── stream、可靠包与 fallback
+└── optional QUIC over UDP ─────── connection-level DATAGRAM 旁路
+```
+
+这里的 mTCP 是一组并行 TCP 连接；QUIC 的连接、流和拥塞状态机运行在这组
+连接之上。`QomtStream` 始终是主路径上的可靠字节流。packet stream 从使用
+者角度是一条可靠 stream 加一条共享的 UDP DATAGRAM 路径；UDP QUIC
+连接由 `QomtConnection` 统一维护，并不是每条 packet stream 各自持有第二
+条完整连接。
+
+可靠包始终走主路径。best-effort 包会根据包大小和两条路径观测到的 RTT
+选择 UDP 旁路；旁路尚未建立、已经断开或容纳不下当前包时，会回退到可靠
+主路径。UDP DATAGRAM 的应用载荷上限由当前 QUIC 开销动态决定，通常略低于
+1.4 KiB，当前不在旁路内分片，也不会自适应更小的路径 MTU。
+
+DATAGRAM 本身不保证交付，也不会因网络丢包自动在主路径重放。旁路发送
+队列或 reliable fallback 队列已满时，发送端也会按 best-effort 语义主动
+丢弃。
+
+UDP 旁路是增强路径，不决定整个 QomT 连接是否可用。它独立握手、发送
+keepalive，并等待 quiche 判定当前 QUIC 连接关闭后，以新的连接代次和退避
+重新建立；这期间 stream 和 fallback 仍使用 mTCP 主路径。
+
+部署时，HUB 以及提供 peer 直连的 OUT 必须在同一个监听端口同时放行 TCP
+和 UDP。发起连接的一侧通常只需要允许出站 UDP 及其有状态回包。只放行
+TCP 时主路径仍能工作，但不会获得 UDP 旁路。具体端口和 NAT 要求见
+[推荐配置教程](docs/configuration.md#端口与防火墙)。
+
 ## 有什么特点
 
 - **一套进程，三种角色**：`in`、`hub`、`out` 使用同一个二进制和
@@ -43,9 +78,9 @@ relay。
 - **SOCKS5 TCP 与 UDP**：IN 可以直接作为 SOCKS5 代理，也可以接在
   sing-box TUN 等透明代理入口之后。
 
-- **QomT 传输**：项目使用 quiche，让 QUIC 的连接和多路流状态机运行在
-  一组并行 TCP 连接之上。Linux 上还会尝试为底层 TCP socket 启用 BBR，
-  主要用于探索高延迟、受限网络下的实际表现。
+- **QomT 传输**：可靠的 QUIC over mTCP 主路径与可选的 QUIC over UDP
+  DATAGRAM 旁路并行工作。Linux 上还会尝试为主路径的底层 TCP socket
+  启用 BBR，主要用于探索高延迟、受限网络下的实际表现。
 
 - **节点间双向认证**：HUB 持有私有 CA，为每个 IN 和 OUT 签发独立节点
   证书；HUB relay 和 peer 直连使用同一套信任关系。

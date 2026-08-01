@@ -1,7 +1,7 @@
 # Plug2Proxy 推荐配置教程
 
 本文只介绍 Plug2Proxy 本身，不涉及透明代理、Tailscale 或具体云厂商的
-防火墙配置。完成后的推荐拓扑是：
+防火墙操作界面，但会列出节点间必须放行的端口。完成后的推荐拓扑是：
 
 ```text
                  ┌── peer data ─────────────→ US OUT ─→ 默认非 CN 流量
@@ -28,8 +28,8 @@ HUB 集中保存非 fallback 路由并下发给 IN。IN 只配置入口和 HUB �
 - 一台 HUB、一台 IN、一台 US OUT 和一台 HK OUT；
 - 四台机器使用同一份代码和 lockfile 构建的 `plug2proxy`；
 - 每台机器的工作目录均为 `/etc/plug2proxy`；
-- HUB 的 TCP `1122` 可被 IN 和两个 OUT 访问；
-- US OUT 的 TCP `2233` 可被 IN 直接访问；
+- HUB 的 TCP 和 UDP `1122` 可被 IN 和两个 OUT 访问；
+- US OUT 的 TCP 和 UDP `2233` 可被 IN 直接访问；
 - 将示例保留地址 `203.0.113.10` 替换为 HUB 的实际 IP。当前
   `hub.address` 只接受 socket address，不接受域名；IPv6 必须写成
   `[address]:port`。
@@ -47,6 +47,38 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 这会保留 Plug2Proxy 的连接与路由诊断，同时避免依赖库的 debug 日志刷屏。
 SOCKS5 暂无认证，监听到局域网地址时必须用防火墙限制访问范围。
 
+### 端口与防火墙
+
+QomT 在一个 listener 上同时使用 TCP 主路径和 UDP QUIC 旁路。所有
+`listen` 都必须显式包含非零端口；配置成 `:0` 会在读取配置时被拒绝。
+允许省略 listener 的角色（例如只使用 HUB relay 的 OUT）不受影响。
+
+本教程需要的入站规则如下：
+
+| 节点 | 示例 listener | 需要放行的入站流量 |
+| --- | --- | --- |
+| HUB | `0.0.0.0:1122` | 来自 IN 和 OUT 的 TCP、UDP `1122` |
+| 提供 peer 直连的 US OUT | `0.0.0.0:2233` | 来自 IN 的 TCP、UDP `2233` |
+| 只使用 relay 的 HK OUT | 无 | 不需要 QomT 入站端口 |
+| IN 的 SOCKS5 | `0.0.0.0:1080` | 仅来自受信客户端的 TCP、UDP `1080` |
+| 可选 DNS listener | 配置值 | 仅来自实际 DNS 客户端的 TCP、UDP |
+
+HK OUT 没有 listener 只表示它不接受 peer 入站；它仍会主动连接 HUB 的
+TCP、UDP `1122`。HUB relay 的 IN→HUB 与 HUB→OUT 是两个独立的 QomT
+hop，UDP 旁路也分别建立和选择。
+
+云平台防火墙或安全组与机器自身的 nftables/iptables/firewalld 都要检查。
+发起 QomT 连接的一侧使用临时本地 UDP 端口；普通有状态防火墙不需要为该
+临时端口另加入站规则，但出站策略必须允许访问对端 listener 的 UDP 端口。
+
+经过 NAT 或端口映射时，外部 endpoint 的同一个端口必须同时转发 TCP 和
+UDP，并最终到达同一个本地 `listen`。`advertise` 应填写 IN 实际能够访问
+的外部 endpoint。listener 会用已经建立 mTCP 的 TCP peer IP 校验 UDP
+来源，因此两种协议还必须从相同公网 IP 到达；不要让 TCP 代理和 UDP NAT
+使用不同出口。UDP 重连时客户端源端口可以改变，防火墙规则不应依赖固定的
+客户端源端口。若只放行或映射 TCP，QomT 主路径仍可建立，UDP 旁路则会
+不可用并回退到主路径。
+
 ## 1. 配置并启动 HUB
 
 在 HUB 创建 `/etc/plug2proxy/config.json`：
@@ -54,6 +86,7 @@ SOCKS5 暂无认证，监听到局域网地址时必须用防火墙限制访问�
 ```jsonc
 {
   "type": "hub",
+  // 此 endpoint 同时监听 TCP 和 UDP。
   "listen": "0.0.0.0:1122",
 
   // HUB 也可以同时作为入口。只需协调时可删除 inbounds。
@@ -188,10 +221,11 @@ out-us/node.pem  → US OUT: /etc/plug2proxy/node.pem
 out-hk/node.pem  → HK OUT: /etc/plug2proxy/node.pem
 ```
 
-每个节点只使用自己的 `node.pem`。文件包含节点私钥，应仅对运行
-Plug2Proxy 的用户可读：
+每个节点只使用自己的 `node.pem`。文件包含节点私钥，应归实际运行
+Plug2Proxy 的用户所有，并仅允许该用户读取。以 `plug2proxy` 用户运行为例：
 
 ```bash
+chown plug2proxy:plug2proxy /etc/plug2proxy/node.pem
 chmod 0600 /etc/plug2proxy/node.pem
 ```
 
@@ -208,6 +242,7 @@ chmod 0600 /etc/plug2proxy/node.pem
   },
 
   // OUT 声明可接受 IN 的 peer 连接。
+  // 此 endpoint 同时监听 TCP 和 UDP。
   "listen": "0.0.0.0:2233",
 
   "exits": [
@@ -236,6 +271,7 @@ IN 直接访问的情况。
 ```
 
 `advertise` 只有存在 `listen` 时才允许配置，且端口不能是 `0`。
+上述映射必须把外部 TCP、UDP `443` 都转发到本机 TCP、UDP `2233`。
 
 启动 US OUT：
 
@@ -246,6 +282,9 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 
 peer 连接成功后，IN 对 `us` 的请求会优先选择
 `qomt(priority=PeerProvider, ...)`。无需再配置一个数值 priority。
+
+这里 OUT 的 `hub.connections: 4` 表示到 HUB 的一个 QomT connection 由
+四条 mTCP path 承载。它与 IN 使用相同语义，不会建立四个独立 QomT。
 
 ## 4. 配置只使用 HUB relay 的 HK OUT
 
@@ -268,7 +307,7 @@ peer 连接成功后，IN 对 `us` 的请求会优先选择
 ```
 
 该配置没有 `listen`，因此 HUB 不会向 IN 下发 HK peer endpoint。
-`hk` 流量通过现有 OUT→HUB 连接池 relay。
+`hk` 流量通过现有 OUT→HUB QomT connection relay。
 
 启动 HK OUT：
 
@@ -302,6 +341,9 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 非 fallback 路由快照。IN 自身始终保留一个私有 `DIRECT`，HUB 不需要把
 自己的 local exit 下发给 IN。
 
+IN 的 `hub.connections: 4` 表示一个 QomT connection 下的四条 mTCP
+path；IN 建立 peer connection 时也使用这个 path 数。
+
 `sniff` 默认为 `true`，推荐显式保留：
 
 - SOCKS5 请求带域名时，Plug2Proxy 直接用域名路由；
@@ -321,7 +363,7 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 ```
 
 推荐启动顺序是 HUB、两个 OUT、最后 IN。某个 OUT 重启后，给 peer 和
-relay 连接池留出数秒重新注册时间。
+relay connection 留出数秒重新注册时间。
 
 ## 6. 验证
 
@@ -347,6 +389,29 @@ curl --max-time 30 --proxy socks5h://192.0.2.10:1080 \
 journalctl -f -u plug2proxy
 ```
 
+在 HUB 和提供 peer 直连的 OUT 上，还应分别确认 TCP、UDP socket 都监听在
+配置的同一个端口：
+
+```bash
+sudo ss -lntp
+sudo ss -lnup
+```
+
+还要检查日志中没有 `error binding UDP listener` 或
+`disabling QomT UDP listener`。UDP 旁路建立后，连接发起侧会记录
+`QomT UDP generation ... established`，接收侧会记录对应的 accepted
+generation；这证明旁路已经就绪，但不能证明某次业务数据使用了它。需要
+严格确认实际数据路径时，应在驱动测试流量的同时，对照时间和包量抓取
+listener 对应端口的 UDP 包，例如：
+
+```bash
+sudo timeout 15s tcpdump -ni any 'udp port 1122 or udp port 2233'
+```
+
+应用层 UDP 或 HTTP/3 请求成功只能证明 SOCKS5 UDP 转发可用，不能单独
+证明 QomT UDP 旁路承载了该次数据。generation 日志用于确认旁路就绪；要
+判断该次数据是否使用旁路，应关联测试时段的抓包。
+
 成功时，IN 日志应分别出现：
 
 ```text
@@ -362,7 +427,7 @@ www.taobao.com:443 -> DIRECT via local(default)
 
 1. 检查 OUT 的 tag 与 HUB 路由中的 exit 是否完全一致；
 2. 检查 OUT 是否已向 HUB 注册；
-3. OUT 或 HUB 刚重启时，先等待连接池和完整快照恢复；
+3. OUT 或 HUB 刚重启时，先等待 QomT connection 和完整快照恢复；
 4. 确认四机使用相同版本。
 
 ## 7. Exit 与路由速查
@@ -406,8 +471,9 @@ www.taobao.com:443 -> DIRECT via local(default)
 `DIRECT`。绑定 interface 的 exit 只作为 provider，不会成为 `DIRECT`。
 同一 OUT 最多配置一个没有 bind 限制的 local exit。
 
-Linux 上 Plug2Proxy 会为 QomT 的底层 mTCP socket 尝试启用 BBR。部署前
-可确认：
+Linux 上 Plug2Proxy 会为 QomT 主路径的底层 mTCP socket 尝试启用 BBR；
+UDP 旁路使用 quiche 自身的 pacing 与拥塞控制。BBR 是推荐优化，不是启动
+前置条件。部署前可确认：
 
 ```bash
 sysctl net.ipv4.tcp_available_congestion_control

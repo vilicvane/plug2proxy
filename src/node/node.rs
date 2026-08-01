@@ -905,7 +905,7 @@ pub enum NodeHello {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NodeHelloOut {
-  /// Stable provider identity shared by every HUB connection pool slot.
+  /// Stable provider identity retained across HUB reconnect generations.
   pub id: NodeId,
   pub exits: OutExits,
   /// Endpoint advertised for an optional HUB-coordinated peer path.

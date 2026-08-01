@@ -70,7 +70,7 @@ pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche
   config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
   // QomT is carried by TCP, whose kernel congestion control already paces
   // writes. QUIC pacing here would throttle the same bytes a second time and
-  // prevent independent TCP-backed QUIC connections from filling their paths.
+  // prevent the main QomT connection from filling its parallel mTCP paths.
   config.enable_pacing(false);
 
   Ok(config)

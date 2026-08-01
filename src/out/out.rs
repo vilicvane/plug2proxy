@@ -102,7 +102,6 @@ impl Out {
 
   pub async fn run(self) -> anyhow::Result<()> {
     let this = self.arc();
-    let connection_count = this.hub_options.connections.max(1);
     let mut join_set = JoinSet::new();
 
     let peer_endpoint = if let Some(listen) = this.listen {
@@ -127,22 +126,17 @@ impl Out {
       None
     };
 
-    for index in 0..connection_count {
-      let this = this.clone();
-
-      join_set.spawn(async move { this.run_hub_connection(index, peer_endpoint).await });
-    }
+    join_set.spawn(this.clone().run_hub_connection(peer_endpoint));
 
     while let Some(result) = join_set.join_next().await {
       result??;
     }
 
-    anyhow::bail!("all OUT connection pool tasks stopped")
+    anyhow::bail!("all OUT tasks stopped")
   }
 
   async fn run_hub_connection(
     self: Arc<Self>,
-    index: usize,
     peer_endpoint: Option<SocketAddr>,
   ) -> anyhow::Result<()> {
     let pem_path = self.context_dir.join(NODE_PEM_FILE_NAME);
@@ -155,11 +149,11 @@ impl Out {
           &mut quiche_config,
           udp_quiche_config,
           self.hub_options.address,
-          1,
+          self.hub_options.connections.max(1),
         )
         .await?;
 
-        log::info!("connection pool slot {index} to HUB established.");
+        log::info!("connection to HUB established.");
 
         let hub_id = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
           let mut stream = qomt_connection.open_stream();
@@ -183,17 +177,17 @@ impl Out {
         .await
         .context("timed out waiting for HUB hello acknowledgement")??;
 
-        log::info!("connection pool slot {index} registered with HUB {hub_id}.");
+        log::info!("connection registered with HUB {hub_id}.");
 
         self.clone().handle_node(qomt_connection).await?;
 
-        log::info!("connection pool slot {index} to HUB closed.");
+        log::info!("connection to HUB closed.");
 
         anyhow::Ok(())
       }
       .await
       .inspect_err(|error| {
-        log::error!("HUB connection pool slot {index} error: {error}");
+        log::error!("HUB connection error: {error}");
       })
       .ok();
 
@@ -398,6 +392,8 @@ pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::Ordering;
+
   use futures::{SinkExt, StreamExt};
   use lits::duration;
   use lowkit::SelfWrapExt;
@@ -451,6 +447,95 @@ mod tests {
     let address = advertised_peer_endpoint("127.0.0.1:49152".parse().unwrap(), None);
 
     assert_eq!(address, "0.0.0.0:49152".parse().unwrap());
+  }
+
+  #[tokio::test]
+  async fn hub_connections_are_mtcp_paths_in_one_qomt_connection() -> anyhow::Result<()> {
+    timeout(duration!("15s"), async {
+      const EXPECTED_PATHS: usize = 4;
+
+      let test_dir = test_dir().join(format!("out_mtcp_paths_{}", uuid::Uuid::new_v4()));
+      let hub_dir = test_dir.join("hub");
+      let out_dir = test_dir.join("out");
+
+      generate_ca_pem_file(&test_dir).await?;
+      generate_node_pem_file(&test_dir, "hub", true).await?;
+      generate_node_pem_file(&test_dir, "out", true).await?;
+
+      let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+      let hub_address = tcp_listener.local_addr()?;
+      let mut mt_connections_listener =
+        MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener, None);
+
+      let out = Out::new(OutOptions {
+        local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+          DefaultLocalExit::Advertised {
+            tags: vec![OutExitTag::from("system")],
+          },
+        )],
+        listen: None,
+        advertise: None,
+        hub: OutHubOptions {
+          address: hub_address,
+          connections: EXPECTED_PATHS,
+        },
+        context_dir: out_dir,
+      });
+      let out_id = out.id;
+
+      let mut tasks = JoinSet::new();
+      tasks.spawn(out.run());
+
+      let mt_connections = mt_connections_listener.accept().await?;
+      let connection_count = mt_connections.connection_count_observer();
+      let mut hub_quiche_config = create_quiche_config(hub_dir.join(NODE_PEM_FILE_NAME))?;
+      let qomt_connection = qomt_accept(&mut hub_quiche_config, None, mt_connections).await?;
+
+      // `accept()` consumes Extend requests internally and returns only for a
+      // new mTCP group. The configured paths must therefore join this group
+      // without producing a second QomT connection.
+      let mut next_group = Box::pin(mt_connections_listener.accept());
+      timeout(duration!("5s"), async {
+        loop {
+          if connection_count.load(Ordering::Acquire) == EXPECTED_PATHS {
+            break anyhow::Ok(());
+          }
+
+          tokio::select! {
+            result = &mut next_group => {
+              result?;
+              anyhow::bail!("OUT opened a second QomT connection instead of extending mTCP");
+            }
+            _ = sleep(duration!("10ms")) => {}
+          }
+        }
+      })
+      .await
+      .map_err(|_| anyhow::anyhow!("timed out waiting for {EXPECTED_PATHS} mTCP paths"))??;
+
+      drop(next_group);
+
+      let mut hello_stream = qomt_connection
+        .accept_stream()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing OUT hello stream"))?;
+      let NodeHello::Out(hello) = postcard_read_stream_to_end(&mut hello_stream).await? else {
+        anyhow::bail!("expected OUT hello");
+      };
+      assert_eq!(hello.id, out_id);
+
+      hello_stream
+        .write_all(&postcard::to_allocvec(&NodeHelloAck(NodeId::new())).unwrap())
+        .await?;
+      hello_stream.shutdown().await?;
+
+      drop(tasks);
+
+      anyhow::Ok(())
+    })
+    .await??;
+
+    Ok(())
   }
 
   #[tokio::test]

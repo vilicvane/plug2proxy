@@ -395,6 +395,11 @@ where
     self.connection_count.load(atomic::Ordering::Relaxed)
   }
 
+  #[cfg(test)]
+  pub(crate) fn connection_count_observer(&self) -> Arc<AtomicUsize> {
+    self.connection_count.clone()
+  }
+
   pub(crate) fn set_udp_registration(&mut self, registration: UdpDispatchRegistration) {
     assert!(
       self._udp_registration.replace(registration).is_none(),

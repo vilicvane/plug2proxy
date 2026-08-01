@@ -19,8 +19,9 @@ tailscaled 外层连接 ─────→ 物理网络
 
 ## 1. 使用独立用户运行代理服务
 
-Plug2Proxy 和 sing-box 自己的连接必须绕过 TUN。为 Plug2Proxy 创建独立
-用户；用户已经存在时不要重复创建：
+Plug2Proxy 的 mTCP 主路径、真实 UDP QUIC 旁路以及 sing-box 自己的连接
+都必须绕过 TUN。为 Plug2Proxy 创建独立用户；用户已经存在时不要重复
+创建：
 
 ```bash
 sudo useradd --system \
@@ -182,6 +183,11 @@ ExecStartPre=+/usr/local/sbin/plug2proxy-tun-bypass
 
 这条规则只绕过 tailscaled 标记的控制、DERP 和 WireGuard 外层连接；
 从 `tailscale0` 解密后的客户端流量仍会进入 sing-box。
+
+前面的 `exclude_uid` 同时让 Plug2Proxy 的 TCP 和 UDP socket 绕过 TUN。
+漏掉 `PLUG2PROXY_UID` 不仅可能形成 TCP 回环，也会让 UDP 旁路被重新捕获并
+持续断线重连。作为只发起 QomT 连接的 IN，本教程不需要开放固定的 QomT
+入站端口。
 
 ## 4. 开启 IPv4 forwarding
 
