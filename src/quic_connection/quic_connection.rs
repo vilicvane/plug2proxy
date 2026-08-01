@@ -43,6 +43,16 @@ const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // quiche timer is due, making the extra wakeups cheap.
 const SEND_DONE_BACKSTOP: Duration = Duration::from_secs(1);
 
+fn shutdown_torn_down_local_stream(
+  connection: &mut quiche::Connection,
+  side: ConnectionSide,
+  id: u64,
+) -> Option<quiche::Result<()>> {
+  let locally_initiated = (id & 0x1) == u64::from(matches!(side, ConnectionSide::Server));
+
+  locally_initiated.then(|| connection.stream_shutdown(id, quiche::Shutdown::Read, 0))
+}
+
 /// A structured snapshot of the active QUIC path metrics used by QomT's
 /// packet-path selection. All values come from one `path_stats()` snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1202,11 +1212,28 @@ impl QuicConnection {
                       // 9000 §2.1: bit 0x1 marks the initiator);
                       // re-creating it would spawn a ghost stream that
                       // nobody consumes and that never gets reaped.
-                      let locally_initiated =
-                        (id & 0x1) == u64::from(matches!(side, ConnectionSide::Server));
+                      if let Some(shutdown_result) = {
+                        let mut connection = connection.lock().unwrap();
 
-                      if locally_initiated {
-                        log::debug!("{side} {id}: ignoring readable for torn-down local stream");
+                        shutdown_torn_down_local_stream(&mut connection, side, id)
+                      } {
+                        match shutdown_result {
+                          Ok(()) => {
+                            log::debug!(
+                              "{side} {id}: discarded readable for torn-down local stream"
+                            );
+                            connection_signals.connection_send.notify_one();
+                          }
+                          Err(quiche::Error::Done) => {
+                            log::trace!("{side} {id}: torn-down local stream already gone");
+                          }
+                          Err(error) => {
+                            log::warn!(
+                              "{side} {id}: error discarding torn-down local stream: {error}"
+                            );
+                          }
+                        }
+
                         continue;
                       }
 
@@ -1548,4 +1575,85 @@ pub enum QuicConnectionError {
   DriverFailed,
   #[error("Underlying packet transport closed")]
   UnderlyingTransportClosed,
+}
+
+#[cfg(test)]
+mod unit_tests {
+  use tokio::time::timeout;
+
+  use super::*;
+  use crate::quic_connection::tests::get_quiche_configs;
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn torn_down_local_stream_shutdown_clears_readable_state() -> anyhow::Result<()> {
+    timeout(Duration::from_secs(5), async {
+      let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+      let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+        flume::bounded::<QuicBytesPacket>(0);
+      let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+        flume::bounded::<QuicBytesPacket>(0);
+
+      let connection_id = QuicConnection::generate_connection_id();
+      let out_connection = QuicConnection::connect_with_sink_and_stream(
+        &connection_id,
+        &mut out_quiche_config,
+        out_to_hub_packet_sender.into_sink(),
+        hub_to_out_packet_receiver.into_stream(),
+      );
+      let hub_connection = QuicConnection::accept_with_sink_and_stream(
+        out_connection.id(),
+        &mut hub_quiche_config,
+        hub_to_out_packet_sender.into_sink(),
+        out_to_hub_packet_receiver.into_stream(),
+      );
+
+      tokio::try_join!(out_connection.established(), hub_connection.established())?;
+
+      let mut out_stream = out_connection.open_stream();
+      out_stream.write_all(b"request").await?;
+
+      let mut hub_stream = hub_connection
+        .accept_stream()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing request stream"))?;
+      let mut request = [0; 7];
+      hub_stream.read_exact(&mut request).await?;
+      assert_eq!(&request, b"request");
+
+      // Leave the external reader idle so its 8 KiB pipe fills and quiche
+      // retains additional response bytes in the readable set.
+      hub_stream.write_all(&vec![0xa5; 64 * 1024]).await?;
+
+      timeout(Duration::from_secs(2), async {
+        loop {
+          if out_connection.connection.lock().unwrap().stream_readable(0) {
+            break;
+          }
+
+          sleep(Duration::from_millis(10)).await;
+        }
+      })
+      .await?;
+
+      let shutdown_result = shutdown_torn_down_local_stream(
+        &mut out_connection.connection.lock().unwrap(),
+        ConnectionSide::Client,
+        0,
+      );
+
+      assert!(matches!(shutdown_result, Some(Ok(()))));
+      assert!(!out_connection.connection.lock().unwrap().stream_readable(0));
+
+      out_connection
+        .connection_signals
+        .connection_send
+        .notify_one();
+      drop(out_stream);
+      drop(hub_stream);
+
+      anyhow::Ok(())
+    })
+    .await?
+  }
 }
