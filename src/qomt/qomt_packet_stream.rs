@@ -35,11 +35,7 @@ const QOMT_INCOMING_PACKET_QUEUE_CAPACITY: usize = 16;
 // back to this reliable lane.
 const MAX_QOMT_PACKET_FRAME_SIZE: usize = MAX_DATAGRAM_SIZE;
 const UDP_LARGE_PACKET_THRESHOLD: usize = 1024;
-const PATH_METRICS_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
-const RTT_INFLATION_ENTER_MINIMUM: Duration = Duration::from_millis(10);
-const RTT_INFLATION_EXIT_MINIMUM: Duration = Duration::from_millis(5);
-const UDP_RTT_ADVANTAGE_ENTER_MINIMUM: Duration = Duration::from_millis(5);
-const UDP_RTT_ADVANTAGE_EXIT_MINIMUM: Duration = Duration::from_millis(2);
+const PATH_DECISION_CACHE_TTL: Duration = Duration::from_millis(100);
 const MAX_MALFORMED_DATAGRAMS_PER_POLL: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,7 +133,23 @@ enum ReliableCloseState {
 #[derive(Default)]
 struct PathDecisionCache {
   sampled_at: Option<Instant>,
-  rtt_prefers_udp: bool,
+  // This is only a short-lived memoized result of the fixed RTT predicate.
+  // The previous decision is never an input to the next sample.
+  cached_rtt_prefers_udp: bool,
+}
+
+impl PathDecisionCache {
+  fn get_or_sample(&mut self, now: Instant, sample: impl FnOnce() -> bool) -> bool {
+    if self
+      .sampled_at
+      .is_none_or(|sampled_at| now.duration_since(sampled_at) >= PATH_DECISION_CACHE_TTL)
+    {
+      self.sampled_at = Some(now);
+      self.cached_rtt_prefers_udp = sample();
+    }
+
+    self.cached_rtt_prefers_udp
+  }
 }
 
 /// Association-scoped packet transport.
@@ -568,35 +580,10 @@ where
       return true;
     }
 
-    let now = Instant::now();
-    if self
+    let connection = &self.connection;
+    self
       .path_decision_cache
-      .sampled_at
-      .is_none_or(|sampled_at| now.duration_since(sampled_at) >= PATH_METRICS_SAMPLE_INTERVAL)
-    {
-      self.path_decision_cache.sampled_at = Some(now);
-      let (inflation_minimum, inflation_baseline_divisor, udp_advantage_minimum) =
-        if self.path_decision_cache.rtt_prefers_udp {
-          (
-            RTT_INFLATION_EXIT_MINIMUM,
-            3,
-            UDP_RTT_ADVANTAGE_EXIT_MINIMUM,
-          )
-        } else {
-          (
-            RTT_INFLATION_ENTER_MINIMUM,
-            2,
-            UDP_RTT_ADVANTAGE_ENTER_MINIMUM,
-          )
-        };
-      self.path_decision_cache.rtt_prefers_udp = self.connection.rtt_prefers_udp(
-        inflation_minimum,
-        inflation_baseline_divisor,
-        udp_advantage_minimum,
-      );
-    }
-
-    self.path_decision_cache.rtt_prefers_udp
+      .get_or_sample(Instant::now(), || connection.rtt_prefers_udp())
   }
 
   fn is_send_closed(&self) -> bool {
@@ -760,5 +747,47 @@ impl<TSend: 'static, TReceive: 'static> Drop for QomtPacketStream<TSend, TReceiv
     // the route synchronously so a stale association ID cannot receive a
     // datagram after the public packet stream has gone away.
     self.datagram_registration.lock().unwrap().take();
+  }
+}
+
+#[cfg(test)]
+mod path_decision_cache_tests {
+  use std::cell::Cell;
+
+  use super::*;
+
+  #[test]
+  fn cached_rtt_decision_can_change_in_both_directions() {
+    let started_at = Instant::now();
+    let first_expiry = started_at + PATH_DECISION_CACHE_TTL;
+    let second_expiry = first_expiry + PATH_DECISION_CACHE_TTL;
+    let samples = Cell::new(0);
+    let mut cache = PathDecisionCache::default();
+
+    assert!(cache.get_or_sample(started_at, || {
+      samples.set(samples.get() + 1);
+      true
+    }));
+    assert!(
+      cache.get_or_sample(first_expiry - Duration::from_nanos(1), || {
+        samples.set(samples.get() + 1);
+        false
+      })
+    );
+    assert!(!cache.get_or_sample(first_expiry, || {
+      samples.set(samples.get() + 1);
+      false
+    }));
+    assert!(
+      !cache.get_or_sample(second_expiry - Duration::from_nanos(1), || {
+        samples.set(samples.get() + 1);
+        true
+      })
+    );
+    assert!(cache.get_or_sample(second_expiry, || {
+      samples.set(samples.get() + 1);
+      true
+    }));
+    assert_eq!(samples.get(), 3);
   }
 }

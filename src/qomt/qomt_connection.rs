@@ -39,6 +39,9 @@ const QOMT_UDP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const QOMT_UDP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const QOMT_UDP_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const QOMT_UDP_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+const RTT_INFLATION_MINIMUM: Duration = Duration::from_millis(10);
+const RTT_INFLATION_BASELINE_DIVISOR: u32 = 2;
+const UDP_RTT_ADVANTAGE_MINIMUM: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy)]
 pub(crate) struct QomtUdpReconnectPolicy {
@@ -297,12 +300,7 @@ impl QomtConnection {
     self.datagram_router.max_payload_len()
   }
 
-  pub(crate) fn rtt_prefers_udp(
-    &self,
-    inflation_minimum: Duration,
-    inflation_baseline_divisor: u32,
-    udp_advantage_minimum: Duration,
-  ) -> bool {
+  pub(crate) fn rtt_prefers_udp(&self) -> bool {
     let Some(main) = self.inner.datagram_socket().path_metrics() else {
       return false;
     };
@@ -310,13 +308,7 @@ impl QomtConnection {
       return false;
     };
 
-    path_metrics_prefer_udp(
-      main,
-      udp,
-      inflation_minimum,
-      inflation_baseline_divisor,
-      udp_advantage_minimum,
-    )
+    path_metrics_prefer_udp(main, udp)
   }
 
   #[cfg(test)]
@@ -333,20 +325,15 @@ impl QomtConnection {
   }
 }
 
-fn path_metrics_prefer_udp(
-  main: QuicPathMetrics,
-  udp: QuicPathMetrics,
-  inflation_minimum: Duration,
-  inflation_baseline_divisor: u32,
-  udp_advantage_minimum: Duration,
-) -> bool {
+fn path_metrics_prefer_udp(main: QuicPathMetrics, udp: QuicPathMetrics) -> bool {
   let Some(main_min_rtt) = main.min_rtt else {
     return false;
   };
 
-  let inflation_threshold = inflation_minimum.max(main_min_rtt / inflation_baseline_divisor.max(1));
+  let inflation_threshold =
+    RTT_INFLATION_MINIMUM.max(main_min_rtt / RTT_INFLATION_BASELINE_DIVISOR);
   main.rtt.saturating_sub(main_min_rtt) >= inflation_threshold
-    && udp.rtt.saturating_add(udp_advantage_minimum) < main.rtt
+    && udp.rtt.saturating_add(UDP_RTT_ADVANTAGE_MINIMUM) < main.rtt
 }
 
 async fn run_established_udp_generation(
@@ -740,23 +727,18 @@ mod path_selection_tests {
   }
 
   #[test]
-  fn rtt_policy_has_distinct_enter_and_exit_thresholds() {
-    let main = metrics(29, Some(20));
-    let udp = metrics(20, Some(20));
-
+  fn rtt_policy_uses_one_fixed_threshold() {
     assert!(!path_metrics_prefer_udp(
-      main,
-      udp,
-      Duration::from_millis(10),
-      2,
-      Duration::from_millis(5),
+      metrics(29, Some(20)),
+      metrics(20, Some(20)),
     ));
     assert!(path_metrics_prefer_udp(
-      main,
-      udp,
-      Duration::from_millis(5),
-      3,
-      Duration::from_millis(2),
+      metrics(30, Some(20)),
+      metrics(24, Some(20)),
+    ));
+    assert!(!path_metrics_prefer_udp(
+      metrics(30, Some(20)),
+      metrics(25, Some(20)),
     ));
   }
 
@@ -765,16 +747,10 @@ mod path_selection_tests {
     assert!(!path_metrics_prefer_udp(
       metrics(30, None),
       metrics(20, Some(20)),
-      Duration::from_millis(10),
-      2,
-      Duration::from_millis(5),
     ));
     assert!(!path_metrics_prefer_udp(
       metrics(30, Some(20)),
       metrics(25, Some(20)),
-      Duration::from_millis(10),
-      2,
-      Duration::from_millis(5),
     ));
   }
 }
