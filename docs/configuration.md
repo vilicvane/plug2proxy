@@ -390,8 +390,11 @@ remove 再 apply。完整步骤见
 内部网段的 `exclude_ipv4`；否则发往其他 tailnet 节点的目标也会被透明接管。
 当前 TPROXY 只接管 IPv4；如果该节点没有可用的 IPv6 转发路径，推荐安装
 原生 TPROXY 文档中的 exit-node DNS drop-in，让 Tailscale 默认 DNS 使用
-本机 Plug2Proxy DNS，并设置 `"strategy": "ipv4_only"`。这不会覆盖终端
-自行指定的 resolver。完整示例与限制见原生 TPROXY 文档。
+本机 Plug2Proxy DNS，并在顶层 `dns` 同时设置
+`"strategy": "ipv4_only"` 和 `"system_default": true`。网络控制器会创建
+一条自有的临时 DNS route；它不会写入 `tailscale0`，因此 Tailscale 的
+netmap 重配置不会把它清掉。这不会覆盖终端自行指定的 resolver。完整示例与
+限制见原生 TPROXY 文档。
 
 下面的手工启动方式只用于本节前面的 SOCKS5 示例。启用 TPROXY 时不要继续
 使用 `/etc/plug2proxy` 下的手工命令，应按原生 TPROXY 文档使用专用用户、

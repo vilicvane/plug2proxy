@@ -37,6 +37,10 @@ pub struct DnsConfig {
   pub listen: SerdeSocketAddress,
   #[serde(default)]
   pub strategy: DnsStrategy,
+  /// Make this listener the host's systemd-resolved default route when the
+  /// native TPROXY network controller is active.
+  #[serde(default)]
+  pub system_default: bool,
 }
 
 /// 运行 DNS 服务：按路由配置把域名解析代理到对应出口解析。
@@ -137,11 +141,13 @@ mod config_tests {
   fn strategy_defaults_to_original_behavior() {
     let config = serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:5353"}"#).unwrap();
     assert_eq!(config.strategy, DnsStrategy::Default);
+    assert!(!config.system_default);
 
     let config =
       serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:5353","strategy":"default"}"#)
         .unwrap();
     assert_eq!(config.strategy, DnsStrategy::Default);
+    assert!(!config.system_default);
   }
 
   #[test]
@@ -150,6 +156,17 @@ mod config_tests {
       serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:5353","strategy":"ipv4_only"}"#)
         .unwrap();
     assert_eq!(config.strategy, DnsStrategy::Ipv4Only);
+  }
+
+  #[test]
+  fn system_default_defaults_to_disabled_and_can_be_enabled() {
+    let default = serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:53"}"#).unwrap();
+    assert!(!default.system_default);
+
+    let enabled =
+      serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:53","system_default":true}"#)
+        .unwrap();
+    assert!(enabled.system_default);
   }
 
   #[test]

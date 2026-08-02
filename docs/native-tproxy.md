@@ -30,6 +30,7 @@ Plug2Proxy 的网络控制器会管理以下专用对象：
 | 外部 PREROUTING 路由 mark / mask | `0x53000000/0xff000000` |
 | IPv4 policy rule priorities | `98`（源校验 guard）、`99`（PREROUTING）、`100`（OUTPUT） |
 | IPv4 route table | `20230` |
+| system DNS route（可选） | `plug2proxy-dns0` dummy link，`192.0.2.1/32`，route-only domain `~.` |
 
 写入 mark 时只修改高 8 位，保留低 24 位。OUTPUT 链会绕过 Plug2Proxy
 运行用户产生的连接、reply 方向流量、bypass mark、已存在的非零外部 mark，
@@ -62,6 +63,10 @@ mark，内核对外部入站包做源地址反查时也会命中该 local table�
 - `/usr/sbin/ip`（通常由 `iproute2` 包提供）；
 - systemd；
 - 与 HUB/OUT 使用同一提交和 lockfile 构建的 `plug2proxy`。
+
+启用 `dns.system_default` 时还需要运行中的 systemd-resolved，以及同一 systemd
+发行版提供的 `/usr/bin/resolvectl` 和 `/usr/bin/busctl`。网络控制器通过
+resolve1 D-Bus 的机器可读属性校验 DNS route，不解析本地化的人类可读输出。
 
 同一主机上不要同时启用两个“接管全部流量”的 TUN/TPROXY 管理器。切换自
 其他透明代理方案时，应先准备好 Plug2Proxy 配置并完成 `network check`，
@@ -119,7 +124,8 @@ nftables 和 policy routing 的 `network` 子命令由 systemd 以 root 短暂�
   },
   "dns": {
     "listen": "127.0.0.1:53",
-    "strategy": "ipv4_only"
+    "strategy": "ipv4_only",
+    "system_default": true
   }
 }
 ```
@@ -162,6 +168,15 @@ Tailscale 内，可显式排除 `100.64.0.0/10`。在本次阿里云测试机上
 及其他记录类型仍按原路由解析。当前仅支持 IPv4 TPROXY 的 exit-node 如果
 没有独立可用的 IPv6 路径，应使用 `ipv4_only`，避免 DNS 给客户端一条本机
 无法接管或转发的 IPv6 路径。这不是 IPv6 literal 的代理方案。
+
+`dns.system_default` 默认为 `false`。设为 `true` 时，特权网络控制器要求
+`dns.listen` 是端口 53 上的 IPv4 loopback 地址，并随 `network apply` 创建
+专用的 `plug2proxy-dns0` dummy link。该 link 的 `192.0.2.1/32` 只用于让
+systemd-resolved 把它视为活动 DNS scope，真正的 DNS server 仍是
+`dns.listen`；route-only domain `~.` 让系统默认查询进入 Plug2Proxy。
+`network remove` 会先验证 link 的类型、固定地址和 alias 所有权标记再删除；
+删除后 systemd-resolved 自动退回原物理链路 DNS。若同名 link 不带正确
+所有权标记，控制器会拒绝覆盖或删除。
 
 ## 安装文件
 
@@ -233,14 +248,16 @@ sudo systemctl daemon-reload
 ```
 
 exit-node 本机必须保持 `tailscale set --accept-dns=false`，避免 tailscaled 与
-该 drop-in 同时管理 `tailscale0` 的 resolver 状态。这不影响其他终端接受
-Tailscale DNS，也不改变 exit-node 为这些终端提供 DNS 的行为。
+tailnet DNS 配置改变 exit-node 自身的上游。这不影响其他终端接受 Tailscale
+DNS，也不改变 exit-node 为这些终端提供 DNS 的行为。
 
-该 drop-in 只在服务运行期间为 `tailscale0` 设置 systemd-resolved 的
-route-only 根域 `~.`，DNS server 指向本机 `127.0.0.1:53`。服务停止、启动
-失败或 systemd-resolved 重启时，runtime 配置会自动撤销或随服务重新应用，
-不修改 `/etc/resolv.conf`。它要求顶层 `dns.listen` 使用 `127.0.0.1:53`，
-并保持 `inbounds.tproxy.hijack_dns: false`。
+该 drop-in 只声明 Plug2Proxy 与 systemd-resolved 的生命周期关系；实际 DNS
+route 由 `network apply/remove` 按 `dns.system_default` 管理。它不把状态写到
+`tailscale0`：tailscaled 即使在 netmap 更新时重置该接口的 DNS，也不会影响
+`plug2proxy-dns0`。服务停止、启动失败或 systemd-resolved 重启时，runtime
+配置会自动撤销或随服务重新应用，不修改 `/etc/resolv.conf`。它要求顶层
+`dns.listen` 使用 `127.0.0.1:53`、`dns.system_default` 为 `true`，并保持
+`inbounds.tproxy.hijack_dns: false`。
 
 ## 网络控制命令
 
@@ -270,6 +287,7 @@ sudo /usr/sbin/plug2proxy \
 
 ```bash
 sudo /usr/sbin/plug2proxy network status
+resolvectl status plug2proxy-dns0
 sudo /usr/sbin/plug2proxy network remove
 ```
 
@@ -281,11 +299,12 @@ sudo /usr/sbin/plug2proxy network remove
 这条规则作为 OUTPUT 规则，先补 priority `98` 的源校验 guard，再添加
 priority `99` 的 PREROUTING local route，最后原子升级 nft
 table；旧的外部 conntrack mark 会在后续原方向包到达时转换为 PREROUTING
-mark。若要降级到不认识三规则/schema 2 nft table 的旧二进制，必须先用新版
-停止服务并执行 `network remove`；只有 `network status` 已确认
-`nft=Absent, route=Absent, rules=Absent` 后，才能替换二进制并重新启动，不能
-直接覆盖后降级。若清理未完成，应保留新版二进制用于继续恢复，不能让旧版
-接管它无法识别的 schema 2 状态。
+mark。若要降级到不认识三规则、schema 2 ownership journal 或 system DNS
+link 的旧二进制，必须先用新版停止服务并执行 `network remove`；只有
+`network status` 已确认 `nft=Absent, route=Absent, rules=Absent`、
+`dns_link=Absent, dns_route=Absent, state_phase=Absent` 后，才能替换二进制
+并重新启动，不能直接覆盖后降级。若清理未完成，应保留新版二进制用于继续
+恢复，不能让旧版接管它无法识别的 schema 2 状态。
 
 ## 启动与重载
 
@@ -297,7 +316,7 @@ sudo systemctl enable --now plug2proxy-tproxy.service
 
 systemd 先以 `plug2proxy` 用户启动数据平面；只有当配置地址上的 TCP listener、
 UDP socket 和已配置的 DNS TCP/UDP listener 都已建立，`ExecStartPost` 才安装
-网络接管；exit-node DNS drop-in 随后应用 resolver 路由。正常启动后检查：
+网络接管及可选的 system DNS route。正常启动后检查：
 
 ```bash
 sudo systemctl is-active plug2proxy-tproxy.service
@@ -326,6 +345,7 @@ sudo ip -4 rule show priority 98
 sudo ip -4 rule show priority 99
 sudo ip -4 rule show priority 100
 sudo ip -4 route show table 20230
+resolvectl status plug2proxy-dns0
 ```
 
 再从被接管的主机直接发流量，不要加 SOCKS5 参数：
@@ -338,11 +358,12 @@ dig +time=5 +tries=1 @8.8.8.8 example.com A
 dig +time=5 +tries=1 @8.8.8.8 example.com AAAA
 ```
 
-安装 exit-node DNS drop-in 且配置 `ipv4_only` 时，默认 AAAA 查询必须为
-`NOERROR/NODATA`。显式查询 `@8.8.8.8` 必须仍真正访问该 resolver；其 AAAA
-应答不得被 Plug2Proxy 的 `ipv4_only` 策略清空。不能只看 `+short` 的空输出，
-还应检查完整状态。与此同时观察日志和 nft counter，确认请求命中了预期入口，
-而不是仅凭 service 的 `active` 状态判断：
+安装 exit-node DNS drop-in，并配置 `system_default: true` 与 `ipv4_only` 时，
+`resolvectl status plug2proxy-dns0` 必须显示 DNS scope、`dns.listen` 和 `~.`；
+默认 AAAA 查询必须为 `NOERROR/NODATA`。显式查询 `@8.8.8.8` 必须仍真正访问
+该 resolver；其 AAAA 应答不得被 Plug2Proxy 的 `ipv4_only` 策略清空。不能只
+看 `+short` 的空输出，还应检查完整状态。与此同时观察日志和 nft counter，
+确认请求命中了预期入口，而不是仅凭 service 的 `active` 状态判断：
 
 ```bash
 sudo journalctl -f -u plug2proxy-tproxy.service
@@ -387,10 +408,11 @@ sudo /usr/sbin/plug2proxy network remove
 ## 当前限制
 
 - 只处理 Linux IPv4 TCP/UDP；没有实现 TUN、IPv6 透明代理或 ICMP 代理。
-- 网络控制器只管理自己的 nftables table、IPv4 policy rule 和 route table；
-  不会替用户开启 `net.ipv4.ip_forward`，也不会配置客户端默认路由、云安全组
-  或上游防火墙。仅代理本机 OUTPUT 时不需要开启 IP forwarding；作为路由器
-  接管 PREROUTING 流量时，转发与客户端路由仍需由系统环境提供。
+- 网络控制器只管理自己的 nftables table、IPv4 policy rule、route table，
+  以及启用 `dns.system_default` 时的专用 dummy link；不会替用户开启
+  `net.ipv4.ip_forward`，也不会配置客户端默认路由、云安全组或上游防火墙。
+  仅代理本机 OUTPUT 时不需要开启 IP forwarding；作为路由器接管
+  PREROUTING 流量时，转发与客户端路由仍需由系统环境提供。
 - `exclude_ipv4` 目前按目标 IPv4 CIDR 排除，不提供按端口或进程的自定义
   规则语言。Plug2Proxy 进程自身通过专用 UID 自动绕过。
 - 顶层未配置 `dns` 时，TCP/UDP 53 不使用本地 DNS hijack；需要路由感知 DNS

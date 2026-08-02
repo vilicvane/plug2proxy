@@ -26,6 +26,8 @@ use crate::inbound::{
 const NFT: &str = "/usr/sbin/nft";
 const IP: &str = "/usr/sbin/ip";
 const ID: &str = "/usr/bin/id";
+const RESOLVECTL: &str = "/usr/bin/resolvectl";
+const BUSCTL: &str = "/usr/bin/busctl";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const DATA_PLANE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const DATA_PLANE_READY_RETRY: Duration = Duration::from_millis(50);
@@ -45,6 +47,11 @@ const STATE_DIRECTORY: &str = "/run/plug2proxy-netctl";
 const STATE_FILE: &str = "/run/plug2proxy-netctl/network-state.json";
 const NETWORK_LOCK_FILE: &str = "/run/plug2proxy-netctl/network.lock";
 
+const SYSTEM_DNS_LINK: &str = "plug2proxy-dns0";
+const SYSTEM_DNS_LINK_ADDRESS: &str = "192.0.2.1/32";
+const SYSTEM_DNS_LINK_MAC: &str = "02:50:32:44:4e:53";
+const SYSTEM_DNS_LINK_ALIAS: &str = "managed-by=plug2proxy;role=system-default-dns;schema=1";
+
 const BUILTIN_EXCLUDES: [&str; 5] = [
   "0.0.0.0/8",
   "127.0.0.0/8",
@@ -58,6 +65,8 @@ pub struct TproxyNetworkPlan {
   pub listen: SocketAddr,
   #[serde(default)]
   pub dns_listen: Option<SocketAddr>,
+  #[serde(default)]
+  pub system_default: bool,
   pub bypass_uid: u32,
   pub exclude_ipv4: Vec<Ipv4Net>,
 }
@@ -66,6 +75,7 @@ impl TproxyNetworkPlan {
   pub fn from_config(
     config: &TproxyInboundConfig,
     dns_listen: Option<SocketAddr>,
+    system_default: bool,
     bypass_uid: u32,
   ) -> anyhow::Result<Self> {
     let listen: SocketAddr = *config.listen;
@@ -74,6 +84,13 @@ impl TproxyNetworkPlan {
     }
     if !listen.ip().is_loopback() {
       bail!("TPROXY listener must use an IPv4 loopback address");
+    }
+    if system_default {
+      let dns_listen =
+        dns_listen.context("dns.system_default requires a top-level DNS listener")?;
+      if !dns_listen.is_ipv4() || !dns_listen.ip().is_loopback() || dns_listen.port() != 53 {
+        bail!("dns.system_default requires dns.listen to be an IPv4 loopback address on port 53");
+      }
     }
 
     let mut excludes = BTreeSet::new();
@@ -107,6 +124,7 @@ impl TproxyNetworkPlan {
     Ok(Self {
       listen,
       dns_listen,
+      system_default,
       bypass_uid,
       exclude_ipv4,
     })
@@ -263,6 +281,26 @@ enum ObjectState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemDnsLinkState {
+  Absent,
+  Partial,
+  Exact,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemDnsRouteState {
+  Absent,
+  Partial,
+  Exact,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SystemDnsState {
+  link: SystemDnsLinkState,
+  route: SystemDnsRouteState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NftState {
   Absent,
   Legacy,
@@ -400,14 +438,27 @@ pub async fn resolve_bypass_user(user: &str) -> anyhow::Result<u32> {
 }
 
 pub async fn check_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<String> {
+  check_system_dns_prerequisites(plan).await?;
   let nft = check_nft_owner().await?;
   let route = check_route().await?;
   let rules = check_policy_rules().await?;
+  let state = read_state()?;
+  let expected_dns = if plan.system_default {
+    plan.dns_listen
+  } else {
+    state
+      .as_ref()
+      .filter(|state| state.plan.system_default)
+      .and_then(|state| state.plan.dns_listen)
+  };
+  let system_dns = check_system_dns_state(state.as_ref(), expected_dns).await?;
   check_nft_batch(&plan.render_nft_batch_for(nft)).await?;
 
   Ok(format!(
-    "TPROXY network plan is valid: nft={nft:?}, route={route:?}, rules={:?}",
-    rules.state()
+    "TPROXY network plan is valid: nft={nft:?}, route={route:?}, rules={:?}, dns_link={:?}, dns_route={:?}",
+    rules.state(),
+    system_dns.link,
+    system_dns.route
   ))
 }
 
@@ -417,11 +468,21 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   let _lock = NetworkLock::acquire().await?;
   wait_for_data_plane_ready(plan).await?;
   ensure_data_plane_ready(plan)?;
+  check_system_dns_prerequisites(plan).await?;
 
   let nft = check_nft_owner().await?;
   let route = check_route().await?;
   let rules = check_policy_rules().await?;
   let previous_state = read_state()?;
+  let expected_dns = if plan.system_default {
+    plan.dns_listen
+  } else {
+    previous_state
+      .as_ref()
+      .filter(|state| state.plan.system_default)
+      .and_then(|state| state.plan.dns_listen)
+  };
+  check_system_dns_state(previous_state.as_ref(), expected_dns).await?;
   if previous_state.is_none()
     && (nft != NftState::Absent
       || route == ObjectState::Exact
@@ -483,43 +544,39 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   .await;
 
   if let Err(error) = pre_activation_result {
-    let rollback_errors = rollback_pre_activation(
-      route_may_be_new,
-      rules,
-      mutation_result_uncertain,
-      previous_state.as_ref(),
-    )
-    .await;
+    let mut rollback_errors =
+      rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await;
+    finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
     return Err(apply_failure_with_rollback(error, rollback_errors));
   }
 
   if let Err(error) = apply_nft_batch(&batch).await {
     let mut rollback_errors = rollback_nft(nft, previous_state.as_ref()).await;
-    rollback_errors.extend(
-      rollback_pre_activation(
-        route_may_be_new,
-        rules,
-        mutation_result_uncertain,
-        previous_state.as_ref(),
-      )
-      .await,
-    );
+    rollback_errors
+      .extend(rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await);
+    finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
     return Err(apply_failure_with_rollback(error, rollback_errors));
   }
 
   if let Err(error) = ensure_data_plane_ready(plan) {
-    let cleanup_errors = deactivate_owned_network().await;
-    let cleanup = if cleanup_errors.is_empty() {
-      "the newly active network state was removed".to_owned()
-    } else {
-      format!(
-        "automatic deactivation was incomplete: {}",
-        cleanup_errors.join("; ")
-      )
-    };
-    return Err(error.context(format!(
-      "TPROXY data plane disappeared while activating; {cleanup}"
-    )));
+    let mut rollback_errors = rollback_system_dns(previous_state.as_ref()).await;
+    rollback_errors.extend(rollback_nft(nft, previous_state.as_ref()).await);
+    rollback_errors
+      .extend(rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await);
+    finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
+    return Err(apply_failure_with_rollback(
+      error.context("TPROXY data plane disappeared while activating"),
+      rollback_errors,
+    ));
+  }
+
+  if let Err(error) = reconcile_system_dns(plan).await {
+    let mut rollback_errors = rollback_system_dns(previous_state.as_ref()).await;
+    rollback_errors.extend(rollback_nft(nft, previous_state.as_ref()).await);
+    rollback_errors
+      .extend(rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await);
+    finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
+    return Err(apply_failure_with_rollback(error, rollback_errors));
   }
 
   if let Err(error) = write_state(plan, "applied") {
@@ -544,6 +601,18 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
 pub async fn remove_tproxy_network() -> anyhow::Result<()> {
   let _lock = NetworkLock::acquire().await?;
   let mut errors = vec![];
+  let journal = match read_state() {
+    Ok(state) => state,
+    Err(error) => {
+      errors.push(format!("journal inspection failed: {error:#}"));
+      None
+    }
+  };
+
+  // Restore the host resolver before removing interception. A failure here
+  // must not prevent best-effort cleanup of the nft/rule/route objects below.
+  errors.extend(remove_system_dns(journal.as_ref()).await);
+
   let nft = match check_nft_owner().await {
     Ok(nft) => nft,
     Err(error) => {
@@ -565,13 +634,7 @@ pub async fn remove_tproxy_network() -> anyhow::Result<()> {
     errors.push(format!("nft cleanup failed: {error:#}"));
   }
 
-  let journal_was_owned = match read_state() {
-    Ok(state) => state.is_some(),
-    Err(error) => {
-      errors.push(format!("journal inspection failed: {error:#}"));
-      false
-    }
-  };
+  let journal_was_owned = journal.is_some();
   let may_remove_reserved_objects =
     reserved_objects_may_be_removed(nft_was_owned, journal_was_owned);
 
@@ -620,9 +683,16 @@ pub async fn tproxy_network_status() -> anyhow::Result<String> {
   let route = check_route().await?;
   let rules = check_policy_rules().await?;
   let state = read_state()?;
+  let expected_dns = state
+    .as_ref()
+    .filter(|state| state.plan.system_default)
+    .and_then(|state| state.plan.dns_listen);
+  let system_dns = check_system_dns_state(state.as_ref(), expected_dns).await?;
   Ok(format!(
-    "nft={nft:?}, route={route:?}, rules={:?}, state_phase={}",
+    "nft={nft:?}, route={route:?}, rules={:?}, dns_link={:?}, dns_route={:?}, state_phase={}",
     rules.state(),
+    system_dns.link,
+    system_dns.route,
     state
       .as_ref()
       .map(|state| state.phase.as_str())
@@ -634,7 +704,6 @@ async fn rollback_pre_activation(
   route_may_be_new: bool,
   previous_rules: PolicyRuleSet,
   mutation_result_uncertain: bool,
-  previous_state: Option<&NetworkState>,
 ) -> Vec<String> {
   let mut errors = vec![];
   errors.extend(rollback_policy_rules(previous_rules).await);
@@ -647,15 +716,21 @@ async fn rollback_pre_activation(
         .to_owned(),
     );
   }
-  // If any object rollback failed, retain the current durable phase as the
-  // authorization for a later `network remove`. Restoring or deleting the
-  // previous journal here would orphan the exact object that remains.
-  if errors.is_empty()
+  errors
+}
+
+fn finish_rollback_journal(
+  rollback_errors: &mut Vec<String>,
+  previous_state: Option<&NetworkState>,
+) {
+  // Restore/delete the previous journal only after every network object has
+  // been restored. Otherwise retain the current durable phase so a later
+  // `network remove` can prove ownership of any partial object.
+  if rollback_errors.is_empty()
     && let Err(error) = restore_state(previous_state)
   {
-    errors.push(format!("journal rollback failed: {error:#}"));
+    rollback_errors.push(format!("journal rollback failed: {error:#}"));
   }
-  errors
 }
 
 async fn rollback_nft(
@@ -681,26 +756,6 @@ async fn rollback_nft(
     .err()
     .map(|error| vec![format!("nft rollback failed: {error:#}")])
     .unwrap_or_default()
-}
-
-async fn deactivate_owned_network() -> Vec<String> {
-  let mut errors = vec![];
-  if let Err(error) = remove_owned_nft_table().await {
-    errors.push(format!("nft cleanup failed: {error:#}"));
-  }
-  match check_policy_rules().await {
-    Ok(rules) => errors.extend(delete_policy_rules(rules).await),
-    Err(error) => errors.push(format!("rule inspection failed: {error:#}")),
-  }
-  if let Err(error) = delete_route_if_exact().await {
-    errors.push(format!("route cleanup failed: {error:#}"));
-  }
-  if errors.is_empty()
-    && let Err(error) = remove_state_file()
-  {
-    errors.push(format!("journal cleanup failed: {error:#}"));
-  }
-  errors
 }
 
 fn apply_failure_with_rollback(
@@ -1033,6 +1088,475 @@ async fn check_route() -> anyhow::Result<ObjectState> {
     bail!("routing table {TPROXY_ROUTE_TABLE} conflicts with Plug2Proxy: {route}");
   }
   Ok(ObjectState::Exact)
+}
+
+async fn check_system_dns_state(
+  journal: Option<&NetworkState>,
+  expected_dns: Option<SocketAddr>,
+) -> anyhow::Result<SystemDnsState> {
+  let (link, ifindex) = check_system_dns_link(journal, expected_dns.is_some()).await?;
+  let route = if link == SystemDnsLinkState::Absent {
+    SystemDnsRouteState::Absent
+  } else {
+    check_system_dns_route(
+      ifindex.context("system-default DNS link has no interface index")?,
+      expected_dns,
+    )
+    .await?
+  };
+  Ok(SystemDnsState { link, route })
+}
+
+async fn check_system_dns_prerequisites(plan: &TproxyNetworkPlan) -> anyhow::Result<()> {
+  if !plan.system_default {
+    return Ok(());
+  }
+  let output = run_command(RESOLVECTL, &["status"], None).await?;
+  ensure_success(RESOLVECTL, &output)
+    .context("dns.system_default requires a running systemd-resolved service")?;
+  read_resolve1_link_object_path(1)
+    .await
+    .context("dns.system_default requires busctl JSON support for resolve1 Manager.GetLink")?;
+  Ok(())
+}
+
+async fn check_system_dns_link(
+  journal: Option<&NetworkState>,
+  inspect_requested: bool,
+) -> anyhow::Result<(SystemDnsLinkState, Option<u32>)> {
+  if !should_inspect_system_dns_link(journal, inspect_requested) {
+    return Ok((SystemDnsLinkState::Absent, None));
+  }
+
+  let output = run_command(IP, &["-j", "-d", "link", "show"], None).await?;
+  ensure_success(IP, &output)?;
+  let links: Vec<Value> = serde_json::from_slice(&output.stdout).context("invalid ip link JSON")?;
+  let Some(link) = links.iter().find(|link| link["ifname"] == SYSTEM_DNS_LINK) else {
+    return Ok((SystemDnsLinkState::Absent, None));
+  };
+  let ifindex = json_u32(link.get("ifindex"))
+    .filter(|ifindex| *ifindex != 0)
+    .context("system-default DNS link has an invalid interface index")?;
+
+  let output = run_command(
+    IP,
+    &["-j", "-4", "address", "show", "dev", SYSTEM_DNS_LINK],
+    None,
+  )
+  .await?;
+  ensure_success(IP, &output)?;
+  let address_links: Vec<Value> =
+    serde_json::from_slice(&output.stdout).context("invalid ip address JSON")?;
+  Ok((
+    classify_system_dns_link(link, &address_links, journal)?,
+    Some(ifindex),
+  ))
+}
+
+fn should_inspect_system_dns_link(journal: Option<&NetworkState>, inspect_requested: bool) -> bool {
+  inspect_requested || journal_authorizes_system_dns_transition(journal)
+}
+
+fn journal_authorizes_system_dns_transition(journal: Option<&NetworkState>) -> bool {
+  journal.is_some_and(|journal| {
+    journal.schema == 2
+      && (journal.plan.system_default
+        || matches!(
+          journal.phase.as_str(),
+          "installing-system-dns-link" | "configuring-system-dns-route" | "removing-system-dns"
+        ))
+  })
+}
+
+fn classify_system_dns_link(
+  link: &Value,
+  address_links: &[Value],
+  journal: Option<&NetworkState>,
+) -> anyhow::Result<SystemDnsLinkState> {
+  let kind = link.pointer("/linkinfo/info_kind").and_then(Value::as_str);
+  let mac = link.get("address").and_then(Value::as_str);
+  if kind != Some("dummy") || !mac.is_some_and(|mac| mac.eq_ignore_ascii_case(SYSTEM_DNS_LINK_MAC))
+  {
+    bail!(
+      "network link {SYSTEM_DNS_LINK} exists without Plug2Proxy's dummy kind and fixed MAC; refusing to modify it"
+    );
+  }
+
+  let Some(journal) = journal.filter(|_| journal_authorizes_system_dns_transition(journal)) else {
+    bail!(
+      "network link {SYSTEM_DNS_LINK} has Plug2Proxy's identity but no same-boot schema 2 ownership journal; refusing to modify it"
+    );
+  };
+  let alias = link.get("ifalias").and_then(Value::as_str);
+  let alias_is_exact = alias == Some(SYSTEM_DNS_LINK_ALIAS);
+  let incomplete_creation_is_owned = alias.is_none_or(str::is_empty)
+    && journal.plan.system_default
+    && journal.phase == "installing-system-dns-link";
+  if !alias_is_exact && !incomplete_creation_is_owned {
+    bail!(
+      "network link {SYSTEM_DNS_LINK} has an unexpected ownership alias; refusing to modify it"
+    );
+  }
+
+  let ipv4_addresses = address_links
+    .iter()
+    .flat_map(|link| link["addr_info"].as_array().into_iter().flatten())
+    .filter(|address| address["family"] == "inet")
+    .collect::<Vec<_>>();
+  let address_is_exact = ipv4_addresses.len() == 1
+    && ipv4_addresses[0]["local"] == "192.0.2.1"
+    && json_u32(ipv4_addresses[0].get("prefixlen")) == Some(32);
+  let link_is_up = link["flags"]
+    .as_array()
+    .into_iter()
+    .flatten()
+    .any(|flag| flag == "UP");
+
+  if alias_is_exact && address_is_exact && link_is_up {
+    Ok(SystemDnsLinkState::Exact)
+  } else {
+    Ok(SystemDnsLinkState::Partial)
+  }
+}
+
+async fn check_system_dns_route(
+  ifindex: u32,
+  expected_dns: Option<SocketAddr>,
+) -> anyhow::Result<SystemDnsRouteState> {
+  let object_path = read_resolve1_link_object_path(ifindex).await?;
+  let dns = read_resolve1_link_property(&object_path, "DNS").await?;
+  let domains = read_resolve1_link_property(&object_path, "Domains").await?;
+  Ok(classify_system_dns_route(&dns, &domains, expected_dns))
+}
+
+fn classify_system_dns_route(
+  dns: &Value,
+  domains: &Value,
+  expected_dns: Option<SocketAddr>,
+) -> SystemDnsRouteState {
+  let dns_data = dns.get("data").and_then(Value::as_array);
+  let domain_data = domains.get("data").and_then(Value::as_array);
+  let types_are_exact = dns["type"] == "a(iay)" && domains["type"] == "a(sb)";
+  if types_are_exact
+    && dns_data.is_some_and(Vec::is_empty)
+    && domain_data.is_some_and(Vec::is_empty)
+  {
+    return SystemDnsRouteState::Absent;
+  }
+
+  let exact = expected_dns.is_some_and(|expected| {
+    let IpAddr::V4(expected_ip) = expected.ip() else {
+      return false;
+    };
+    types_are_exact
+      && dns_data
+        == Some(&vec![serde_json::json!([
+          libc::AF_INET,
+          expected_ip.octets()
+        ])])
+      // resolve1 stores the routing-only marker in the boolean field; the
+      // domain string itself does not include resolvectl's leading `~`.
+      && domain_data == Some(&vec![serde_json::json!([".", true])])
+  });
+  if exact {
+    SystemDnsRouteState::Exact
+  } else {
+    SystemDnsRouteState::Partial
+  }
+}
+
+async fn read_resolve1_link_property(object_path: &str, property: &str) -> anyhow::Result<Value> {
+  let arguments = system_dns_busctl_property_arguments(object_path, property);
+  let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+  let output = run_command(BUSCTL, &arguments, None).await?;
+  ensure_success(BUSCTL, &output)?;
+  serde_json::from_slice(&output.stdout)
+    .with_context(|| format!("invalid resolve1 {property} property JSON"))
+}
+
+async fn read_resolve1_link_object_path(ifindex: u32) -> anyhow::Result<String> {
+  let arguments = system_dns_busctl_get_link_arguments(ifindex);
+  let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+  let output = run_command(BUSCTL, &arguments, None).await?;
+  ensure_success(BUSCTL, &output)?;
+  let value: Value =
+    serde_json::from_slice(&output.stdout).context("invalid resolve1 GetLink response JSON")?;
+  parse_resolve1_link_object_path(&value)
+}
+
+fn parse_resolve1_link_object_path(value: &Value) -> anyhow::Result<String> {
+  const PREFIX: &str = "/org/freedesktop/resolve1/link/";
+  if value["type"] != "o" {
+    bail!("resolve1 GetLink returned an unexpected D-Bus type");
+  }
+  let data = value["data"]
+    .as_array()
+    .context("resolve1 GetLink response has no data array")?;
+  if data.len() != 1 {
+    bail!("resolve1 GetLink response must contain exactly one object path");
+  }
+  let object_path = data[0]
+    .as_str()
+    .context("resolve1 GetLink response object path is not a string")?;
+  let Some(label) = object_path.strip_prefix(PREFIX) else {
+    bail!("resolve1 GetLink returned an unexpected object path");
+  };
+  if label.is_empty() || label.contains('/') {
+    bail!("resolve1 GetLink returned an unexpected object path");
+  }
+  Ok(object_path.to_owned())
+}
+
+fn system_dns_busctl_get_link_arguments(ifindex: u32) -> Vec<String> {
+  [
+    "--json=short".to_owned(),
+    "call".to_owned(),
+    "org.freedesktop.resolve1".to_owned(),
+    "/org/freedesktop/resolve1".to_owned(),
+    "org.freedesktop.resolve1.Manager".to_owned(),
+    "GetLink".to_owned(),
+    "i".to_owned(),
+    ifindex.to_string(),
+  ]
+  .into()
+}
+
+fn system_dns_busctl_property_arguments(object_path: &str, property: &str) -> Vec<String> {
+  [
+    "--json=short".to_owned(),
+    "get-property".to_owned(),
+    "org.freedesktop.resolve1".to_owned(),
+    object_path.to_owned(),
+    "org.freedesktop.resolve1.Link".to_owned(),
+    property.to_owned(),
+  ]
+  .into()
+}
+
+fn system_dns_link_add_arguments() -> Vec<String> {
+  [
+    "link",
+    "add",
+    "name",
+    SYSTEM_DNS_LINK,
+    "address",
+    SYSTEM_DNS_LINK_MAC,
+    "type",
+    "dummy",
+  ]
+  .into_iter()
+  .map(str::to_owned)
+  .collect()
+}
+
+fn system_dns_link_alias_arguments() -> Vec<String> {
+  [
+    "link",
+    "set",
+    "dev",
+    SYSTEM_DNS_LINK,
+    "alias",
+    SYSTEM_DNS_LINK_ALIAS,
+  ]
+  .into_iter()
+  .map(str::to_owned)
+  .collect()
+}
+
+fn system_dns_link_address_arguments() -> Vec<String> {
+  [
+    "-4",
+    "address",
+    "replace",
+    SYSTEM_DNS_LINK_ADDRESS,
+    "dev",
+    SYSTEM_DNS_LINK,
+  ]
+  .into_iter()
+  .map(str::to_owned)
+  .collect()
+}
+
+fn system_dns_link_flush_arguments() -> Vec<String> {
+  ["-4", "address", "flush", "dev", SYSTEM_DNS_LINK]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn system_dns_link_up_arguments() -> Vec<String> {
+  ["link", "set", "dev", SYSTEM_DNS_LINK, "up"]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn system_dns_link_repair_commands() -> Vec<Vec<String>> {
+  vec![
+    system_dns_link_alias_arguments(),
+    system_dns_link_flush_arguments(),
+    system_dns_link_address_arguments(),
+    system_dns_link_up_arguments(),
+  ]
+}
+
+fn system_dns_link_delete_arguments() -> Vec<String> {
+  ["link", "delete", "dev", SYSTEM_DNS_LINK]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn system_dns_resolver_arguments(dns_listen: SocketAddr) -> Vec<String> {
+  [
+    "dns".to_owned(),
+    SYSTEM_DNS_LINK.to_owned(),
+    dns_listen.ip().to_string(),
+  ]
+  .into()
+}
+
+fn system_dns_domain_arguments() -> Vec<String> {
+  ["domain", SYSTEM_DNS_LINK, "~."]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn system_dns_revert_arguments() -> Vec<String> {
+  ["revert", SYSTEM_DNS_LINK]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+async fn run_ip_strings(arguments: &[String]) -> anyhow::Result<()> {
+  let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+  run_ip_checked(&arguments).await
+}
+
+async fn run_resolvectl_strings(arguments: &[String]) -> anyhow::Result<()> {
+  let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+  let output = run_command(RESOLVECTL, &arguments, None).await?;
+  ensure_success(RESOLVECTL, &output)
+}
+
+async fn configure_system_dns(plan: &TproxyNetworkPlan) -> anyhow::Result<()> {
+  let dns_listen = plan
+    .dns_listen
+    .filter(|_| plan.system_default)
+    .context("system-default DNS plan has no listener")?;
+  write_state(plan, "installing-system-dns-link")?;
+  let journal = read_state()?.context("system-default DNS ownership journal disappeared")?;
+  let (link, _) = check_system_dns_link(Some(&journal), false).await?;
+  if link == SystemDnsLinkState::Absent {
+    run_ip_strings(&system_dns_link_add_arguments())
+      .await
+      .context("failed to create system-default DNS dummy link")?;
+  }
+  if link != SystemDnsLinkState::Exact {
+    for arguments in system_dns_link_repair_commands() {
+      run_ip_strings(&arguments)
+        .await
+        .with_context(|| format!("failed to repair system-default DNS link: {arguments:?}"))?;
+    }
+  }
+
+  write_state(plan, "configuring-system-dns-route")?;
+  run_resolvectl_strings(&system_dns_resolver_arguments(dns_listen))
+    .await
+    .context("failed to configure system-default DNS server")?;
+  run_resolvectl_strings(&system_dns_domain_arguments())
+    .await
+    .context("failed to configure system-default DNS route domain")?;
+
+  let journal = read_state()?.context("system-default DNS ownership journal disappeared")?;
+  let state = check_system_dns_state(Some(&journal), Some(dns_listen)).await?;
+  if state.link != SystemDnsLinkState::Exact || state.route != SystemDnsRouteState::Exact {
+    bail!("system-default DNS link or resolver route was not installed exactly");
+  }
+  Ok(())
+}
+
+async fn remove_system_dns(journal: Option<&NetworkState>) -> Vec<String> {
+  let mut errors = vec![];
+  let link = match check_system_dns_link(journal, false).await {
+    Ok((link, _)) => link,
+    Err(error) => {
+      return vec![format!(
+        "system-default DNS link inspection failed: {error:#}"
+      )];
+    }
+  };
+  if link == SystemDnsLinkState::Absent {
+    return errors;
+  }
+
+  let revert_error = run_resolvectl_strings(&system_dns_revert_arguments())
+    .await
+    .err()
+    .map(|error| format!("system-default DNS resolver revert failed: {error:#}"));
+
+  // Re-check all immutable identity fields and ownership immediately before
+  // the destructive link operation. The network lock serializes other
+  // Plug2Proxy controllers; a foreign object is never deleted.
+  let link_deleted = match check_system_dns_link(journal, false).await {
+    Ok((SystemDnsLinkState::Partial | SystemDnsLinkState::Exact, _)) => {
+      if let Err(error) = run_ip_strings(&system_dns_link_delete_arguments()).await {
+        errors.push(format!("system-default DNS link cleanup failed: {error:#}"));
+        false
+      } else {
+        true
+      }
+    }
+    Ok((SystemDnsLinkState::Absent, _)) => true,
+    Err(error) => {
+      errors.push(format!(
+        "system-default DNS link ownership recheck failed: {error:#}"
+      ));
+      false
+    }
+  };
+  if let Some(revert_error) = revert_error {
+    if link_deleted {
+      log::warn!(
+        "{revert_error}; ignored because deleting the owned link removed its resolver state"
+      );
+    } else {
+      errors.push(revert_error);
+    }
+  }
+  errors
+}
+
+async fn reconcile_system_dns(plan: &TproxyNetworkPlan) -> anyhow::Result<()> {
+  if plan.system_default {
+    configure_system_dns(plan).await
+  } else {
+    write_state(plan, "removing-system-dns")?;
+    let journal = read_state()?.context("TPROXY ownership journal disappeared")?;
+    ensure_cleanup_complete(remove_system_dns(Some(&journal)).await)
+  }
+}
+
+async fn rollback_system_dns(previous_state: Option<&NetworkState>) -> Vec<String> {
+  if let Some(previous_state) = previous_state.filter(|state| state.plan.system_default) {
+    return configure_system_dns(&previous_state.plan)
+      .await
+      .err()
+      .map(|error| vec![format!("system-default DNS rollback failed: {error:#}")])
+      .unwrap_or_default();
+  }
+
+  let journal = match read_state() {
+    Ok(journal) => journal,
+    Err(error) => {
+      return vec![format!(
+        "system-default DNS rollback journal inspection failed: {error:#}"
+      )];
+    }
+  };
+  remove_system_dns(journal.as_ref()).await
 }
 
 async fn check_nft_batch(batch: &str) -> anyhow::Result<()> {
@@ -1377,7 +1901,7 @@ fn write_state(plan: &TproxyNetworkPlan, phase: &str) -> anyhow::Result<()> {
   ensure_state_directory()?;
   let boot_id = current_boot_id()?;
   let encoded = serde_json::to_vec_pretty(&NetworkState {
-    schema: 1,
+    schema: 2,
     boot_id,
     phase: phase.to_owned(),
     plan: plan.clone(),
@@ -1418,13 +1942,18 @@ fn read_state() -> anyhow::Result<Option<NetworkState>> {
   file
     .read_to_end(&mut encoded)
     .context("failed to read TPROXY ownership journal")?;
-  let state: NetworkState =
+  let mut state: NetworkState =
     serde_json::from_slice(&encoded).context("invalid TPROXY ownership journal")?;
-  if state.schema != 1 {
+  if !matches!(state.schema, 1 | 2) {
     bail!(
       "unsupported TPROXY ownership journal schema {}",
       state.schema
     );
+  }
+  if state.schema == 1 {
+    // Schema 1 predates system-default DNS ownership. It can authorize the
+    // original nft/route/rule objects, but never the dedicated DNS link.
+    state.plan.system_default = false;
   }
   if state.boot_id != current_boot_id()? {
     bail!("TPROXY ownership journal belongs to a different system boot");
@@ -1438,6 +1967,14 @@ fn read_state() -> anyhow::Result<Option<NetworkState>> {
   {
     bail!("invalid TPROXY ownership journal listener");
   }
+  if state.plan.system_default {
+    let Some(dns_listen) = state.plan.dns_listen else {
+      bail!("system-default DNS journal has no DNS listener");
+    };
+    if !dns_listen.is_ipv4() || !dns_listen.ip().is_loopback() || dns_listen.port() != 53 {
+      bail!("system-default DNS journal has an invalid DNS listener");
+    }
+  }
   Ok(Some(state))
 }
 
@@ -1449,6 +1986,9 @@ fn network_state_phase_is_supported(phase: &str) -> bool {
       | "installing-rule"
       | "installing-rules"
       | "activating"
+      | "installing-system-dns-link"
+      | "configuring-system-dns-route"
+      | "removing-system-dns"
       | "applied"
   )
 }
@@ -1521,9 +2061,334 @@ mod tests {
         network: TproxyNetworkConfig::default(),
       },
       None,
+      false,
       989,
     )
     .unwrap()
+  }
+
+  fn system_dns_plan() -> TproxyNetworkPlan {
+    let mut plan = plan();
+    plan.dns_listen = Some("127.0.0.1:53".parse().unwrap());
+    plan.system_default = true;
+    plan
+  }
+
+  fn journal(plan: TproxyNetworkPlan, phase: &str) -> NetworkState {
+    NetworkState {
+      schema: 2,
+      boot_id: "test-boot".to_owned(),
+      phase: phase.to_owned(),
+      plan,
+    }
+  }
+
+  fn exact_system_dns_link() -> Value {
+    serde_json::json!({
+      "ifname": SYSTEM_DNS_LINK,
+      "address": SYSTEM_DNS_LINK_MAC,
+      "ifalias": SYSTEM_DNS_LINK_ALIAS,
+      "flags": ["BROADCAST", "NOARP", "UP"],
+      "linkinfo": { "info_kind": "dummy" }
+    })
+  }
+
+  fn exact_system_dns_addresses() -> Vec<Value> {
+    vec![serde_json::json!({
+      "addr_info": [{
+        "family": "inet",
+        "local": "192.0.2.1",
+        "prefixlen": 32
+      }]
+    })]
+  }
+
+  #[test]
+  fn system_default_dns_plan_requires_ipv4_loopback_port_53() {
+    let config = TproxyInboundConfig {
+      listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
+      sniff: true,
+      hijack_dns: false,
+      network: TproxyNetworkConfig::default(),
+    };
+
+    assert!(
+      TproxyNetworkPlan::from_config(&config, None, true, 989)
+        .unwrap_err()
+        .to_string()
+        .contains("top-level DNS listener")
+    );
+    for invalid in ["127.0.0.1:5353", "0.0.0.0:53", "[::1]:53"] {
+      assert!(
+        TproxyNetworkPlan::from_config(&config, Some(invalid.parse().unwrap()), true, 989)
+          .unwrap_err()
+          .to_string()
+          .contains("IPv4 loopback")
+      );
+    }
+
+    let plan =
+      TproxyNetworkPlan::from_config(&config, Some("127.0.0.2:53".parse().unwrap()), true, 989)
+        .unwrap();
+    assert!(plan.system_default);
+    assert_eq!(plan.dns_listen.unwrap(), "127.0.0.2:53".parse().unwrap());
+  }
+
+  #[test]
+  fn system_dns_command_generation_is_fixed_and_scoped() {
+    assert_eq!(
+      system_dns_link_add_arguments(),
+      [
+        "link",
+        "add",
+        "name",
+        SYSTEM_DNS_LINK,
+        "address",
+        SYSTEM_DNS_LINK_MAC,
+        "type",
+        "dummy"
+      ]
+    );
+    assert_eq!(
+      system_dns_link_alias_arguments(),
+      [
+        "link",
+        "set",
+        "dev",
+        SYSTEM_DNS_LINK,
+        "alias",
+        SYSTEM_DNS_LINK_ALIAS
+      ]
+    );
+    assert_eq!(
+      system_dns_link_address_arguments(),
+      [
+        "-4",
+        "address",
+        "replace",
+        SYSTEM_DNS_LINK_ADDRESS,
+        "dev",
+        SYSTEM_DNS_LINK
+      ]
+    );
+    assert_eq!(
+      system_dns_link_flush_arguments(),
+      ["-4", "address", "flush", "dev", SYSTEM_DNS_LINK]
+    );
+    let repair = system_dns_link_repair_commands();
+    assert_eq!(repair[0], system_dns_link_alias_arguments());
+    assert_eq!(repair[1], system_dns_link_flush_arguments());
+    assert_eq!(repair[2], system_dns_link_address_arguments());
+    assert_eq!(repair[3], system_dns_link_up_arguments());
+    assert_eq!(
+      system_dns_resolver_arguments("127.0.0.2:53".parse().unwrap()),
+      ["dns", SYSTEM_DNS_LINK, "127.0.0.2"]
+    );
+    assert_eq!(
+      system_dns_domain_arguments(),
+      ["domain", SYSTEM_DNS_LINK, "~."]
+    );
+    assert_eq!(system_dns_revert_arguments(), ["revert", SYSTEM_DNS_LINK]);
+    assert_eq!(
+      system_dns_link_delete_arguments(),
+      ["link", "delete", "dev", SYSTEM_DNS_LINK]
+    );
+    assert_eq!(
+      system_dns_busctl_get_link_arguments(36),
+      [
+        "--json=short",
+        "call",
+        "org.freedesktop.resolve1",
+        "/org/freedesktop/resolve1",
+        "org.freedesktop.resolve1.Manager",
+        "GetLink",
+        "i",
+        "36"
+      ]
+    );
+    assert_eq!(
+      system_dns_busctl_property_arguments("/org/freedesktop/resolve1/link/_336", "DNS"),
+      [
+        "--json=short",
+        "get-property",
+        "org.freedesktop.resolve1",
+        "/org/freedesktop/resolve1/link/_336",
+        "org.freedesktop.resolve1.Link",
+        "DNS"
+      ]
+    );
+  }
+
+  #[test]
+  fn parses_resolve1_get_link_json_strictly() {
+    for object_path in [
+      "/org/freedesktop/resolve1/link/_31",
+      "/org/freedesktop/resolve1/link/_313",
+      "/org/freedesktop/resolve1/link/_336",
+    ] {
+      let response = serde_json::json!({"type":"o","data":[object_path]});
+      assert_eq!(
+        parse_resolve1_link_object_path(&response).unwrap(),
+        object_path
+      );
+    }
+
+    for response in [
+      serde_json::json!({"type":"s","data":["/org/freedesktop/resolve1/link/_31"]}),
+      serde_json::json!({"type":"o","data":[]}),
+      serde_json::json!({"type":"o","data":["/org/freedesktop/resolve1/link/_31", "/org/freedesktop/resolve1/link/_32"]}),
+      serde_json::json!({"type":"o","data":["/org/freedesktop/resolve1"]}),
+      serde_json::json!({"type":"o","data":["/org/freedesktop/resolve1/link/"]}),
+      serde_json::json!({"type":"o","data":["/org/freedesktop/resolve1/link/_31/child"]}),
+    ] {
+      assert!(parse_resolve1_link_object_path(&response).is_err());
+    }
+  }
+
+  #[test]
+  fn classifies_resolve1_json_link_state() {
+    let exact_dns = serde_json::json!({
+      "type": "a(iay)",
+      "data": [[2, [127, 0, 0, 1]]]
+    });
+    let exact_domains = serde_json::json!({
+      "type": "a(sb)",
+      "data": [[".", true]]
+    });
+    assert_eq!(
+      classify_system_dns_route(
+        &exact_dns,
+        &exact_domains,
+        Some("127.0.0.1:53".parse().unwrap())
+      ),
+      SystemDnsRouteState::Exact
+    );
+    assert_eq!(
+      classify_system_dns_route(
+        &exact_dns,
+        &exact_domains,
+        Some("127.0.0.2:53".parse().unwrap())
+      ),
+      SystemDnsRouteState::Partial
+    );
+    for domains in [
+      serde_json::json!({"type":"a(sb)","data":[["~.",true]]}),
+      serde_json::json!({"type":"a(sb)","data":[[".",false]]}),
+      serde_json::json!({"type":"a(sb)","data":[[".",true],["example.com",true]]}),
+      serde_json::json!({"type":"s","data":[[".",true]]}),
+    ] {
+      assert_eq!(
+        classify_system_dns_route(&exact_dns, &domains, Some("127.0.0.1:53".parse().unwrap())),
+        SystemDnsRouteState::Partial
+      );
+    }
+    assert_eq!(
+      classify_system_dns_route(
+        &serde_json::json!({"type":"a(iay)","data":[]}),
+        &serde_json::json!({"type":"a(sb)","data":[]}),
+        Some("127.0.0.1:53".parse().unwrap())
+      ),
+      SystemDnsRouteState::Absent
+    );
+  }
+
+  #[test]
+  fn system_dns_link_requires_exact_identity_and_schema_two_journal() {
+    let plan = system_dns_plan();
+    let owned_journal = journal(plan.clone(), "applied");
+    assert_eq!(
+      classify_system_dns_link(
+        &exact_system_dns_link(),
+        &exact_system_dns_addresses(),
+        Some(&owned_journal)
+      )
+      .unwrap(),
+      SystemDnsLinkState::Exact
+    );
+
+    let mut foreign_alias = exact_system_dns_link();
+    foreign_alias["ifalias"] = Value::from("managed-by=someone-else");
+    assert!(
+      classify_system_dns_link(
+        &foreign_alias,
+        &exact_system_dns_addresses(),
+        Some(&owned_journal)
+      )
+      .unwrap_err()
+      .to_string()
+      .contains("unexpected ownership alias")
+    );
+
+    let legacy_journal = NetworkState {
+      schema: 1,
+      ..owned_journal.clone()
+    };
+    assert!(
+      classify_system_dns_link(
+        &exact_system_dns_link(),
+        &exact_system_dns_addresses(),
+        Some(&legacy_journal)
+      )
+      .unwrap_err()
+      .to_string()
+      .contains("schema 2")
+    );
+
+    let incomplete_journal = journal(plan, "installing-system-dns-link");
+    let mut incomplete_link = exact_system_dns_link();
+    incomplete_link.as_object_mut().unwrap().remove("ifalias");
+    assert_eq!(
+      classify_system_dns_link(
+        &incomplete_link,
+        &exact_system_dns_addresses(),
+        Some(&incomplete_journal)
+      )
+      .unwrap(),
+      SystemDnsLinkState::Partial
+    );
+
+    let mut extra_addresses = exact_system_dns_addresses();
+    extra_addresses[0]["addr_info"]
+      .as_array_mut()
+      .unwrap()
+      .push(serde_json::json!({
+        "family": "inet",
+        "local": "192.0.2.2",
+        "prefixlen": 32
+      }));
+    assert_eq!(
+      classify_system_dns_link(
+        &exact_system_dns_link(),
+        &extra_addresses,
+        Some(&owned_journal)
+      )
+      .unwrap(),
+      SystemDnsLinkState::Partial
+    );
+  }
+
+  #[test]
+  fn disabled_system_dns_ignores_unowned_same_named_links() {
+    let disabled = journal(plan(), "applied");
+    assert!(!journal_authorizes_system_dns_transition(Some(&disabled)));
+    assert!(!should_inspect_system_dns_link(Some(&disabled), false));
+    assert!(should_inspect_system_dns_link(Some(&disabled), true));
+    assert!(!should_inspect_system_dns_link(None, false));
+    assert!(should_inspect_system_dns_link(None, true));
+
+    for phase in [
+      "installing-system-dns-link",
+      "configuring-system-dns-route",
+      "removing-system-dns",
+    ] {
+      let transition = journal(plan(), phase);
+      assert!(journal_authorizes_system_dns_transition(Some(&transition)));
+      assert!(should_inspect_system_dns_link(Some(&transition), false));
+    }
+
+    let enabled = journal(system_dns_plan(), "applied");
+    assert!(journal_authorizes_system_dns_transition(Some(&enabled)));
+    assert!(!journal_authorizes_system_dns_transition(None));
   }
 
   fn guard_rule() -> Value {
@@ -1645,7 +2510,7 @@ mod tests {
       network: config,
     };
     assert!(
-      TproxyNetworkPlan::from_config(&tproxy, None, 989)
+      TproxyNetworkPlan::from_config(&tproxy, None, false, 989)
         .unwrap()
         .render_nft_batch()
         .contains("192.168.0.0/16")
@@ -1662,7 +2527,7 @@ mod tests {
       network: config,
     };
     assert!(
-      TproxyNetworkPlan::from_config(&tproxy, None, 989)
+      TproxyNetworkPlan::from_config(&tproxy, None, false, 989)
         .unwrap_err()
         .to_string()
         .contains("IPv6")
@@ -1682,7 +2547,7 @@ mod tests {
       network: config,
     };
 
-    let plan = TproxyNetworkPlan::from_config(&tproxy, None, 989).unwrap();
+    let plan = TproxyNetworkPlan::from_config(&tproxy, None, false, 989).unwrap();
 
     assert!(
       plan
@@ -1706,7 +2571,7 @@ mod tests {
     };
     let dns_listen = "[::1]:5353".parse().unwrap();
 
-    let plan = TproxyNetworkPlan::from_config(&config, Some(dns_listen), 989).unwrap();
+    let plan = TproxyNetworkPlan::from_config(&config, Some(dns_listen), false, 989).unwrap();
 
     assert_eq!(plan.dns_listen, Some(dns_listen));
   }

@@ -77,8 +77,9 @@ stop-post 尽快清理，整体采用 fail-open。
 当前原生透明入口仅实现 Linux IPv4 TPROXY，TUN 和 IPv6 尚未实现。作为
 IPv4-only exit-node 时，可让 systemd-resolved 的默认查询使用本机
 Plug2Proxy DNS，并设置 `strategy: "ipv4_only"` 让 AAAA 返回 NODATA；终端
-显式指定的 DNS 默认仍保留原目标。完整配置、exit-node DNS drop-in、systemd
-unit、权限模型和卸载步骤见
+显式指定的 DNS 默认仍保留原目标。`network apply/remove` 会随服务生命周期
+管理一条专用的 systemd-resolved DNS route，不依赖 Tailscale 接口上的易失
+配置。完整配置、exit-node DNS drop-in、systemd unit、权限模型和卸载步骤见
 [原生 TPROXY 部署](docs/native-tproxy.md)。
 
 ## 有什么特点

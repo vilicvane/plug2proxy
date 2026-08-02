@@ -119,10 +119,16 @@ impl Config {
     }
   }
 
-  fn dns_listen(&self) -> Option<std::net::SocketAddr> {
+  fn dns_settings(&self) -> Option<(std::net::SocketAddr, bool)> {
     match self {
-      Config::Hub(config) => config.dns.as_ref().map(|dns| *dns.listen),
-      Config::In(config) => config.dns.as_ref().map(|dns| *dns.listen),
+      Config::Hub(config) => config
+        .dns
+        .as_ref()
+        .map(|dns| (*dns.listen, dns.system_default)),
+      Config::In(config) => config
+        .dns
+        .as_ref()
+        .map(|dns| (*dns.listen, dns.system_default)),
       Config::Out(_) => None,
     }
   }
@@ -153,12 +159,15 @@ async fn run_network_action(
       .with_context(|| format!("failed to read config file {}", config_path.display()))?
   };
   let config = parse_config(config_source)?;
-  let dns_listen = config.dns_listen();
+  let (dns_listen, dns_system_default) = config
+    .dns_settings()
+    .map(|(listen, system_default)| (Some(listen), system_default))
+    .unwrap_or((None, false));
   let tproxy = config
     .tproxy()
     .context("configuration does not contain an inbounds.tproxy section")?;
   let bypass_uid = resolve_bypass_user(&tproxy.network.bypass_user).await?;
-  let plan = TproxyNetworkPlan::from_config(tproxy, dns_listen, bypass_uid)?;
+  let plan = TproxyNetworkPlan::from_config(tproxy, dns_listen, dns_system_default, bypass_uid)?;
 
   match action {
     NetworkAction::Render => print!("{}", plan.render_nft_batch()),
