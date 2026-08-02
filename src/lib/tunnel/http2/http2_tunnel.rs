@@ -37,7 +37,6 @@ pub struct Http2InTunnel {
     priority: i64,
     request_sender: Arc<Mutex<Option<h2::client::SendRequest<bytes::Bytes>>>>,
     active_permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
-    lifetime_streams: AtomicUsize,
     active_streams: Arc<AtomicUsize>,
     closed_notify: Arc<tokio::sync::Notify>,
     closed: Arc<AtomicBool>,
@@ -109,7 +108,6 @@ impl Http2InTunnel {
             priority,
             request_sender: Arc::new(Mutex::new(Some(request_sender))),
             active_permit,
-            lifetime_streams: AtomicUsize::new(0),
             active_streams: Arc::new(AtomicUsize::new(0)),
             closed_notify,
             closed,
@@ -134,8 +132,6 @@ impl fmt::Display for Http2InTunnel {
     }
 }
 
-const LIFETIME_STREAMS_LIMIT: usize = 4096;
-
 #[async_trait::async_trait]
 impl InTunnelLike for Http2InTunnel {
     async fn connect(
@@ -149,18 +145,6 @@ impl InTunnelLike for Http2InTunnel {
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
         tokio::sync::oneshot::Sender<()>,
     )> {
-        let lifetime_streams = self
-            .lifetime_streams
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            + 1;
-
-        // h2 might has some memory leak issue for long standing connections.
-        if lifetime_streams == LIFETIME_STREAMS_LIMIT {
-            log::info!("tunnel {self} reached lifetime connection limit.");
-
-            self.active_permit.lock().unwrap().take();
-        }
-
         let http_request = {
             let mut http_request = http::Request::builder();
 
@@ -246,14 +230,6 @@ impl InTunnel for Http2InTunnel {
 
     fn priority(&self) -> i64 {
         self.priority
-    }
-
-    fn set_active_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
-        *self.active_permit.lock().unwrap() = Some(permit);
-    }
-
-    fn is_active(&self) -> bool {
-        self.active_permit.lock().unwrap().is_some()
     }
 
     async fn closed(&self) {

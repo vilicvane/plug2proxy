@@ -1,7 +1,7 @@
 use std::{
     fmt,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -31,7 +31,6 @@ pub struct ByteStreamInTunnel<TConnection> {
     labels: Vec<Label>,
     priority: i64,
     connection: Arc<TConnection>,
-    active_permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
 }
 
 impl<TConnection> ByteStreamInTunnel<TConnection>
@@ -46,27 +45,13 @@ where
         priority: i64,
         connection: TConnection,
     ) -> Self {
-        let connection = Arc::new(connection);
-        let active_permit = Arc::new(Mutex::new(None));
-
-        tokio::spawn({
-            let connection = connection.clone();
-            let active_permit = active_permit.clone();
-
-            async move {
-                connection.closed().await;
-                active_permit.lock().unwrap().take();
-            }
-        });
-
         ByteStreamInTunnel {
             r#type,
             id,
             out_id,
             labels,
             priority,
-            connection,
-            active_permit,
+            connection: Arc::new(connection),
         }
     }
 }
@@ -165,14 +150,6 @@ where
 
     fn priority(&self) -> i64 {
         self.priority
-    }
-
-    fn set_active_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) {
-        *self.active_permit.lock().unwrap() = Some(permit);
-    }
-
-    fn is_active(&self) -> bool {
-        self.active_permit.lock().unwrap().is_some()
     }
 
     async fn closed(&self) {

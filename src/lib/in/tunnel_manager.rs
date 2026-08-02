@@ -173,8 +173,6 @@ impl TunnelManager {
 
             match tunnel_provider.accept(out_id).await {
                 Ok(Some((tunnel, (out_routing_rules, out_routing_priority)))) => {
-                    tunnel.set_active_permit(permit);
-
                     let tunnel_id = tunnel.id();
                     let tunnel = Arc::new(tunnel);
 
@@ -202,6 +200,8 @@ impl TunnelManager {
                         let router = router.clone();
 
                         async move {
+                            let _permit = permit;
+
                             tunnel.closed().await;
 
                             log::info!("tunnel {tunnel} closed.");
@@ -276,11 +276,6 @@ fn select_from_tunnels(
     tunnels: &[Arc<Box<dyn InTunnel>>],
     index: usize,
 ) -> Option<AnyInTunnelLikeArc> {
-    let tunnels = tunnels
-        .iter()
-        .filter(|tunnel| tunnel.is_active())
-        .collect_vec();
-
     if tunnels.is_empty() {
         return None;
     }

@@ -27,10 +27,6 @@ pub trait InTunnel: InTunnelLike {
 
     fn priority(&self) -> i64;
 
-    fn set_active_permit(&self, permit: tokio::sync::OwnedSemaphorePermit);
-
-    fn is_active(&self) -> bool;
-
     async fn closed(&self);
 
     fn is_closed(&self) -> bool;
