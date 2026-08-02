@@ -1,7 +1,10 @@
 #!/bin/bash
 
+set -euo pipefail
+
 command="cargo"
 target=""
+resources=("common" "ubuntu")
 
 while getopts "t::m:r::d:" flag; do
     case $flag in
