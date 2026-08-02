@@ -10,9 +10,9 @@ Plug2Proxy 是一个实验性的多节点代理。它把入口、协调和出口
 ## 它怎么工作
 
 ```text
-                         ┌──────── HUB relay ────────┐
-SOCKS5 / transparent → IN                           OUT → target
-                         └──── peer connection ──────┘
+                               ┌──────── HUB relay ────────┐
+SOCKS5 / native TPROXY → IN                           OUT → target
+                               └──── peer connection ──────┘
 ```
 
 - **IN** 接收请求，执行路由规则，并提供当前机器的 `DIRECT` 出口。
@@ -59,6 +59,28 @@ keepalive，并等待 quiche 判定当前 QUIC 连接关闭后，以新的连接
 TCP 时主路径仍能工作，但不会获得 UDP 旁路。具体端口和 NAT 要求见
 [推荐配置教程](docs/configuration.md#端口与防火墙)。
 
+## 原生透明入口
+
+Linux 上的 IN/HUB 可以直接启用 IPv4 TPROXY inbound，不再需要先用
+sing-box 把 TUN 流量转换成 SOCKS5。TCP、UDP 和 TCP/UDP DNS 53 都在
+Plug2Proxy 内取得原目标、执行同一套路由，并沿原目标地址回包。
+
+特权被拆成两个很短的阶段：长期运行的数据面使用专用 `plug2proxy` 用户，
+只保留 `CAP_NET_RAW` 与 `CAP_NET_BIND_SERVICE`；启动和停止时由同一个
+二进制的 `network apply/remove` 子命令以 root 按受控顺序安装或撤销
+nftables 与 policy route。其中 nft table 原子替换，route/rule 使用所有权
+journal 和失败回滚。规则由配置生成，用户不需要维护 nft 文件或网络变化脚本。
+本机和转发方向已有的 conntrack flow 在启用时保持原路径，新 flow 才写入
+Plug2Proxy 的 conntrack mark；正常停止时先撤规则再结束进程，异常路径则由
+stop-post 尽快清理，整体采用 fail-open。
+
+当前原生透明入口仅实现 Linux IPv4 TPROXY，TUN 和 IPv6 尚未实现。作为
+IPv4-only exit-node 时，可让 systemd-resolved 的默认查询使用本机
+Plug2Proxy DNS，并设置 `strategy: "ipv4_only"` 让 AAAA 返回 NODATA；终端
+显式指定的 DNS 默认仍保留原目标。完整配置、exit-node DNS drop-in、systemd
+unit、权限模型和卸载步骤见
+[原生 TPROXY 部署](docs/native-tproxy.md)。
+
 ## 有什么特点
 
 - **一套进程，三种角色**：`in`、`hub`、`out` 使用同一个二进制和
@@ -75,8 +97,8 @@ TCP 时主路径仍能工作，但不会获得 UDP 旁路。具体端口和 NAT 
 - **HUB relay 与 IN–OUT peer 直连**：OUT 决定是否提供直连入口，HUB
   负责协调和下发 endpoint，IN 维护实际可用的 peer 路径。
 
-- **SOCKS5 TCP 与 UDP**：IN 可以直接作为 SOCKS5 代理，也可以接在
-  sing-box TUN 等透明代理入口之后。
+- **SOCKS5 与原生 TPROXY**：IN/HUB 可以接收 SOCKS5 TCP/UDP；Linux
+  IPv4 还可直接管理 TPROXY TCP/UDP，并可选择是否强制劫持 DNS。
 
 - **QomT 传输**：可靠的 QUIC over mTCP 主路径与可选的 QUIC over UDP
   DATAGRAM 旁路并行工作。Linux 上还会尝试为主路径的底层 TCP socket
@@ -155,7 +177,7 @@ listener，让 IN 优先直连；特殊 HK OUT 只通过 HUB relay；CN 流量�
 ## 文档
 
 - [Plug2Proxy 推荐配置教程](docs/configuration.md)
-- [使用 Tailscale、sing-box 与 Plug2Proxy 建立最简 IPv4 exit node](docs/tailscale-sing-box.md)
+- [Linux 原生 TPROXY 部署](docs/native-tproxy.md)
 
 ## 一起折腾
 

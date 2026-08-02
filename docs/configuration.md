@@ -1,7 +1,8 @@
 # Plug2Proxy 推荐配置教程
 
-本文只介绍 Plug2Proxy 本身，不涉及透明代理、Tailscale 或具体云厂商的
-防火墙操作界面，但会列出节点间必须放行的端口。完成后的推荐拓扑是：
+本文先介绍显式 SOCKS5 入口的节点拓扑，并列出节点间必须放行的端口。
+Linux 整机或 Tailscale 流量可直接换成 Plug2Proxy 原生 TPROXY；相关
+权限、自动规则和 systemd 生命周期见[原生 TPROXY 部署](native-tproxy.md)。
 
 ```text
                  ┌── peer data ─────────────→ US OUT ─→ 默认非 CN 流量
@@ -61,6 +62,7 @@ QomT 在一个 listener 上同时使用 TCP 主路径和 UDP QUIC 旁路。所�
 | 提供 peer 直连的 US OUT | `0.0.0.0:2233` | 来自 IN 的 TCP、UDP `2233` |
 | 只使用 relay 的 HK OUT | 无 | 不需要 QomT 入站端口 |
 | IN 的 SOCKS5 | `0.0.0.0:1080` | 仅来自受信客户端的 TCP、UDP `1080` |
+| IN 的原生 TPROXY | `127.0.0.1:12345` | 仅供本机 nft TPROXY，不应在云防火墙开放 |
 | 可选 DNS listener | 配置值 | 仅来自实际 DNS 客户端的 TCP、UDP |
 
 HK OUT 没有 listener 只表示它不接受 peer 入站；它仍会主动连接 HUB 的
@@ -283,8 +285,9 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 peer 连接成功后，IN 对 `us` 的请求会优先选择
 `qomt(priority=PeerProvider, ...)`。无需再配置一个数值 priority。
 
-这里 OUT 的 `hub.connections: 4` 表示到 HUB 的一个 QomT connection 由
-四条 mTCP path 承载。它与 IN 使用相同语义，不会建立四个独立 QomT。
+这里 OUT 的 `hub.connections: 4` 表示到 HUB 的一个 QomT 主路径由 mTCP
+承载，mTCP 内部使用四条并行的底层 TCP connection。它与 IN 使用相同
+语义，不会建立四个独立 QomT。
 
 ## 4. 配置只使用 HUB relay 的 HK OUT
 
@@ -341,8 +344,9 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 非 fallback 路由快照。IN 自身始终保留一个私有 `DIRECT`，HUB 不需要把
 自己的 local exit 下发给 IN。
 
-IN 的 `hub.connections: 4` 表示一个 QomT connection 下的四条 mTCP
-path；IN 建立 peer connection 时也使用这个 path 数。
+IN 的 `hub.connections: 4` 表示一个 QomT 主路径使用 mTCP 承载，而该
+mTCP 内含四条并行的底层 TCP connection；IN 建立 peer connection 时也使用
+这个底层 TCP 数量。
 
 `sniff` 默认为 `true`，推荐显式保留：
 
@@ -352,10 +356,48 @@ path；IN 建立 peer connection 时也使用这个 path 数。
 - 请求选择远端 OUT 时，可以把嗅探到的域名交给 OUT 解析，降低 IN
   本地 DNS 污染的影响。
 
-如果只供本机 sing-box 使用，应监听 `127.0.0.1:1080`。只有受信局域网
-客户端确实需要访问时才监听 `0.0.0.0`，并限制 TCP、UDP `1080` 的来源。
+如果只供本机程序使用，应监听 `127.0.0.1:1080`。只有受信局域网客户端
+确实需要访问时才监听 `0.0.0.0`，并限制 TCP、UDP `1080` 的来源。
 
-启动 IN：
+需要透明接管本机或 Tailscale 转发的 IPv4 流量时，可以删除 `socks5` 并
+改为：
+
+```jsonc
+"inbounds": {
+  "tproxy": {
+    "listen": "127.0.0.1:12345",
+    "sniff": true,
+    "hijack_dns": false,
+    "network": {
+      "bypass_user": "plug2proxy"
+    }
+  }
+}
+```
+
+`listen` 必须是带非零端口的 IPv4 loopback 地址。该端口只由自动生成的
+nftables 规则使用，不需要也不应在安全组中开放。不要手工复制规则；安装
+仓库提供的 systemd unit 后，启动时调用 `network apply`，reload 时调用
+`network reconcile`，正常或异常停止时调用 `network remove`；restart 会先
+remove 再 apply。完整步骤见
+[原生 TPROXY 部署](native-tproxy.md)。
+
+`hijack_dns` 默认 `false`，此时终端显式指定的 DNS 服务器保持为实际目标，
+并像其他 TCP/UDP 流量一样经过透明入口。设为 `true` 才会把所有原目标端口
+为 53 的请求强制交给顶层 Plug2Proxy DNS。
+
+作为 Tailscale exit node 时，还应按原生 TPROXY 文档配置 tailnet 和云平台
+内部网段的 `exclude_ipv4`；否则发往其他 tailnet 节点的目标也会被透明接管。
+当前 TPROXY 只接管 IPv4；如果该节点没有可用的 IPv6 转发路径，推荐安装
+原生 TPROXY 文档中的 exit-node DNS drop-in，让 Tailscale 默认 DNS 使用
+本机 Plug2Proxy DNS，并设置 `"strategy": "ipv4_only"`。这不会覆盖终端
+自行指定的 resolver。完整示例与限制见原生 TPROXY 文档。
+
+下面的手工启动方式只用于本节前面的 SOCKS5 示例。启用 TPROXY 时不要继续
+使用 `/etc/plug2proxy` 下的手工命令，应按原生 TPROXY 文档使用专用用户、
+`/var/lib/plug2proxy` 工作目录和仓库提供的 systemd unit。
+
+启动 SOCKS5 IN：
 
 ```bash
 cd /etc/plug2proxy
@@ -471,7 +513,7 @@ www.taobao.com:443 -> DIRECT via local(default)
 `DIRECT`。绑定 interface 的 exit 只作为 provider，不会成为 `DIRECT`。
 同一 OUT 最多配置一个没有 bind 限制的 local exit。
 
-Linux 上 Plug2Proxy 会为 QomT 主路径的底层 mTCP socket 尝试启用 BBR；
+Linux 上 Plug2Proxy 会为 QomT 主路径中 mTCP 的底层 TCP socket 尝试启用 BBR；
 UDP 旁路使用 quiche 自身的 pacing 与拥塞控制。BBR 是推荐优化，不是启动
 前置条件。部署前可确认：
 

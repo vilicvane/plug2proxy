@@ -46,6 +46,8 @@ const PENDING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 const TRANSFER_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UDP_FLOW_LOG_CACHE_CAPACITY: u64 = 1024 * 64;
 const UDP_FLOW_LOG_IDLE_TIMEOUT: Duration = duration!("1m");
+const UDP_ROUTER_QUEUE_CAPACITY: usize = 4096;
+const UDP_ASSOCIATION_QUEUE_CAPACITY: usize = 1024;
 
 type UdpFlow = (UdpPacketSource, SocketDestination, OutExit);
 
@@ -495,7 +497,7 @@ impl UdpRoute<'_> {
 
 #[derive(Clone)]
 struct UdpAssociationSender {
-  sender: mpsc::UnboundedSender<OutgoingUdpPacket>,
+  sender: mpsc::Sender<OutgoingUdpPacket>,
   is_local: bool,
 }
 
@@ -504,11 +506,12 @@ async fn forward_udp(
   route: UdpRoute<'_>,
   mut packet_stream: Box<dyn InboundUdpPacketStream>,
 ) -> Result<(), Error> {
-  let (incoming_sender, mut incoming_receiver) = mpsc::unbounded_channel();
+  let (incoming_sender, mut incoming_receiver) = mpsc::channel(UDP_ROUTER_QUEUE_CAPACITY);
   let mut association_senders = HashMap::<OutExit, UdpAssociationSender>::new();
   let mut association_tasks = JoinSet::new();
   let logged_flows = new_udp_flow_log_cache(UDP_FLOW_LOG_IDLE_TIMEOUT);
   let mut out_dispatcher_revision = node.out_dispatcher_revision();
+  let mut dropped_outgoing = 0_u64;
 
   loop {
     tokio::select! {
@@ -562,7 +565,8 @@ async fn forward_udp(
           else {
             continue;
           };
-          let (association_sender, association_receiver) = mpsc::unbounded_channel();
+          let (association_sender, association_receiver) =
+            mpsc::channel(UDP_ASSOCIATION_QUEUE_CAPACITY);
 
           association_tasks.spawn(run_udp_association(
             matched_route.exit.clone(),
@@ -641,8 +645,19 @@ async fn forward_udp(
         }
         outgoing.destination = dial_destination;
 
-        if association.sender.send(outgoing).is_err() {
-          association_senders.remove(&matched_route.exit);
+        match association.sender.try_send(outgoing) {
+          Ok(()) => {}
+          Err(mpsc::error::TrySendError::Full(_)) => {
+            dropped_outgoing = dropped_outgoing.wrapping_add(1);
+            if dropped_outgoing.is_power_of_two() {
+              log::warn!(
+                "UDP router association queues full; dropped {dropped_outgoing} outgoing packets"
+              );
+            }
+          }
+          Err(mpsc::error::TrySendError::Closed(_)) => {
+            association_senders.remove(&matched_route.exit);
+          }
         }
       }
       Some(incoming) = incoming_receiver.recv() => {
@@ -763,10 +778,12 @@ async fn open_udp_association(
 async fn run_udp_association(
   exit: OutExit,
   mut outbound: Box<dyn OutboundUdpPacketStream>,
-  mut outgoing_receiver: mpsc::UnboundedReceiver<OutgoingUdpPacket>,
-  incoming_sender: mpsc::UnboundedSender<IncomingUdpPacket>,
+  mut outgoing_receiver: mpsc::Receiver<OutgoingUdpPacket>,
+  incoming_sender: mpsc::Sender<IncomingUdpPacket>,
 ) -> (OutExit, Result<(), Error>) {
   let result = async {
+    let mut dropped_incoming = 0_u64;
+    let mut dropped_oversized = 0_u64;
     loop {
       tokio::select! {
         outgoing = outgoing_receiver.recv() => {
@@ -775,15 +792,36 @@ async fn run_udp_association(
             break;
           };
 
-          outbound.send(outgoing).await?;
+          match outbound.send(outgoing).await {
+            Ok(()) => {}
+            Err(UdpPacketStreamError::FrameTooLarge(length)) => {
+              dropped_oversized = dropped_oversized.wrapping_add(1);
+              if dropped_oversized.is_power_of_two() {
+                log::warn!(
+                  "UDP packet exceeded the transport frame limit for {exit}; \
+                   dropped {dropped_oversized} packets (last encoded size: {length} bytes)"
+                );
+              }
+            }
+            Err(error) => return Err(error.into()),
+          }
         }
         incoming = outbound.next() => {
           let Some(incoming) = incoming else {
             break;
           };
 
-          if incoming_sender.send(incoming).is_err() {
-            break;
+          match incoming_sender.try_send(incoming) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+              dropped_incoming = dropped_incoming.wrapping_add(1);
+              if dropped_incoming.is_power_of_two() {
+                log::warn!(
+                  "UDP router response queue full for {exit}; dropped {dropped_incoming} packets"
+                );
+              }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
           }
         }
       }

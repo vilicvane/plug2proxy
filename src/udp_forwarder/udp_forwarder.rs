@@ -20,6 +20,8 @@ use crate::{
   utils::net::SocketAddressExt,
 };
 
+const UDP_FORWARDER_QUEUE_CAPACITY: usize = 4096;
+
 pub struct UdpForwarder {
   packet_sink: flume::r#async::SendSink<'static, OutgoingUdpPacket>,
   packet_stream: flume::r#async::RecvStream<'static, IncomingUdpPacket>,
@@ -32,8 +34,8 @@ impl UdpForwarder {
   }
 
   pub fn with_interface(interface: Option<String>) -> Self {
-    let (external_packet_sender, packet_receiver) = flume::unbounded();
-    let (packet_sender, external_packet_receiver) = flume::unbounded();
+    let (external_packet_sender, packet_receiver) = flume::bounded(UDP_FORWARDER_QUEUE_CAPACITY);
+    let (packet_sender, external_packet_receiver) = flume::bounded(UDP_FORWARDER_QUEUE_CAPACITY);
 
     let packet_sink = external_packet_sender.into_sink();
     let packet_stream = external_packet_receiver.into_stream();
@@ -158,6 +160,7 @@ impl UdpForwarder {
     response_destination: Option<SocketAddr>,
   ) {
     let mut buffer = vec![0; u16::MAX as usize];
+    let mut dropped_packets = 0_u64;
 
     loop {
       let Ok((length, source_socket_address)) =
@@ -168,17 +171,23 @@ impl UdpForwarder {
         break;
       };
 
-      packet_sender
-        .send_async(IncomingUdpPacket {
-          source: source.clone(),
-          destination: response_destination.unwrap_or(source_socket_address),
-          payload: buffer[..length].to_vec(),
-        })
-        .await
-        .inspect_err(|error| {
-          log::error!("error sending incoming packet back to source: {}", error);
-        })
-        .ok();
+      match packet_sender.try_send(IncomingUdpPacket {
+        source: source.clone(),
+        destination: response_destination.unwrap_or(source_socket_address),
+        payload: buffer[..length].to_vec(),
+      }) {
+        Ok(()) => {}
+        Err(flume::TrySendError::Full(_)) => {
+          dropped_packets = dropped_packets.wrapping_add(1);
+          if dropped_packets.is_power_of_two() {
+            log::warn!(
+              "UDP forwarder response queue full; dropped {dropped_packets} packets for {}",
+              source.address
+            );
+          }
+        }
+        Err(flume::TrySendError::Disconnected(_)) => break,
+      }
     }
   }
 }

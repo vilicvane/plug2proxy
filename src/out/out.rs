@@ -450,11 +450,12 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn hub_connections_are_mtcp_paths_in_one_qomt_connection() -> anyhow::Result<()> {
+  async fn hub_connections_are_underlying_tcp_connections_in_one_qomt() -> anyhow::Result<()> {
     timeout(duration!("15s"), async {
       const EXPECTED_PATHS: usize = 4;
 
-      let test_dir = test_dir().join(format!("out_mtcp_paths_{}", uuid::Uuid::new_v4()));
+      let test_dir =
+        test_dir().join(format!("out_mtcp_tcp_connections_{}", uuid::Uuid::new_v4()));
       let hub_dir = test_dir.join("hub");
       let out_dir = test_dir.join("out");
 
@@ -504,14 +505,20 @@ mod tests {
           tokio::select! {
             result = &mut next_group => {
               result?;
-              anyhow::bail!("OUT opened a second QomT connection instead of extending mTCP");
+              anyhow::bail!(
+                "OUT opened a second QomT connection instead of extending mTCP with another TCP connection"
+              );
             }
             _ = sleep(duration!("10ms")) => {}
           }
         }
       })
       .await
-      .map_err(|_| anyhow::anyhow!("timed out waiting for {EXPECTED_PATHS} mTCP paths"))??;
+      .map_err(|_| {
+        anyhow::anyhow!(
+          "timed out waiting for {EXPECTED_PATHS} underlying TCP connections in mTCP"
+        )
+      })??;
 
       drop(next_group);
 

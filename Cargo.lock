@@ -2083,6 +2083,7 @@ dependencies = [
  "ipnet",
  "itertools 0.14.0",
  "json-strip-comments",
+ "libc",
  "lits",
  "log",
  "lowkit",

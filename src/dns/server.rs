@@ -20,11 +20,23 @@ use crate::{
 const TCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_RESPONSE_BUFFER_SIZE: usize = 16 * 1024;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsStrategy {
+  /// Forward every supported record type unchanged.
+  #[default]
+  Default,
+  /// Return NODATA for AAAA queries without contacting an upstream resolver.
+  Ipv4Only,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsConfig {
   #[serde(deserialize_with = "deserialize_listen_socket_address")]
   pub listen: SerdeSocketAddress,
+  #[serde(default)]
+  pub strategy: DnsStrategy,
 }
 
 /// 运行 DNS 服务：按路由配置把域名解析代理到对应出口解析。
@@ -40,7 +52,7 @@ pub async fn run_dns_server(
   let udp_socket = tokio::net::UdpSocket::bind(listen).await?;
   let tcp_listener = tokio::net::TcpListener::bind(listen).await?;
 
-  let mut server = build_dns_server(node);
+  let mut server = build_dns_server(node, config.strategy);
   server.register_socket(udp_socket);
   server.register_listener(tcp_listener, TCP_REQUEST_TIMEOUT, TCP_RESPONSE_BUFFER_SIZE);
 
@@ -53,8 +65,9 @@ pub async fn run_dns_server(
 
 pub(crate) fn build_dns_server(
   node: Arc<dyn InLike + Send + Sync>,
+  strategy: DnsStrategy,
 ) -> Server<RoutingRequestHandler> {
-  let handler = Arc::new(RoutingZoneHandler::new(node));
+  let handler = Arc::new(RoutingZoneHandler::with_strategy(node, strategy));
 
   let mut catalog = Catalog::new();
   catalog.upsert(handler.origin().clone(), vec![handler]);
@@ -119,6 +132,25 @@ impl RequestHandler for RoutingRequestHandler {
 #[cfg(test)]
 mod config_tests {
   use super::*;
+
+  #[test]
+  fn strategy_defaults_to_original_behavior() {
+    let config = serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:5353"}"#).unwrap();
+    assert_eq!(config.strategy, DnsStrategy::Default);
+
+    let config =
+      serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:5353","strategy":"default"}"#)
+        .unwrap();
+    assert_eq!(config.strategy, DnsStrategy::Default);
+  }
+
+  #[test]
+  fn accepts_ipv4_only_strategy() {
+    let config =
+      serde_json::from_str::<DnsConfig>(r#"{"listen":"127.0.0.1:5353","strategy":"ipv4_only"}"#)
+        .unwrap();
+    assert_eq!(config.strategy, DnsStrategy::Ipv4Only);
+  }
 
   #[test]
   fn rejects_zero_listen_port() {

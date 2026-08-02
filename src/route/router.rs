@@ -59,14 +59,16 @@ impl Router {
     let geolite2 = GeoLite2::new(dir);
     let geosite = Geosite::new(dir, cache.clone());
 
-    Self {
+    let router = Self {
       geolite2,
       geosite,
       rules_map: HashMap::new().mutex(),
       merged_rules_cache: Vec::new().mutex(),
       cache,
       dns_cache,
-    }
+    };
+    router.update_rules_cache();
+    router
   }
 
   /// 构建下发给其他节点的规则。fallback 是节点本地概念，不下发。
@@ -260,6 +262,22 @@ mod tests {
     route::{AddressRule, AndRule, DomainRule, ProtocolRule, RuleKind},
     test::test_dir,
   };
+
+  #[tokio::test]
+  async fn new_router_has_direct_fallback_without_registered_rules() {
+    let router = Router::new(test_dir());
+    let destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("127.0.0.1".parse().unwrap()),
+      port: 80,
+      routing_domain: None,
+      routing_protocol: None,
+    };
+
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::Direct]
+    );
+  }
 
   #[tokio::test]
   async fn rule_updates_invalidate_cached_destination_matches() {

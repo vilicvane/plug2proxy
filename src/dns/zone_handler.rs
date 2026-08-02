@@ -24,6 +24,7 @@ use hickory_server::{
 use moka::{Expiry, sync::Cache};
 
 use crate::{
+  dns::DnsStrategy,
   r#in::InLike,
   node::{NodeResolveAnswers, ResolveQuery},
 };
@@ -41,15 +42,21 @@ type InFlightResolves = Arc<tokio::sync::Mutex<HashMap<QueryKey, SharedResolve>>
 pub struct RoutingZoneHandler {
   origin: LowerName,
   node: Arc<dyn InLike + Send + Sync>,
+  strategy: DnsStrategy,
   cache: Cache<QueryKey, Arc<Message>>,
   in_flight: InFlightResolves,
 }
 
 impl RoutingZoneHandler {
   pub fn new(node: Arc<dyn InLike + Send + Sync>) -> Self {
+    Self::with_strategy(node, DnsStrategy::Default)
+  }
+
+  pub(crate) fn with_strategy(node: Arc<dyn InLike + Send + Sync>, strategy: DnsStrategy) -> Self {
     Self {
       origin: LowerName::from_str(".").unwrap(),
       node,
+      strategy,
       cache: Cache::builder()
         .max_capacity(1024 * 64)
         .expire_after(AnswerExpiry)
@@ -64,6 +71,10 @@ impl RoutingZoneHandler {
       Name::from_str(name).map_err(|_| LookupError::from(ResponseCode::FormErr))?,
       record_type,
     );
+
+    if self.strategy == DnsStrategy::Ipv4Only && record_type == RecordType::AAAA {
+      return Ok(Lookup::new_with_max_ttl(query, []));
+    }
 
     if let Some(message) = self.cache.get(&key) {
       return Ok(Lookup::new_with_max_ttl(query, message.answers.to_vec()));
@@ -314,10 +325,17 @@ mod tests {
   async fn start_test_server(
     node: Arc<MockDnsNode>,
   ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    start_test_server_with_strategy(node, DnsStrategy::Default).await
+  }
+
+  async fn start_test_server_with_strategy(
+    node: Arc<MockDnsNode>,
+    strategy: DnsStrategy,
+  ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
 
-    let mut server = crate::dns::build_dns_server(node);
+    let mut server = crate::dns::build_dns_server(node, strategy);
     server.register_socket(socket);
 
     let handle = tokio::spawn(async move {
@@ -428,6 +446,40 @@ mod tests {
       assert_eq!(resolve_query.record_type, u16::from(RecordType::AAAA));
       assert_eq!(routes[0].exit, OutExit::Direct);
     }
+  }
+
+  #[tokio::test]
+  async fn ipv4_only_returns_nodata_for_aaaa_without_upstream_query() {
+    let node = Arc::new(MockDnsNode::new(
+      Router::new(test_dir()),
+      success_answers(Ipv4Addr::new(203, 0, 113, 7)),
+    ));
+    let (server_address, _server) =
+      start_test_server_with_strategy(node.clone(), DnsStrategy::Ipv4Only).await;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    let response = query(&client, server_address, "example.com.", RecordType::AAAA).await;
+    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    assert!(response.metadata.recursion_available);
+    assert!(response.answers.is_empty());
+    assert_eq!(response.queries.len(), 1);
+    assert_eq!(response.queries[0].query_type(), RecordType::AAAA);
+    assert!(node.queries.lock().unwrap().is_empty());
+
+    let response = query(&client, server_address, "example.com.", RecordType::A).await;
+    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    assert!(
+      response
+        .answers
+        .iter()
+        .any(|record| record.record_type() == RecordType::A)
+    );
+
+    let _response = query(&client, server_address, "example.com.", RecordType::HTTPS).await;
+    let queries = node.queries.lock().unwrap();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].1.record_type, u16::from(RecordType::A));
+    assert_eq!(queries[1].1.record_type, u16::from(RecordType::HTTPS));
   }
 
   #[tokio::test]

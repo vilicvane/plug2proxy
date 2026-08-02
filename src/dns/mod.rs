@@ -3,7 +3,7 @@ mod server;
 mod zone_handler;
 
 pub use resolver::{local_resolver, resolve_locally};
-pub use server::{DnsConfig, run_dns_server};
+pub use server::{DnsConfig, DnsStrategy, run_dns_server};
 pub use zone_handler::RoutingZoneHandler;
 
 #[cfg(test)]

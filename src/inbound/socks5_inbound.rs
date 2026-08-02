@@ -1,10 +1,9 @@
 use std::{
-  collections::HashMap,
   net::SocketAddr,
   pin::Pin,
   sync::Arc,
   task::{Context, Poll},
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use async_trait::async_trait;
@@ -20,26 +19,30 @@ use socks5_server::{
 use tokio::{
   io::{AsyncRead, AsyncWrite, ReadBuf},
   net::{TcpListener, UdpSocket},
-  sync::mpsc,
+  sync::{Semaphore, mpsc},
   task::JoinSet,
 };
 
 use crate::{
-  inbound::{Error, Inbound},
-  primitives::{BidiStream, SniffedProtocol, SocketDestination, SocketDestinationHost},
-  sniff::{QuicSniffer, TcpSniffOptions, sniff_tcp_stream},
+  inbound::{Error, Inbound, SniffingUdpPacketStream, sniff_tcp_ingress},
+  primitives::{BidiStream, SocketDestination, SocketDestinationHost},
   udp_forwarder::{
     InboundUdpPacketStream, IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource,
     UdpPacketStreamError,
   },
+  utils::task::reap_finished_tasks,
 };
+
+const TCP_PENDING_CONNECTIONS: usize = 1024;
+const UDP_PACKET_QUEUE_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
 pub struct Socks5Inbound {
   listen_address: SocketAddr,
   tcp_connect_receiver:
-    tokio::sync::Mutex<mpsc::UnboundedReceiver<(SocketDestination, Box<dyn BidiStream>)>>,
+    tokio::sync::Mutex<mpsc::Receiver<(SocketDestination, Box<dyn BidiStream>)>>,
   udp_packet_stream: tokio::sync::Mutex<Option<Socks5UdpPacketStream>>,
+  sniff: bool,
   _join_set: JoinSet<()>,
 }
 
@@ -50,6 +53,7 @@ pub struct Socks5InboundOptions {
 
 impl Socks5Inbound {
   pub async fn new(options: Socks5InboundOptions) -> Result<Self, Error> {
+    let sniff = options.sniff;
     let tcp_listener = TcpListener::bind(options.listen).await?;
 
     let listen_address = tcp_listener.local_addr()?;
@@ -65,9 +69,11 @@ impl Socks5Inbound {
 
     let server = Server::new(tcp_listener, NoAuth.arc());
 
-    let (tcp_connect_sender, tcp_connect_receiver) = mpsc::unbounded_channel();
-    let (incoming_packet_sender, incoming_packet_receiver) = flume::unbounded();
-    let (outgoing_packet_sender, outgoing_packet_receiver) = flume::unbounded();
+    let (tcp_connect_sender, tcp_connect_receiver) = mpsc::channel(TCP_PENDING_CONNECTIONS);
+    let (incoming_packet_sender, incoming_packet_receiver) =
+      flume::bounded(UDP_PACKET_QUEUE_CAPACITY);
+    let (outgoing_packet_sender, outgoing_packet_receiver) =
+      flume::bounded(UDP_PACKET_QUEUE_CAPACITY);
     let udp_packet_stream = Socks5UdpPacketStream {
       packet_sink: incoming_packet_sender.into_sink(),
       packet_stream: outgoing_packet_receiver.into_stream(),
@@ -75,18 +81,40 @@ impl Socks5Inbound {
     let mut join_set = JoinSet::new();
 
     join_set.spawn(async move {
+      let permits = Arc::new(Semaphore::new(TCP_PENDING_CONNECTIONS));
+      let mut connections = JoinSet::new();
+
       loop {
-        let (connection, peer_address) = server.accept().await.unwrap();
+        reap_finished_tasks(&mut connections, "SOCKS5 connection task");
+
+        let permit = tokio::select! {
+          _ = tcp_connect_sender.closed() => break,
+          permit = permits.clone().acquire_owned() => {
+            let Ok(permit) = permit else {
+              break;
+            };
+            permit
+          }
+        };
+        let (connection, peer_address) = match server.accept().await {
+          Ok(accepted) => accepted,
+          Err(error) => {
+            log::warn!("error accepting SOCKS5 connection: {error}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+          }
+        };
 
         let tcp_connect_sender = tcp_connect_sender.clone();
 
-        tokio::spawn(async move {
+        connections.spawn(async move {
+          let _permit = permit;
           handle_incoming_connection(
             connection,
             peer_address,
             udp_relay_address,
             tcp_connect_sender,
-            options.sniff,
+            sniff,
           )
           .await
           .inspect_err(|error| {
@@ -101,13 +129,13 @@ impl Socks5Inbound {
       udp_socket,
       outgoing_packet_sender,
       incoming_packet_receiver,
-      options.sniff,
     ));
 
     Self {
       listen_address,
       tcp_connect_receiver: tokio::sync::Mutex::new(tcp_connect_receiver),
       udp_packet_stream: Some(udp_packet_stream).tokio_mutex(),
+      sniff,
       _join_set: join_set,
     }
     .wrap_ok()
@@ -127,13 +155,19 @@ impl Inbound for Socks5Inbound {
   }
 
   async fn get_udp_packet_stream(&self) -> Result<Box<dyn InboundUdpPacketStream>, Error> {
-    self
+    let stream = self
       .udp_packet_stream
       .lock()
       .await
       .take()
       .map(|stream| Box::new(stream) as Box<dyn InboundUdpPacketStream>)
-      .ok_or(Error::Closed)
+      .ok_or(Error::Closed)?;
+
+    if self.sniff {
+      Ok(Box::new(SniffingUdpPacketStream::new(stream)))
+    } else {
+      Ok(stream)
+    }
   }
 }
 
@@ -221,11 +255,8 @@ async fn run_udp_socket(
   socket: Arc<AssociatedUdpSocket>,
   outgoing_packet_sender: flume::Sender<OutgoingUdpPacket>,
   incoming_packet_receiver: flume::Receiver<IncomingUdpPacket>,
-  sniff: bool,
 ) {
-  let mut quic_flows = HashMap::new();
-  let mut received_packets = 0_u64;
-
+  let mut dropped_packets = 0_u64;
   loop {
     tokio::select! {
       received = socket.recv_from() => {
@@ -239,19 +270,7 @@ async fn run_udp_socket(
               continue;
             }
 
-            let mut destination: SocketDestination = header.address.into();
-            if sniff {
-              sniff_udp_destination(
-                &mut destination,
-                &payload,
-                source_address,
-                &mut quic_flows,
-              );
-              received_packets += 1;
-              if received_packets.is_multiple_of(256) {
-                expire_quic_flows(&mut quic_flows);
-              }
-            }
+            let destination: SocketDestination = header.address.into();
 
             let packet = OutgoingUdpPacket {
               source: UdpPacketSource {
@@ -263,8 +282,17 @@ async fn run_udp_socket(
               payload: payload.to_vec(),
             };
 
-            if outgoing_packet_sender.send_async(packet).await.is_err() {
-              break;
+            match outgoing_packet_sender.try_send(packet) {
+              Ok(()) => {}
+              Err(flume::TrySendError::Full(_)) => {
+                dropped_packets = dropped_packets.wrapping_add(1);
+                if dropped_packets.is_power_of_two() {
+                  log::warn!(
+                    "SOCKS5 UDP ingress queue full; dropped {dropped_packets} packets"
+                  );
+                }
+              }
+              Err(flume::TrySendError::Disconnected(_)) => break,
             }
           }
           Err((error, _)) => {
@@ -294,7 +322,7 @@ async fn handle_incoming_connection(
   connection: IncomingConnection<(), NeedAuthenticate>,
   peer_address: SocketAddr,
   udp_relay_address: SocketAddr,
-  tcp_connect_sender: mpsc::UnboundedSender<(SocketDestination, Box<dyn BidiStream>)>,
+  tcp_connect_sender: mpsc::Sender<(SocketDestination, Box<dyn BidiStream>)>,
   sniff: bool,
 ) -> Result<(), Error> {
   let (connection, _) = connection.authenticate().await?;
@@ -307,37 +335,18 @@ async fn handle_incoming_connection(
         .reply(Reply::Succeeded, Address::unspecified())
         .await?;
 
-      let mut destination: SocketDestination = address.into();
+      let destination: SocketDestination = address.into();
       let stream = Socks5TcpStream { stream: connect };
-      let stream: Box<dyn BidiStream> = if sniff {
-        let sniffed = sniff_tcp_stream(stream, TcpSniffOptions::default()).await?;
-        log::debug!(
-          "TCP sniff: destination={}, result={:?}, elapsed_ms={}, bytes={}, protocol={}, domain={}",
-          destination,
-          sniffed.end_reason,
-          sniffed.elapsed.as_millis(),
-          sniffed.bytes_read,
-          sniffed
-            .protocol
-            .map(|protocol| protocol.to_string())
-            .as_deref()
-            .unwrap_or("-"),
-          sniffed
-            .domain
-            .as_ref()
-            .map(|domain| domain.domain.as_str())
-            .unwrap_or("-")
-        );
-        destination.set_routing_protocol(sniffed.protocol);
-        if let Some(sniffed_domain) = sniffed.domain {
-          destination.set_routing_domain(Some(sniffed_domain.domain));
-        }
-        Box::new(sniffed.stream)
+      let (destination, stream): (SocketDestination, Box<dyn BidiStream>) = if sniff {
+        sniff_tcp_ingress(destination, Box::new(stream)).await?
       } else {
-        Box::new(stream)
+        (destination, Box::new(stream))
       };
 
-      tcp_connect_sender.send((destination, stream)).unwrap()
+      tcp_connect_sender
+        .send((destination, stream))
+        .await
+        .map_err(|_| Error::Closed)?;
     }
     Command::Associate(associate_command, _address) => {
       let udp_relay_address = if udp_relay_address.ip().is_unspecified() {
@@ -364,85 +373,6 @@ async fn handle_incoming_connection(
   }
 
   Ok(())
-}
-
-const QUIC_FLOW_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const MAX_QUIC_FLOWS: usize = 4096;
-
-struct QuicFlowSniffState {
-  sniffer: Option<QuicSniffer>,
-  domain: Option<String>,
-  protocol: Option<SniffedProtocol>,
-  last_seen: Instant,
-}
-
-fn sniff_udp_destination(
-  destination: &mut SocketDestination,
-  payload: &[u8],
-  source: SocketAddr,
-  flows: &mut HashMap<(SocketAddr, SocketDestination), QuicFlowSniffState>,
-) {
-  let SocketDestinationHost::IpAddress(destination_ip) = &destination.host else {
-    return;
-  };
-  let key = (source, destination.clone());
-
-  if !flows.contains_key(&key) && !QuicSniffer::looks_like_initial(payload) {
-    return;
-  }
-
-  let state = flows.entry(key).or_insert_with(|| QuicFlowSniffState {
-    sniffer: Some(QuicSniffer::new()),
-    domain: None,
-    protocol: None,
-    last_seen: Instant::now(),
-  });
-  state.last_seen = Instant::now();
-
-  if state.domain.is_none() {
-    let destination_address = SocketAddr::new(*destination_ip, destination.port);
-    if let Some(sniffer) = &mut state.sniffer {
-      match sniffer.sniff_datagram(payload, source, destination_address) {
-        crate::sniff::SniffOutcome::Domain(sniffed) => {
-          log::debug!(
-            "sniffed {:?} domain {} while preserving SOCKS5 UDP destination {}",
-            sniffed.protocol,
-            sniffed.domain,
-            destination
-          );
-          state.domain = Some(sniffed.domain);
-          state.protocol = Some(sniffed.protocol);
-          state.sniffer = None;
-        }
-        crate::sniff::SniffOutcome::Protocol(protocol) => {
-          state.protocol = Some(protocol);
-          state.sniffer = None;
-        }
-        crate::sniff::SniffOutcome::NoDomain => {
-          state.sniffer = None;
-        }
-        crate::sniff::SniffOutcome::NeedMoreData => {}
-      }
-    }
-  }
-
-  destination.set_routing_domain(state.domain.clone());
-  destination.set_routing_protocol(state.protocol);
-}
-
-fn expire_quic_flows(flows: &mut HashMap<(SocketAddr, SocketDestination), QuicFlowSniffState>) {
-  flows.retain(|_, state| state.last_seen.elapsed() < QUIC_FLOW_IDLE_TIMEOUT);
-
-  while flows.len() > MAX_QUIC_FLOWS {
-    let Some(oldest) = flows
-      .iter()
-      .min_by_key(|(_, state)| state.last_seen)
-      .map(|(key, _)| key.clone())
-    else {
-      break;
-    };
-    flows.remove(&oldest);
-  }
 }
 
 impl From<socks5_server::proto::Address> for SocketDestination {
@@ -488,7 +418,7 @@ mod tests {
 
   use crate::{
     inbound::Inbound,
-    primitives::{SocketDestination, SocketDestinationHost},
+    primitives::{SniffedProtocol, SocketDestination, SocketDestinationHost},
     udp_forwarder::IncomingUdpPacket,
   };
 

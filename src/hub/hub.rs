@@ -544,6 +544,7 @@ pub async fn run_hub(
   }: HubConfig,
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
+  let dns_hijack = dns_config.as_ref().map(|config| *config.listen);
 
   let ca_pem_file_path = context_dir.join(CA_PEM_FILE_NAME);
   let node_pem_file_path = context_dir.join(NODE_PEM_FILE_NAME);
@@ -575,7 +576,7 @@ pub async fn run_hub(
   );
 
   let inbounds = if let Some(inbounds_config) = inbounds_config {
-    inbounds_config.into_inbounds().await?
+    inbounds_config.into_inbounds(dns_hijack).await?
   } else {
     vec![]
   };

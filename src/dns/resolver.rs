@@ -33,11 +33,11 @@ pub fn local_resolver() -> &'static TokioResolver {
   &LOCAL_RESOLVER
 }
 
-/// 本机解析：避免 本机 -> sing-box -> plug2proxy -> 本机 的循环。
+/// 本机解析：避免 本机 -> 透明入口 -> plug2proxy -> 本机 的循环。
 ///
 /// systemd-resolved 的 /etc/resolv.conf 是 loopback stub，其上行查询会被
-/// TUN 劫持送回 plug2proxy；此时改用真实上行文件。plug2proxy 自身 UID 已被
-/// sing-box exclude_uid 排除，其上游查询不会被劫持回来。
+/// 透明代理再次送回 plug2proxy；此时改用真实上行文件。plug2proxy 自身 UID
+/// 由 TPROXY 控制面绕过，其上游查询不会被劫持回来。
 fn load_upstream_config() -> Result<(ResolverConfig, ResolverOpts), NetError> {
   let (config, options) = system_conf::read_system_conf()?;
 
@@ -67,7 +67,7 @@ fn load_upstream_config() -> Result<(ResolverConfig, ResolverOpts), NetError> {
 
   log::info!(
     "system DNS resolver is a loopback stub; using systemd-resolved uplinks from \
-     {SYSTEMD_RESOLVED_UPLINK_RESOLV_CONF} to avoid the sing-box DNS loop"
+     {SYSTEMD_RESOLVED_UPLINK_RESOLV_CONF} to avoid a transparent DNS loop"
   );
 
   Ok((filter_recursive_name_servers(uplink_config)?, options))

@@ -617,9 +617,10 @@ pub async fn run_in(
   }: InConfig,
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
+  let dns_hijack = dns_config.as_ref().map(|config| *config.listen);
 
   let inbounds = if let Some(inbounds_config) = inbounds_config {
-    inbounds_config.into_inbounds().await?
+    inbounds_config.into_inbounds(dns_hijack).await?
   } else {
     vec![]
   };

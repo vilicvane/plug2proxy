@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::task::JoinSet;
+use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
   inbound::{AnyInbound, Inbound},
@@ -11,6 +11,8 @@ use crate::{
   udp_forwarder::InboundUdpPacketStream,
   utils::task::reap_finished_tasks,
 };
+
+const MAX_INBOUND_TCP_CONNECTIONS: usize = 4096;
 
 #[async_trait]
 pub trait InLike: Node + 'static {
@@ -57,8 +59,10 @@ pub trait InLike: Node + 'static {
 
   async fn run_inbound_tcp(self: Arc<Self>, inbound: Arc<AnyInbound>) -> anyhow::Result<()> {
     let mut join_set = JoinSet::new();
+    let permits = Arc::new(Semaphore::new(MAX_INBOUND_TCP_CONNECTIONS));
 
     loop {
+      let permit = permits.clone().acquire_owned().await?;
       let (destination, stream) = inbound.accept_tcp_connect().await?;
 
       let hub = self.clone();
@@ -66,6 +70,7 @@ pub trait InLike: Node + 'static {
       reap_finished_tasks(&mut join_set, "inbound TCP task");
 
       join_set.spawn(async move {
+        let _permit = permit;
         hub
           .in_tcp_connect(destination, stream)
           .await
