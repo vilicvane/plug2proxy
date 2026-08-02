@@ -478,6 +478,10 @@ fn encrypt(cipher: &Option<Arc<aes_gcm::Aes256Gcm>>, data: &[u8]) -> Vec<u8> {
 
 fn decrypt(cipher: &Option<Arc<aes_gcm::Aes256Gcm>>, data: &[u8]) -> anyhow::Result<Vec<u8>> {
     if let Some(cipher) = cipher {
+        if data.len() < 12 {
+            anyhow::bail!("redis match decryption failed, data too short.");
+        }
+
         let (nonce, data) = data.split_at(12);
 
         let nonce = aes_gcm::Nonce::from_slice(nonce);
