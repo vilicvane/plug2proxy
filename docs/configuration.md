@@ -369,7 +369,9 @@ mTCP 内含四条并行的底层 TCP connection；IN 建立 peer connection 时�
     "sniff": true,
     "hijack_dns": false,
     "network": {
-      "bypass_user": "plug2proxy"
+      "bypass_user": "plug2proxy",
+      "mark": "0x00000070",
+      "mark_mask": "0x000000ff"
     }
   }
 }
@@ -381,6 +383,15 @@ nftables 规则使用，不需要也不应在安全组中开放。不要手工�
 `network reconcile`，正常或异常停止时调用 `network remove`；restart 会先
 remove 再 apply。完整步骤见
 [原生 TPROXY 部署](native-tproxy.md)。
+
+`network.mark` 和 `network.mark_mask` 都可以省略，默认分别为
+`"0x00000070"` 和 `"0x000000ff"`。前者是本机 OUTPUT 值；mask 中最低的
+有效 bit 作为角色位，程序据此得到默认 PREROUTING 值 `0x00000071`。写入
+时只修改 mask 内的 bit。若需要避开同机其他 policy-routing 组件，可以调整
+这两个字段；mask 至少包含两个 bit，mark 必须非零、位于 mask 内并清除角色
+bit。活动布局不能通过 `network reconcile` 热切换，应 restart，或先
+`network remove` 再 `network apply`。完整约束和冲突检查见
+[原生 TPROXY 部署](native-tproxy.md#配置-tproxy-inbound)。
 
 `hijack_dns` 默认 `false`，此时终端显式指定的 DNS 服务器保持为实际目标，
 并像其他 TCP/UDP 流量一样经过透明入口。设为 `true` 才会把所有原目标端口

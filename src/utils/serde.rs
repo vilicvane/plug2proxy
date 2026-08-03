@@ -4,6 +4,33 @@ use ipnet::IpNet;
 use lowkit::{SelfWrapExt, SerdeSocketAddress};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
+pub fn deserialize_u32_or_hex<'de, TDeserializer>(
+  deserializer: TDeserializer,
+) -> Result<u32, TDeserializer::Error>
+where
+  TDeserializer: Deserializer<'de>,
+{
+  #[derive(Deserialize)]
+  #[serde(untagged)]
+  enum U32OrHex {
+    Number(u32),
+    Hex(String),
+  }
+
+  match U32OrHex::deserialize(deserializer)? {
+    U32OrHex::Number(value) => Ok(value),
+    U32OrHex::Hex(value) => {
+      let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .ok_or_else(|| de::Error::custom("expected a hexadecimal u32 string starting with 0x"))?;
+
+      u32::from_str_radix(digits, 16)
+        .map_err(|_| de::Error::custom(format!("invalid hexadecimal u32 value: {value}")))
+    }
+  }
+}
+
 pub fn deserialize_listen_socket_address<'de, TDeserializer>(
   deserializer: TDeserializer,
 ) -> Result<SerdeSocketAddress, TDeserializer::Error>

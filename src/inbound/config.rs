@@ -5,11 +5,14 @@ use serde::Deserialize;
 
 use crate::{
   inbound::{
-    AnyInbound, Socks5Inbound, Socks5InboundOptions, TPROXY_BYPASS_MARK, TproxyInbound,
-    TproxyInboundOptions, resolve_bypass_user,
+    AnyInbound, Socks5Inbound, Socks5InboundOptions, TproxyInbound, TproxyInboundOptions,
+    resolve_bypass_user,
   },
-  utils::serde::{SerdeIpNet, deserialize_listen_socket_address},
+  utils::serde::{SerdeIpNet, deserialize_listen_socket_address, deserialize_u32_or_hex},
 };
+
+const DEFAULT_TPROXY_MARK: u32 = 0x0000_0070;
+const DEFAULT_TPROXY_MARK_MASK: u32 = 0x0000_00ff;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct InboundsConfig {
@@ -70,7 +73,6 @@ impl TproxyInboundConfig {
     TproxyInboundOptions {
       listen: listen.into(),
       sniff,
-      bypass_mark: TPROXY_BYPASS_MARK,
       bypass_uid,
       dns_hijack,
     }
@@ -82,6 +84,20 @@ impl TproxyInboundConfig {
 pub struct TproxyNetworkConfig {
   pub bypass_user: String,
   pub exclude_ipv4: Vec<SerdeIpNet>,
+  /// Base packet/conntrack mark for locally originated OUTPUT traffic. The
+  /// lowest selected bit in `mark_mask` is reserved for the PREROUTING role.
+  #[serde(
+    default = "default_tproxy_mark",
+    deserialize_with = "deserialize_u32_or_hex"
+  )]
+  pub mark: u32,
+  /// Bits owned by Plug2Proxy when matching and updating packet/conntrack
+  /// marks. Bits outside this mask are preserved.
+  #[serde(
+    default = "default_tproxy_mark_mask",
+    deserialize_with = "deserialize_u32_or_hex"
+  )]
+  pub mark_mask: u32,
 }
 
 impl Default for TproxyNetworkConfig {
@@ -89,8 +105,18 @@ impl Default for TproxyNetworkConfig {
     Self {
       bypass_user: "plug2proxy".to_owned(),
       exclude_ipv4: vec![],
+      mark: default_tproxy_mark(),
+      mark_mask: default_tproxy_mark_mask(),
     }
   }
+}
+
+fn default_tproxy_mark() -> u32 {
+  DEFAULT_TPROXY_MARK
+}
+
+fn default_tproxy_mark_mask() -> u32 {
+  DEFAULT_TPROXY_MARK_MASK
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -158,6 +184,44 @@ mod tests {
     let network = config.tproxy.unwrap().network;
     assert_eq!(network.bypass_user, "plug2proxy");
     assert!(network.exclude_ipv4.is_empty());
+    assert_eq!(network.mark, 0x0000_0070);
+    assert_eq!(network.mark_mask, 0x0000_00ff);
+  }
+
+  #[test]
+  fn tproxy_network_marks_accept_numeric_values() {
+    let config: InboundsConfig = serde_json::from_str(
+      r#"{"tproxy":{"listen":"127.0.0.1:12345","network":{"mark":112,"mark_mask":255}}}"#,
+    )
+    .unwrap();
+    let network = config.tproxy.unwrap().network;
+    assert_eq!(network.mark, 0x0000_0070);
+    assert_eq!(network.mark_mask, 0x0000_00ff);
+  }
+
+  #[test]
+  fn tproxy_network_marks_accept_padded_hex_strings() {
+    let config: InboundsConfig = serde_json::from_str(
+      r#"{"tproxy":{"listen":"127.0.0.1:12345","network":{"mark":"0x00000070","mark_mask":"0x000000ff"}}}"#,
+    )
+    .unwrap();
+    let network = config.tproxy.unwrap().network;
+    assert_eq!(network.mark, 0x0000_0070);
+    assert_eq!(network.mark_mask, 0x0000_00ff);
+  }
+
+  #[test]
+  fn tproxy_network_marks_reject_invalid_hex_strings() {
+    let error = serde_json::from_str::<InboundsConfig>(
+      r#"{"tproxy":{"listen":"127.0.0.1:12345","network":{"mark":"0xnot-hex"}}}"#,
+    )
+    .unwrap_err();
+
+    assert!(
+      error
+        .to_string()
+        .contains("invalid hexadecimal u32 value: 0xnot-hex")
+    );
   }
 
   #[test]

@@ -4,10 +4,7 @@ use std::{
   os::fd::{AsRawFd, RawFd},
   pin::Pin,
   ptr,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-  },
+  sync::Arc,
   task::{Context, Poll},
   time::Duration,
 };
@@ -44,12 +41,6 @@ const TCP_DNS_PROXY_CONCURRENCY: usize = 256;
 const DNS_PROXY_TIMEOUT: Duration = Duration::from_secs(10);
 const CAPABILITY_PROBE_ADDRESS: SocketAddr =
   SocketAddr::V4(std::net::SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53));
-static SO_MARK_WARNING_LOGGED: AtomicBool = AtomicBool::new(false);
-
-pub const TPROXY_MARK_MASK: u32 = 0xff00_0000;
-pub const TPROXY_OUTPUT_ROUTE_MARK: u32 = 0x5100_0000;
-pub const TPROXY_BYPASS_MARK: u32 = 0x5200_0000;
-pub const TPROXY_PREROUTING_ROUTE_MARK: u32 = 0x5300_0000;
 
 #[derive(Debug)]
 pub struct TproxyInbound {
@@ -65,7 +56,6 @@ pub struct TproxyInbound {
 pub struct TproxyInboundOptions {
   pub listen: SocketAddr,
   pub sniff: bool,
-  pub bypass_mark: u32,
   pub bypass_uid: u32,
   pub dns_hijack: Option<SocketAddr>,
 }
@@ -116,7 +106,7 @@ impl TproxyInbound {
       );
     }
 
-    probe_response_socket_capabilities(options.bypass_mark).map_err(|error| {
+    probe_response_socket_capabilities().map_err(|error| {
       std::io::Error::new(
         error.kind(),
         format!(
@@ -152,7 +142,6 @@ impl TproxyInbound {
       listen_address,
       outgoing_packet_sender,
       incoming_packet_receiver,
-      options.bypass_mark,
       options.dns_hijack,
     ));
 
@@ -329,7 +318,6 @@ async fn run_udp_socket(
   listen_address: SocketAddr,
   outgoing_sender: flume::Sender<OutgoingUdpPacket>,
   incoming_receiver: flume::Receiver<IncomingUdpPacket>,
-  bypass_mark: u32,
   dns_hijack: Option<SocketAddr>,
 ) {
   let response_sockets = Cache::builder()
@@ -371,7 +359,6 @@ async fn run_udp_socket(
                 let _permit = permit;
                 if let Err(error) = proxy_udp_dns(
                   response_sockets,
-                  bypass_mark,
                   connectable_local_address(dns_hijack),
                   source,
                   destination,
@@ -418,7 +405,7 @@ async fn run_udp_socket(
         let Ok(packet) = incoming else {
           break;
         };
-        if let Err(error) = send_udp_response(&response_sockets, bypass_mark, packet).await {
+        if let Err(error) = send_udp_response(&response_sockets, packet).await {
           log::warn!("error sending TPROXY UDP response: {error}");
         }
       }
@@ -428,7 +415,6 @@ async fn run_udp_socket(
 
 async fn proxy_udp_dns(
   response_sockets: Cache<SocketAddr, Arc<UdpSocket>>,
-  bypass_mark: u32,
   dns_hijack: SocketAddr,
   source: SocketAddr,
   original_destination: SocketAddr,
@@ -451,7 +437,6 @@ async fn proxy_udp_dns(
   response.truncate(length);
   send_udp_response(
     &response_sockets,
-    bypass_mark,
     IncomingUdpPacket {
       source: UdpPacketSource {
         via: vec![],
@@ -466,7 +451,6 @@ async fn proxy_udp_dns(
 
 async fn send_udp_response(
   sockets: &Cache<SocketAddr, Arc<UdpSocket>>,
-  bypass_mark: u32,
   IncomingUdpPacket {
     source,
     destination,
@@ -483,7 +467,7 @@ async fn send_udp_response(
   let socket = if let Some(socket) = sockets.get(&destination) {
     socket
   } else {
-    let socket = create_response_socket(destination, bypass_mark)?;
+    let socket = create_response_socket(destination)?;
     let socket = Arc::new(UdpSocket::from_std(socket.into())?);
     sockets.insert(destination, socket.clone());
     socket
@@ -493,29 +477,18 @@ async fn send_udp_response(
   Ok(())
 }
 
-fn create_response_socket(destination: SocketAddr, bypass_mark: u32) -> std::io::Result<Socket> {
+fn create_response_socket(destination: SocketAddr) -> std::io::Result<Socket> {
   let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
   socket.set_ip_transparent_v4(true)?;
   socket.set_reuse_address(true)?;
   socket.set_reuse_port(true)?;
-  if bypass_mark != 0
-    && let Err(error) = socket.set_mark(bypass_mark)
-    && !SO_MARK_WARNING_LOGGED.swap(true, Ordering::Relaxed)
-  {
-    log::warn!(
-      "cannot set TPROXY UDP response SO_MARK ({error}); continuing with verified UID bypass"
-    );
-  }
   socket.set_nonblocking(true)?;
   socket.bind(&destination.into())?;
   Ok(socket)
 }
 
-fn probe_response_socket_capabilities(bypass_mark: u32) -> std::io::Result<()> {
-  drop(create_response_socket(
-    CAPABILITY_PROBE_ADDRESS,
-    bypass_mark,
-  )?);
+fn probe_response_socket_capabilities() -> std::io::Result<()> {
+  drop(create_response_socket(CAPABILITY_PROBE_ADDRESS)?);
   Ok(())
 }
 
@@ -783,7 +756,6 @@ mod tests {
       .block_on(TproxyInbound::new(TproxyInboundOptions {
         listen: "127.0.0.1:12345".parse().unwrap(),
         sniff: true,
-        bypass_mark: 1,
         bypass_uid: unsafe { libc::geteuid() },
         dns_hijack: Some("0.0.0.0:12345".parse().unwrap()),
       }))
@@ -800,7 +772,6 @@ mod tests {
       .block_on(TproxyInbound::new(TproxyInboundOptions {
         listen: "[::1]:12345".parse().unwrap(),
         sniff: true,
-        bypass_mark: 1,
         bypass_uid: unsafe { libc::geteuid() },
         dns_hijack: None,
       }))
@@ -817,7 +788,6 @@ mod tests {
       .block_on(TproxyInbound::new(TproxyInboundOptions {
         listen: "0.0.0.0:12345".parse().unwrap(),
         sniff: true,
-        bypass_mark: 1,
         bypass_uid: unsafe { libc::geteuid() },
         dns_hijack: None,
       }))
@@ -835,7 +805,6 @@ mod tests {
       .block_on(TproxyInbound::new(TproxyInboundOptions {
         listen: "127.0.0.1:12345".parse().unwrap(),
         sniff: true,
-        bypass_mark: 1,
         bypass_uid: effective_uid.wrapping_add(1),
         dns_hijack: None,
       }))

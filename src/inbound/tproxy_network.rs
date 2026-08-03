@@ -18,10 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
-use crate::inbound::{
-  TPROXY_BYPASS_MARK, TPROXY_MARK_MASK, TPROXY_OUTPUT_ROUTE_MARK, TPROXY_PREROUTING_ROUTE_MARK,
-  TproxyInboundConfig,
-};
+use crate::inbound::TproxyInboundConfig;
 
 const NFT: &str = "/usr/sbin/nft";
 const IP: &str = "/usr/sbin/ip";
@@ -36,8 +33,9 @@ const NETWORK_LOCK_RETRY: Duration = Duration::from_millis(50);
 
 pub const TPROXY_NFT_FAMILY: &str = "inet";
 pub const TPROXY_NFT_TABLE: &str = "plug2proxy_tproxy";
-const LEGACY_TPROXY_NFT_SENTINEL: &str = "managed-by=plug2proxy;schema=1";
-pub const TPROXY_NFT_SENTINEL: &str = "managed-by=plug2proxy;schema=2";
+const SCHEMA_ONE_TPROXY_NFT_SENTINEL: &str = "managed-by=plug2proxy;schema=1";
+const SCHEMA_TWO_TPROXY_NFT_SENTINEL: &str = "managed-by=plug2proxy;schema=2";
+const SCHEMA_THREE_TPROXY_NFT_SENTINEL_PREFIX: &str = "managed-by=plug2proxy;schema=3";
 pub const TPROXY_ROUTE_TABLE: u32 = 20230;
 pub const TPROXY_SOURCE_VALIDATION_RULE_PRIORITY: u32 = 98;
 pub const TPROXY_PREROUTING_RULE_PRIORITY: u32 = 99;
@@ -46,6 +44,19 @@ pub const TPROXY_OUTPUT_RULE_PRIORITY: u32 = 100;
 const STATE_DIRECTORY: &str = "/run/plug2proxy-netctl";
 const STATE_FILE: &str = "/run/plug2proxy-netctl/network-state.json";
 const NETWORK_LOCK_FILE: &str = "/run/plug2proxy-netctl/network.lock";
+
+const SCHEMA_ONE_MARK_LAYOUT: MarkLayout = MarkLayout {
+  output: 0x5100_0000,
+  prerouting: 0x5100_0000,
+  mask: 0xff00_0000,
+};
+const SCHEMA_TWO_MARK_LAYOUT: MarkLayout = MarkLayout {
+  output: 0x5100_0000,
+  prerouting: 0x5300_0000,
+  mask: 0xff00_0000,
+};
+const SCHEMA_ONE_BYPASS_MARK: u32 = 0x5200_0000;
+const SCHEMA_TWO_BYPASS_MARK: u32 = 0x5200_0000;
 
 const SYSTEM_DNS_LINK: &str = "plug2proxy-dns0";
 const SYSTEM_DNS_LINK_ADDRESS: &str = "192.0.2.1/32";
@@ -60,6 +71,81 @@ const BUILTIN_EXCLUDES: [&str; 5] = [
   "240.0.0.0/4",
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MarkLayout {
+  output: u32,
+  prerouting: u32,
+  mask: u32,
+}
+
+impl MarkLayout {
+  fn from_base(mark: u32, mask: u32) -> anyhow::Result<Self> {
+    if mask.count_ones() < 2 {
+      bail!("TPROXY mark_mask must contain at least two bits");
+    }
+    if mark == 0 {
+      bail!("TPROXY mark must be non-zero");
+    }
+    if mark & !mask != 0 {
+      bail!("TPROXY mark {mark:#010x} contains bits outside mark_mask {mask:#010x}");
+    }
+
+    // The lowest selected bit distinguishes locally originated OUTPUT from
+    // externally received PREROUTING traffic. Keeping the role bit inside the
+    // configured mask lets the remaining 32-bit mark namespace compose with
+    // independently masked users such as Tailscale.
+    let role_bit = 1_u32 << mask.trailing_zeros();
+    if mark & role_bit != 0 {
+      bail!(
+        "TPROXY mark {mark:#010x} must leave mark_mask's lowest bit {role_bit:#010x} clear for the PREROUTING role"
+      );
+    }
+
+    Ok(Self {
+      output: mark,
+      prerouting: mark | role_bit,
+      mask,
+    })
+  }
+
+  fn keep_mask(self) -> u32 {
+    !self.mask
+  }
+
+  fn sentinel(self) -> String {
+    format!(
+      "{SCHEMA_THREE_TPROXY_NFT_SENTINEL_PREFIX};mark={:#010x};mark_mask={:#010x}",
+      self.output, self.mask
+    )
+  }
+}
+
+fn parse_schema_three_sentinel(sentinel: &str) -> anyhow::Result<Option<MarkLayout>> {
+  let Some(fields) = sentinel.strip_prefix(&format!("{SCHEMA_THREE_TPROXY_NFT_SENTINEL_PREFIX};"))
+  else {
+    return Ok(None);
+  };
+  let Some((mark, mask)) = fields.split_once(";mark_mask=") else {
+    bail!("invalid Plug2Proxy schema 3 nft ownership sentinel");
+  };
+  let mark = mark
+    .strip_prefix("mark=")
+    .and_then(parse_hex_u32)
+    .context("invalid mark in Plug2Proxy schema 3 nft ownership sentinel")?;
+  let mask = parse_hex_u32(mask)
+    .context("invalid mark_mask in Plug2Proxy schema 3 nft ownership sentinel")?;
+  let layout = MarkLayout::from_base(mark, mask)
+    .context("invalid mark layout in Plug2Proxy schema 3 nft ownership sentinel")?;
+  if sentinel != layout.sentinel() {
+    bail!("non-canonical Plug2Proxy schema 3 nft ownership sentinel");
+  }
+  Ok(Some(layout))
+}
+
+fn parse_hex_u32(value: &str) -> Option<u32> {
+  u32::from_str_radix(value.strip_prefix("0x")?, 16).ok()
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TproxyNetworkPlan {
   pub listen: SocketAddr,
@@ -69,6 +155,10 @@ pub struct TproxyNetworkPlan {
   pub system_default: bool,
   pub bypass_uid: u32,
   pub exclude_ipv4: Vec<Ipv4Net>,
+  #[serde(default)]
+  pub mark: u32,
+  #[serde(default)]
+  pub mark_mask: u32,
 }
 
 impl TproxyNetworkPlan {
@@ -92,6 +182,8 @@ impl TproxyNetworkPlan {
         bail!("dns.system_default requires dns.listen to be an IPv4 loopback address on port 53");
       }
     }
+
+    MarkLayout::from_base(config.network.mark, config.network.mark_mask)?;
 
     let mut excludes = BTreeSet::new();
     for network in BUILTIN_EXCLUDES {
@@ -127,22 +219,45 @@ impl TproxyNetworkPlan {
       system_default,
       bypass_uid,
       exclude_ipv4,
+      mark: config.network.mark,
+      mark_mask: config.network.mark_mask,
     })
   }
 
+  fn mark_layout(&self) -> anyhow::Result<MarkLayout> {
+    MarkLayout::from_base(self.mark, self.mark_mask)
+  }
+
   pub fn render_nft_batch(&self) -> String {
-    self.render_nft_batch_for(NftState::Exact)
+    self.render_nft_batch_for(NftState::Schema3(
+      self
+        .mark_layout()
+        .expect("TproxyNetworkPlan mark layout was validated"),
+    ))
   }
 
   fn render_nft_batch_for(&self, previous: NftState) -> String {
-    self.render_nft_batch_with_marks(previous, TPROXY_NFT_SENTINEL, TPROXY_PREROUTING_ROUTE_MARK)
+    let layout = self
+      .mark_layout()
+      .expect("TproxyNetworkPlan mark layout was validated");
+    self.render_nft_batch_with_marks(previous, &layout.sentinel(), layout, None)
   }
 
-  fn render_legacy_nft_batch(&self) -> String {
+  fn render_schema_one_nft_batch(&self) -> String {
     self.render_nft_batch_with_marks(
-      NftState::Exact,
-      LEGACY_TPROXY_NFT_SENTINEL,
-      TPROXY_OUTPUT_ROUTE_MARK,
+      NftState::Schema1,
+      SCHEMA_ONE_TPROXY_NFT_SENTINEL,
+      SCHEMA_ONE_MARK_LAYOUT,
+      Some(SCHEMA_ONE_BYPASS_MARK),
+    )
+  }
+
+  fn render_schema_two_nft_batch(&self) -> String {
+    self.render_nft_batch_with_marks(
+      NftState::Schema2,
+      SCHEMA_TWO_TPROXY_NFT_SENTINEL,
+      SCHEMA_TWO_MARK_LAYOUT,
+      Some(SCHEMA_TWO_BYPASS_MARK),
     )
   }
 
@@ -150,7 +265,8 @@ impl TproxyNetworkPlan {
     &self,
     previous: NftState,
     sentinel: &str,
-    prerouting_mark: u32,
+    layout: MarkLayout,
+    bypass_mark: Option<u32>,
   ) -> String {
     let excluded = self
       .exclude_ipv4
@@ -160,31 +276,34 @@ impl TproxyNetworkPlan {
       .join(", ");
     let port = self.listen.port();
     let listen_ip = self.listen.ip();
-    let keep_mask = !TPROXY_MARK_MASK;
+    let keep_mask = layout.keep_mask();
     let prepare_table = match previous {
       NftState::Absent => format!(
         "create table {TPROXY_NFT_FAMILY} {TPROXY_NFT_TABLE} {{ comment \"{sentinel}\"; }}\n"
       ),
-      NftState::Legacy | NftState::Exact => {
+      NftState::Schema1 | NftState::Schema2 | NftState::Schema3(_) => {
         // `delete` followed by the table declaration is one atomic nft batch.
         // Unlike `destroy`, it also works with nftables 1.0.9 and older kernels;
         // the caller has already proved that this owned table exists.
         format!("delete table {TPROXY_NFT_FAMILY} {TPROXY_NFT_TABLE}\n")
       }
     };
-    let split_route_marks = prerouting_mark != TPROXY_OUTPUT_ROUTE_MARK;
+    let output_mark = layout.output;
+    let prerouting_mark = layout.prerouting;
+    let mark_mask = layout.mask;
+    let split_route_marks = prerouting_mark != output_mark;
     let premarked_prerouting_rules = if split_route_marks {
       format!(
         r#"    meta l4proto {{ tcp, udp }} meta mark & {mark_mask:#010x} == {output_mark:#010x} iifname "lo" tproxy ip to {listen_ip}:{port} counter accept
     meta l4proto {{ tcp, udp }} meta mark & {mark_mask:#010x} == {output_mark:#010x} ct mark set (ct mark & {keep_mask:#010x}) | {prerouting_mark:#010x} meta mark set (meta mark & {keep_mask:#010x}) | {prerouting_mark:#010x} tproxy ip to {listen_ip}:{port} counter accept
     meta l4proto {{ tcp, udp }} meta mark & {mark_mask:#010x} == {prerouting_mark:#010x} tproxy ip to {listen_ip}:{port} counter accept"#,
-        mark_mask = TPROXY_MARK_MASK,
-        output_mark = TPROXY_OUTPUT_ROUTE_MARK,
+        mark_mask = mark_mask,
+        output_mark = output_mark,
       )
     } else {
       format!(
         "    meta l4proto {{ tcp, udp }} meta mark & {:#010x} == {:#010x} tproxy ip to {listen_ip}:{port} counter accept",
-        TPROXY_MARK_MASK, TPROXY_OUTPUT_ROUTE_MARK
+        mark_mask, output_mark
       )
     };
     let conntrack_prerouting_rules = if split_route_marks {
@@ -192,15 +311,19 @@ impl TproxyNetworkPlan {
         r#"    meta l4proto {{ tcp, udp }} ct mark & {mark_mask:#010x} == {output_mark:#010x} iifname "lo" meta mark set (meta mark & {keep_mask:#010x}) | {output_mark:#010x} tproxy ip to {listen_ip}:{port} counter accept
     meta l4proto {{ tcp, udp }} ct mark & {mark_mask:#010x} == {output_mark:#010x} ct mark set (ct mark & {keep_mask:#010x}) | {prerouting_mark:#010x} meta mark set (meta mark & {keep_mask:#010x}) | {prerouting_mark:#010x} tproxy ip to {listen_ip}:{port} counter accept
     meta l4proto {{ tcp, udp }} ct mark & {mark_mask:#010x} == {prerouting_mark:#010x} meta mark set (meta mark & {keep_mask:#010x}) | {prerouting_mark:#010x} tproxy ip to {listen_ip}:{port} counter accept"#,
-        mark_mask = TPROXY_MARK_MASK,
-        output_mark = TPROXY_OUTPUT_ROUTE_MARK,
+        mark_mask = mark_mask,
+        output_mark = output_mark,
       )
     } else {
       format!(
         "    meta l4proto {{ tcp, udp }} ct mark & {:#010x} == {:#010x} meta mark set (meta mark & {keep_mask:#010x}) | {:#010x} tproxy ip to {listen_ip}:{port} counter accept",
-        TPROXY_MARK_MASK, TPROXY_OUTPUT_ROUTE_MARK, TPROXY_OUTPUT_ROUTE_MARK
+        mark_mask, output_mark, output_mark
       )
     };
+    let output_bypass_rule = bypass_mark
+      .map(|mark| format!("    meta mark & {mark_mask:#010x} == {mark:#010x} counter return\n"))
+      .unwrap_or_default();
+    let prerouting_bypass_rule = output_bypass_rule.clone();
 
     // Interception is deliberately flow-stateful. Only the first, still
     // unconfirmed packet of a new TCP/UDP conntrack entry receives our mark;
@@ -222,8 +345,7 @@ impl TproxyNetworkPlan {
     meta nfproto != ipv4 return
     meta l4proto != {{ tcp, udp }} return
     ct direction reply counter return
-    meta mark & {mark_mask:#010x} == {bypass_mark:#010x} counter return
-    meta mark & 0x00ff0000 == 0x00080000 counter return
+{output_bypass_rule}    meta mark & 0x00ff0000 == 0x00080000 counter return
     meta mark != 0 counter return
     ct mark & {mark_mask:#010x} == {output_mark:#010x} meta mark set (meta mark & {keep_mask:#010x}) | {output_mark:#010x} counter return
     ct mark != 0 counter return
@@ -241,8 +363,7 @@ impl TproxyNetworkPlan {
     type filter hook prerouting priority mangle; policy accept;
     meta nfproto != ipv4 return
     meta l4proto != {{ tcp, udp }} return
-    meta mark & {mark_mask:#010x} == {bypass_mark:#010x} counter return
-    ct direction reply counter return
+{prerouting_bypass_rule}    ct direction reply counter return
 {premarked_prerouting_rules}
 {conntrack_prerouting_rules}
     meta mark & {mark_mask:#010x} != 0 counter return
@@ -262,14 +383,15 @@ impl TproxyNetworkPlan {
       table = TPROXY_NFT_TABLE,
       sentinel = sentinel,
       uid = self.bypass_uid,
-      mark_mask = TPROXY_MARK_MASK,
-      bypass_mark = TPROXY_BYPASS_MARK,
-      output_mark = TPROXY_OUTPUT_ROUTE_MARK,
+      mark_mask = mark_mask,
+      output_mark = output_mark,
       prerouting_mark = prerouting_mark,
       listen_ip = listen_ip,
       prepare_table = prepare_table,
       premarked_prerouting_rules = premarked_prerouting_rules,
       conntrack_prerouting_rules = conntrack_prerouting_rules,
+      output_bypass_rule = output_bypass_rule,
+      prerouting_bypass_rule = prerouting_bypass_rule,
     )
   }
 }
@@ -303,8 +425,20 @@ struct SystemDnsState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NftState {
   Absent,
-  Legacy,
-  Exact,
+  Schema1,
+  Schema2,
+  Schema3(MarkLayout),
+}
+
+impl NftState {
+  fn mark_layout(self) -> Option<MarkLayout> {
+    match self {
+      Self::Absent => None,
+      Self::Schema1 => Some(SCHEMA_ONE_MARK_LAYOUT),
+      Self::Schema2 => Some(SCHEMA_TWO_MARK_LAYOUT),
+      Self::Schema3(layout) => Some(layout),
+    }
+  }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -380,6 +514,49 @@ struct NetworkState {
   plan: TproxyNetworkPlan,
 }
 
+impl NetworkState {
+  fn mark_layout(&self) -> anyhow::Result<MarkLayout> {
+    match self.schema {
+      1 => Ok(SCHEMA_ONE_MARK_LAYOUT),
+      2 => Ok(SCHEMA_TWO_MARK_LAYOUT),
+      3 => self.plan.mark_layout(),
+      schema => bail!("unsupported TPROXY ownership journal schema {schema}"),
+    }
+  }
+}
+
+fn authenticated_mark_layout(
+  nft: NftState,
+  journal: Option<&NetworkState>,
+) -> anyhow::Result<Option<MarkLayout>> {
+  let nft_layout = nft.mark_layout();
+  let journal_layout = journal.map(NetworkState::mark_layout).transpose()?;
+  if let (Some(nft_layout), Some(journal_layout)) = (nft_layout, journal_layout)
+    && nft_layout != journal_layout
+  {
+    bail!("TPROXY nft ownership sentinel and same-boot journal disagree about the mark layout");
+  }
+  Ok(nft_layout.or(journal_layout))
+}
+
+fn ensure_desired_mark_layout(
+  desired: MarkLayout,
+  active: Option<MarkLayout>,
+) -> anyhow::Result<()> {
+  if let Some(active) = active
+    && active != desired
+  {
+    bail!(
+      "active TPROXY mark layout {:#010x}/{:#010x} differs from configured {:#010x}/{:#010x}; restart the service, or run `network remove` before `network apply`",
+      active.output,
+      active.mask,
+      desired.output,
+      desired.mask
+    );
+  }
+  Ok(())
+}
+
 struct NetworkLock(File);
 
 impl NetworkLock {
@@ -439,10 +616,14 @@ pub async fn resolve_bypass_user(user: &str) -> anyhow::Result<u32> {
 
 pub async fn check_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<String> {
   check_system_dns_prerequisites(plan).await?;
+  let desired_layout = plan.mark_layout()?;
   let nft = check_nft_owner().await?;
-  let route = check_route().await?;
-  let rules = check_policy_rules().await?;
   let state = read_state()?;
+  let active_layout = authenticated_mark_layout(nft, state.as_ref())?;
+  ensure_desired_mark_layout(desired_layout, active_layout)?;
+  let rule_layout = active_layout.unwrap_or(desired_layout);
+  let route = check_route().await?;
+  let rules = check_policy_rules(rule_layout).await?;
   let expected_dns = if plan.system_default {
     plan.dns_listen
   } else {
@@ -470,10 +651,13 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   ensure_data_plane_ready(plan)?;
   check_system_dns_prerequisites(plan).await?;
 
+  let desired_layout = plan.mark_layout()?;
   let nft = check_nft_owner().await?;
-  let route = check_route().await?;
-  let rules = check_policy_rules().await?;
   let previous_state = read_state()?;
+  let active_layout = authenticated_mark_layout(nft, previous_state.as_ref())?;
+  ensure_desired_mark_layout(desired_layout, active_layout)?;
+  let route = check_route().await?;
+  let rules = check_policy_rules(active_layout.unwrap_or(desired_layout)).await?;
   let expected_dns = if plan.system_default {
     plan.dns_listen
   } else {
@@ -524,16 +708,16 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
 
     if rules.state() != PolicyRuleState::Exact {
       write_state(plan, "installing-rules")?;
-      install_missing_policy_rules(rules, &mut mutation_result_uncertain).await?;
+      install_missing_policy_rules(desired_layout, rules, &mut mutation_result_uncertain).await?;
     }
 
     if check_route().await? != ObjectState::Exact {
       bail!("TPROXY route disappeared before activation");
     }
-    if check_policy_rules().await?.state() != PolicyRuleState::Exact {
+    if check_policy_rules(desired_layout).await?.state() != PolicyRuleState::Exact {
       bail!("TPROXY policy rules disappeared before activation");
     }
-    verify_marked_routes().await?;
+    verify_marked_routes(desired_layout).await?;
     ensure_data_plane_ready(plan)?;
     if check_nft_owner().await? != nft {
       bail!("TPROXY nft table changed concurrently before activation");
@@ -544,16 +728,28 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   .await;
 
   if let Err(error) = pre_activation_result {
-    let mut rollback_errors =
-      rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await;
+    let mut rollback_errors = rollback_pre_activation(
+      desired_layout,
+      route_may_be_new,
+      rules,
+      mutation_result_uncertain,
+    )
+    .await;
     finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
     return Err(apply_failure_with_rollback(error, rollback_errors));
   }
 
   if let Err(error) = apply_nft_batch(&batch).await {
     let mut rollback_errors = rollback_nft(nft, previous_state.as_ref()).await;
-    rollback_errors
-      .extend(rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await);
+    rollback_errors.extend(
+      rollback_pre_activation(
+        desired_layout,
+        route_may_be_new,
+        rules,
+        mutation_result_uncertain,
+      )
+      .await,
+    );
     finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
     return Err(apply_failure_with_rollback(error, rollback_errors));
   }
@@ -561,8 +757,15 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   if let Err(error) = ensure_data_plane_ready(plan) {
     let mut rollback_errors = rollback_system_dns(previous_state.as_ref()).await;
     rollback_errors.extend(rollback_nft(nft, previous_state.as_ref()).await);
-    rollback_errors
-      .extend(rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await);
+    rollback_errors.extend(
+      rollback_pre_activation(
+        desired_layout,
+        route_may_be_new,
+        rules,
+        mutation_result_uncertain,
+      )
+      .await,
+    );
     finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
     return Err(apply_failure_with_rollback(
       error.context("TPROXY data plane disappeared while activating"),
@@ -573,8 +776,15 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   if let Err(error) = reconcile_system_dns(plan).await {
     let mut rollback_errors = rollback_system_dns(previous_state.as_ref()).await;
     rollback_errors.extend(rollback_nft(nft, previous_state.as_ref()).await);
-    rollback_errors
-      .extend(rollback_pre_activation(route_may_be_new, rules, mutation_result_uncertain).await);
+    rollback_errors.extend(
+      rollback_pre_activation(
+        desired_layout,
+        route_may_be_new,
+        rules,
+        mutation_result_uncertain,
+      )
+      .await,
+    );
     finish_rollback_journal(&mut rollback_errors, previous_state.as_ref());
     return Err(apply_failure_with_rollback(error, rollback_errors));
   }
@@ -586,13 +796,13 @@ pub async fn apply_tproxy_network(plan: &TproxyNetworkPlan) -> anyhow::Result<()
   }
 
   log::info!(
-    "TPROXY network state applied: listener={}, uid={}, output_mark={:#x}/{:#x}, prerouting_mark={:#x}/{:#x}, table={}",
+    "TPROXY network state applied: listener={}, uid={}, output_mark={:#010x}/{:#010x}, prerouting_mark={:#010x}/{:#010x}, table={}",
     plan.listen,
     plan.bypass_uid,
-    TPROXY_OUTPUT_ROUTE_MARK,
-    TPROXY_MARK_MASK,
-    TPROXY_PREROUTING_ROUTE_MARK,
-    TPROXY_MARK_MASK,
+    desired_layout.output,
+    desired_layout.mask,
+    desired_layout.prerouting,
+    desired_layout.mask,
     TPROXY_ROUTE_TABLE
   );
   Ok(())
@@ -623,6 +833,21 @@ pub async fn remove_tproxy_network() -> anyhow::Result<()> {
       NftState::Absent
     }
   };
+  let nft_layout = nft.mark_layout();
+  let journal_layout = journal
+    .as_ref()
+    .map(NetworkState::mark_layout)
+    .transpose()
+    .map_err(|error| errors.push(format!("journal mark layout is invalid: {error:#}")))
+    .ok()
+    .flatten();
+  if let (Some(nft_layout), Some(journal_layout)) = (nft_layout, journal_layout)
+    && nft_layout != journal_layout
+  {
+    log::warn!(
+      "TPROXY nft sentinel and journal disagree about marks during cleanup; matching both authenticated layouts before deleting rules"
+    );
+  }
 
   // Removing the owned nft table is the fail-open boundary: once its
   // sentinel has authenticated the table, stop intercepting new traffic
@@ -638,15 +863,36 @@ pub async fn remove_tproxy_network() -> anyhow::Result<()> {
   let may_remove_reserved_objects =
     reserved_objects_may_be_removed(nft_was_owned, journal_was_owned);
 
-  match check_policy_rules().await {
-    Ok(rules) if rules.state() == PolicyRuleState::Absent => {}
-    Ok(rules) if may_remove_reserved_objects => {
-      errors.extend(delete_policy_rules(rules).await);
+  let raw_rules = read_policy_rules().await;
+  match raw_rules {
+    Ok(raw_rules) => {
+      let mut layouts = vec![];
+      for layout in [nft_layout, journal_layout].into_iter().flatten() {
+        if !layouts.contains(&layout) {
+          layouts.push(layout);
+        }
+      }
+      let classified = layouts.iter().find_map(|layout| {
+        classify_policy_rules(&raw_rules, *layout)
+          .ok()
+          .map(|rules| (*layout, rules))
+      });
+      match classified {
+        Some((_, rules)) if rules.state() == PolicyRuleState::Absent => {}
+        Some((layout, rules)) if may_remove_reserved_objects => {
+          errors.extend(delete_policy_rules(layout, rules).await);
+        }
+        Some(_) => errors.push(
+          "rule cleanup refused: reserved TPROXY rules have no Plug2Proxy nft ownership sentinel or same-boot journal"
+            .to_owned(),
+        ),
+        None if reserved_policy_rules_are_absent(&raw_rules) => {}
+        None => errors.push(
+          "rule inspection failed: reserved policy rules do not match an authenticated Plug2Proxy mark layout"
+            .to_owned(),
+        ),
+      }
     }
-    Ok(_) => errors.push(
-      "rule cleanup refused: reserved TPROXY rules have no Plug2Proxy nft ownership sentinel or same-boot journal"
-        .to_owned(),
-    ),
     Err(error) => errors.push(format!("rule inspection failed: {error:#}")),
   }
 
@@ -680,9 +926,19 @@ pub async fn remove_tproxy_network() -> anyhow::Result<()> {
 
 pub async fn tproxy_network_status() -> anyhow::Result<String> {
   let nft = check_nft_owner().await?;
-  let route = check_route().await?;
-  let rules = check_policy_rules().await?;
   let state = read_state()?;
+  let layout = authenticated_mark_layout(nft, state.as_ref())?;
+  let route = check_route().await?;
+  let rules = match layout {
+    Some(layout) => check_policy_rules(layout).await?,
+    None => {
+      let rules = read_policy_rules().await?;
+      if !reserved_policy_rules_are_absent(&rules) {
+        bail!("reserved TPROXY policy rules exist without an authenticated mark layout");
+      }
+      PolicyRuleSet::default()
+    }
+  };
   let expected_dns = state
     .as_ref()
     .filter(|state| state.plan.system_default)
@@ -701,12 +957,13 @@ pub async fn tproxy_network_status() -> anyhow::Result<String> {
 }
 
 async fn rollback_pre_activation(
+  layout: MarkLayout,
   route_may_be_new: bool,
   previous_rules: PolicyRuleSet,
   mutation_result_uncertain: bool,
 ) -> Vec<String> {
   let mut errors = vec![];
-  errors.extend(rollback_policy_rules(previous_rules).await);
+  errors.extend(rollback_policy_rules(layout, previous_rules).await);
   if route_may_be_new && let Err(error) = delete_route_if_exact().await {
     errors.push(format!("route rollback failed: {error:#}"));
   }
@@ -739,16 +996,27 @@ async fn rollback_nft(
 ) -> Vec<String> {
   let result = match previous_nft {
     NftState::Absent => remove_owned_nft_table().await,
-    NftState::Legacy => match previous_state {
-      Some(state) => apply_nft_batch(&state.plan.render_legacy_nft_batch()).await,
+    NftState::Schema1 => match previous_state {
+      Some(state) => apply_nft_batch(&state.plan.render_schema_one_nft_batch()).await,
       None => Err(anyhow::anyhow!(
-        "cannot restore the previous legacy nft table without an ownership journal"
+        "cannot restore the previous schema 1 nft table without an ownership journal"
       )),
     },
-    NftState::Exact => match previous_state {
-      Some(state) => apply_nft_batch(&state.plan.render_nft_batch()).await,
+    NftState::Schema2 => match previous_state {
+      Some(state) => apply_nft_batch(&state.plan.render_schema_two_nft_batch()).await,
       None => Err(anyhow::anyhow!(
-        "cannot restore the previous owned nft table without an ownership journal"
+        "cannot restore the previous schema 2 nft table without an ownership journal"
+      )),
+    },
+    NftState::Schema3(layout) => match previous_state {
+      Some(state) if state.mark_layout().ok() == Some(layout) => {
+        apply_nft_batch(&state.plan.render_nft_batch()).await
+      }
+      Some(_) => Err(anyhow::anyhow!(
+        "cannot restore a schema 3 nft table whose sentinel and journal marks disagree"
+      )),
+      None => Err(anyhow::anyhow!(
+        "cannot restore the previous schema 3 nft table without an ownership journal"
       )),
     },
   };
@@ -908,8 +1176,19 @@ async fn check_nft_owner() -> anyhow::Result<NftState> {
     .and_then(|table| table.get("comment"))
     .and_then(Value::as_str);
   match sentinel {
-    Some(TPROXY_NFT_SENTINEL) => Ok(NftState::Exact),
-    Some(LEGACY_TPROXY_NFT_SENTINEL) => Ok(NftState::Legacy),
+    Some(SCHEMA_ONE_TPROXY_NFT_SENTINEL) => Ok(NftState::Schema1),
+    Some(SCHEMA_TWO_TPROXY_NFT_SENTINEL) => Ok(NftState::Schema2),
+    Some(sentinel) => {
+      if let Some(layout) = parse_schema_three_sentinel(sentinel)? {
+        Ok(NftState::Schema3(layout))
+      } else {
+        bail!(
+          "nft table {}/{} exists without a supported Plug2Proxy ownership sentinel; refusing to modify it",
+          TPROXY_NFT_FAMILY,
+          TPROXY_NFT_TABLE
+        )
+      }
+    }
     _ => bail!(
       "nft table {}/{} exists without a supported Plug2Proxy ownership sentinel; refusing to modify it",
       TPROXY_NFT_FAMILY,
@@ -918,26 +1197,72 @@ async fn check_nft_owner() -> anyhow::Result<NftState> {
   }
 }
 
-async fn check_policy_rules() -> anyhow::Result<PolicyRuleSet> {
-  let output = run_command(IP, &["-j", "-4", "rule", "show"], None).await?;
-  ensure_success(IP, &output)?;
-  let rules: Vec<Value> = serde_json::from_slice(&output.stdout).context("invalid ip rule JSON")?;
-  classify_policy_rules(&rules)
+async fn check_policy_rules(layout: MarkLayout) -> anyhow::Result<PolicyRuleSet> {
+  classify_policy_rules(&read_policy_rules().await?, layout)
 }
 
-fn classify_policy_rules(rules: &[Value]) -> anyhow::Result<PolicyRuleSet> {
+async fn read_policy_rules() -> anyhow::Result<Vec<Value>> {
+  let output = run_command(IP, &["-j", "-4", "rule", "show"], None).await?;
+  ensure_success(IP, &output)?;
+  serde_json::from_slice(&output.stdout).context("invalid ip rule JSON")
+}
+
+fn reserved_policy_rules_are_absent(rules: &[Value]) -> bool {
+  !rules.iter().any(|rule| {
+    let priority = json_u32(rule.get("priority").or_else(|| rule.get("pref")));
+    let table = json_u32(rule.get("table"));
+    matches!(
+      priority,
+      Some(
+        TPROXY_SOURCE_VALIDATION_RULE_PRIORITY
+          | TPROXY_PREROUTING_RULE_PRIORITY
+          | TPROXY_OUTPUT_RULE_PRIORITY
+      )
+    ) || table == Some(TPROXY_ROUTE_TABLE)
+  })
+}
+
+fn classify_policy_rules(rules: &[Value], layout: MarkLayout) -> anyhow::Result<PolicyRuleSet> {
   let mut managed = PolicyRuleSet::default();
+  let split_route_marks = layout.output != layout.prerouting;
 
   for rule in rules {
     let priority = json_u32(rule.get("priority").or_else(|| rule.get("pref")));
     let mark = json_u32(rule.get("fwmark"));
     let mask = json_u32(rule.get("fwmask"));
+    let effective_mask = mark.map(|_| mask.unwrap_or(u32::MAX));
     let table = json_u32(rule.get("table"));
     let goto = json_u32(rule.get("goto"));
     let iif = rule
       .get("iif")
       .or_else(|| rule.get("iifname"))
       .and_then(Value::as_str);
+    let inverted = policy_rule_is_inverted(rule);
+    let overlaps_our_marks = !inverted
+      && mark.zip(effective_mask).is_some_and(|(mark, mask)| {
+        mark_matchers_share_bits(mark, mask, layout.output, layout.mask)
+          || mark_matchers_share_bits(mark, mask, layout.prerouting, layout.mask)
+      });
+    // Rules with a smaller priority number run before every Plug2Proxy rule.
+    // Even a disjoint positive matcher can consume a composed packet mark
+    // after another component has set its own bits. Inverted matchers can
+    // likewise preempt unless their positive matcher
+    // contains both of our role matchers and they have no other selectors.
+    let preempts_our_marks = priority.is_some_and(|priority| {
+      priority < TPROXY_SOURCE_VALIDATION_RULE_PRIORITY
+        && mark.is_some()
+        && mark.zip(effective_mask).is_some_and(|(mark, mask)| {
+          if inverted {
+            has_non_mark_policy_rule_selectors(rule, false)
+              || inverted_mark_matcher_can_match_layout(mark, mask, layout)
+          } else {
+            mark_matcher_can_match_layout(mark, mask, layout)
+          }
+        })
+    });
+    if preempts_our_marks {
+      bail!("higher-priority policy rule can match Plug2Proxy-marked traffic: {rule}");
+    }
     let touches_ours = matches!(
       priority,
       Some(
@@ -945,17 +1270,16 @@ fn classify_policy_rules(rules: &[Value]) -> anyhow::Result<PolicyRuleSet> {
           | TPROXY_PREROUTING_RULE_PRIORITY
           | TPROXY_OUTPUT_RULE_PRIORITY
       )
-    ) || matches!(
-      mark,
-      Some(TPROXY_OUTPUT_ROUTE_MARK | TPROXY_PREROUTING_ROUTE_MARK)
-    ) || table == Some(TPROXY_ROUTE_TABLE);
+    ) || overlaps_our_marks
+      || table == Some(TPROXY_ROUTE_TABLE);
     if !touches_ours {
       continue;
     }
 
-    let kind = if priority == Some(TPROXY_SOURCE_VALIDATION_RULE_PRIORITY)
-      && mark == Some(TPROXY_PREROUTING_ROUTE_MARK)
-      && mask == Some(TPROXY_MARK_MASK)
+    let kind = if split_route_marks
+      && priority == Some(TPROXY_SOURCE_VALIDATION_RULE_PRIORITY)
+      && mark == Some(layout.prerouting)
+      && effective_mask == Some(layout.mask)
       && iif == Some("lo")
       && goto == Some(TPROXY_OUTPUT_RULE_PRIORITY)
       && table.is_none_or(|table| table == 0)
@@ -963,9 +1287,10 @@ fn classify_policy_rules(rules: &[Value]) -> anyhow::Result<PolicyRuleSet> {
       && !has_extra_policy_rule_selectors(rule, true)
     {
       PolicyRuleKind::SourceValidationGuard
-    } else if priority == Some(TPROXY_PREROUTING_RULE_PRIORITY)
-      && mark == Some(TPROXY_PREROUTING_ROUTE_MARK)
-      && mask == Some(TPROXY_MARK_MASK)
+    } else if split_route_marks
+      && priority == Some(TPROXY_PREROUTING_RULE_PRIORITY)
+      && mark == Some(layout.prerouting)
+      && effective_mask == Some(layout.mask)
       && iif.is_none()
       && table == Some(TPROXY_ROUTE_TABLE)
       && goto.is_none()
@@ -974,8 +1299,8 @@ fn classify_policy_rules(rules: &[Value]) -> anyhow::Result<PolicyRuleSet> {
     {
       PolicyRuleKind::PreroutingRoute
     } else if priority == Some(TPROXY_OUTPUT_RULE_PRIORITY)
-      && mark == Some(TPROXY_OUTPUT_ROUTE_MARK)
-      && mask == Some(TPROXY_MARK_MASK)
+      && mark == Some(layout.output)
+      && effective_mask == Some(layout.mask)
       && iif.is_none()
       && table == Some(TPROXY_ROUTE_TABLE)
       && goto.is_none()
@@ -996,6 +1321,30 @@ fn classify_policy_rules(rules: &[Value]) -> anyhow::Result<PolicyRuleSet> {
   Ok(managed)
 }
 
+fn mark_matchers_share_bits(left: u32, left_mask: u32, right: u32, right_mask: u32) -> bool {
+  let shared_mask = left_mask & right_mask;
+  shared_mask != 0 && (left ^ right) & shared_mask == 0
+}
+
+fn mark_matcher_can_match_layout(mark: u32, mask: u32, layout: MarkLayout) -> bool {
+  [layout.output, layout.prerouting]
+    .into_iter()
+    .any(|role| (mark ^ role) & (mask & layout.mask) == 0)
+}
+
+fn inverted_mark_matcher_can_match_layout(mark: u32, mask: u32, layout: MarkLayout) -> bool {
+  [layout.output, layout.prerouting]
+    .into_iter()
+    .any(|role| mask & !layout.mask != 0 || (mark ^ role) & mask != 0)
+}
+
+fn policy_rule_is_inverted(rule: &Value) -> bool {
+  rule
+    .get("not")
+    .or_else(|| rule.get("invert"))
+    .is_some_and(|value| value.as_bool().unwrap_or(true))
+}
+
 fn policy_rule_action_matches(rule: &Value, guard: bool) -> bool {
   // iproute2 omits `action` for the normal table-lookup form. In that case
   // the required `table` or `goto` attribute checked by the caller is the
@@ -1012,6 +1361,10 @@ fn policy_rule_action_matches(rule: &Value, guard: bool) -> bool {
 }
 
 fn has_extra_policy_rule_selectors(rule: &Value, allow_iif: bool) -> bool {
+  has_non_mark_policy_rule_selectors(rule, allow_iif) || policy_rule_is_inverted(rule)
+}
+
+fn has_non_mark_policy_rule_selectors(rule: &Value, allow_iif: bool) -> bool {
   let non_default_prefix = |keys: &[&str]| {
     keys
       .iter()
@@ -1032,6 +1385,8 @@ fn has_extra_policy_rule_selectors(rule: &Value, allow_iif: bool) -> bool {
       "oifname",
       "uidrange",
       "uid_range",
+      "tos",
+      "dsfield",
       "ipproto",
       "sport",
       "dport",
@@ -1040,21 +1395,18 @@ fn has_extra_policy_rule_selectors(rule: &Value, allow_iif: bool) -> bool {
       "suppress_prefixlength",
       "suppress_ifgroup",
     ])
-    || rule
-      .get("not")
-      .or_else(|| rule.get("invert"))
-      .is_some_and(|value| value.as_bool().unwrap_or(true))
     || non_default_prefix(&["src", "from"])
     || non_default_prefix(&["dst", "to"])
 }
 
 async fn install_missing_policy_rules(
+  layout: MarkLayout,
   existing: PolicyRuleSet,
   mutation_result_uncertain: &mut bool,
 ) -> anyhow::Result<()> {
   for kind in POLICY_RULE_INSTALL_ORDER {
     if !existing.contains(kind) {
-      add_policy_rule(kind, mutation_result_uncertain).await?;
+      add_policy_rule(layout, kind, mutation_result_uncertain).await?;
     }
   }
   Ok(())
@@ -1159,7 +1511,7 @@ fn should_inspect_system_dns_link(journal: Option<&NetworkState>, inspect_reques
 
 fn journal_authorizes_system_dns_transition(journal: Option<&NetworkState>) -> bool {
   journal.is_some_and(|journal| {
-    journal.schema == 2
+    matches!(journal.schema, 2 | 3)
       && (journal.plan.system_default
         || matches!(
           journal.phase.as_str(),
@@ -1184,7 +1536,7 @@ fn classify_system_dns_link(
 
   let Some(journal) = journal.filter(|_| journal_authorizes_system_dns_transition(journal)) else {
     bail!(
-      "network link {SYSTEM_DNS_LINK} has Plug2Proxy's identity but no same-boot schema 2 ownership journal; refusing to modify it"
+      "network link {SYSTEM_DNS_LINK} has Plug2Proxy's identity but no same-boot schema 2 or 3 ownership journal; refusing to modify it"
     );
   };
   let alias = link.get("ifalias").and_then(Value::as_str);
@@ -1582,7 +1934,7 @@ async fn delete_nft_table() -> anyhow::Result<()> {
   ensure_success(NFT, &output).context("failed to remove TPROXY nftables table")
 }
 
-fn policy_rule_arguments(kind: PolicyRuleKind, operation: &str) -> Vec<String> {
+fn policy_rule_arguments(layout: MarkLayout, kind: PolicyRuleKind, operation: &str) -> Vec<String> {
   let mut arguments = vec![
     "-4".to_owned(),
     "rule".to_owned(),
@@ -1595,21 +1947,21 @@ fn policy_rule_arguments(kind: PolicyRuleKind, operation: &str) -> Vec<String> {
       "iif".to_owned(),
       "lo".to_owned(),
       "fwmark".to_owned(),
-      format!("{TPROXY_PREROUTING_ROUTE_MARK:#x}/{TPROXY_MARK_MASK:#x}"),
+      format!("{:#010x}/{:#010x}", layout.prerouting, layout.mask),
       "goto".to_owned(),
       TPROXY_OUTPUT_RULE_PRIORITY.to_string(),
     ]),
     PolicyRuleKind::PreroutingRoute => arguments.extend([
       TPROXY_PREROUTING_RULE_PRIORITY.to_string(),
       "fwmark".to_owned(),
-      format!("{TPROXY_PREROUTING_ROUTE_MARK:#x}/{TPROXY_MARK_MASK:#x}"),
+      format!("{:#010x}/{:#010x}", layout.prerouting, layout.mask),
       "lookup".to_owned(),
       TPROXY_ROUTE_TABLE.to_string(),
     ]),
     PolicyRuleKind::OutputRoute => arguments.extend([
       TPROXY_OUTPUT_RULE_PRIORITY.to_string(),
       "fwmark".to_owned(),
-      format!("{TPROXY_OUTPUT_ROUTE_MARK:#x}/{TPROXY_MARK_MASK:#x}"),
+      format!("{:#010x}/{:#010x}", layout.output, layout.mask),
       "lookup".to_owned(),
       TPROXY_ROUTE_TABLE.to_string(),
     ]),
@@ -1618,16 +1970,17 @@ fn policy_rule_arguments(kind: PolicyRuleKind, operation: &str) -> Vec<String> {
 }
 
 async fn add_policy_rule(
+  layout: MarkLayout,
   kind: PolicyRuleKind,
   mutation_result_uncertain: &mut bool,
 ) -> anyhow::Result<()> {
-  let arguments = policy_rule_arguments(kind, "add");
+  let arguments = policy_rule_arguments(layout, kind, "add");
   let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
   run_ip_mutation_checked(&arguments, mutation_result_uncertain).await
 }
 
-async fn delete_policy_rule(kind: PolicyRuleKind) -> anyhow::Result<()> {
-  let arguments = policy_rule_arguments(kind, "del");
+async fn delete_policy_rule(layout: MarkLayout, kind: PolicyRuleKind) -> anyhow::Result<()> {
+  let arguments = policy_rule_arguments(layout, kind, "del");
   let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
   run_ip_checked(&arguments).await
 }
@@ -1661,11 +2014,15 @@ fn policy_rule_deletion_decision(
   }
 }
 
-async fn delete_policy_rules(rules: PolicyRuleSet) -> Vec<String> {
-  delete_policy_rule_targets(rules, "cleanup").await
+async fn delete_policy_rules(layout: MarkLayout, rules: PolicyRuleSet) -> Vec<String> {
+  delete_policy_rule_targets(layout, rules, "cleanup").await
 }
 
-async fn delete_policy_rule_targets(targets: PolicyRuleSet, operation: &str) -> Vec<String> {
+async fn delete_policy_rule_targets(
+  layout: MarkLayout,
+  targets: PolicyRuleSet,
+  operation: &str,
+) -> Vec<String> {
   let mut errors = vec![];
   let mut decision = PolicyRuleDeletionDecision {
     remove_source_validation_guard: false,
@@ -1674,7 +2031,7 @@ async fn delete_policy_rule_targets(targets: PolicyRuleSet, operation: &str) -> 
   };
 
   if targets.prerouting_route
-    && let Err(error) = delete_policy_rule(PolicyRuleKind::PreroutingRoute).await
+    && let Err(error) = delete_policy_rule(layout, PolicyRuleKind::PreroutingRoute).await
   {
     errors.push(format!(
       "PreroutingRoute rule {operation} failed: {error:#}"
@@ -1682,11 +2039,12 @@ async fn delete_policy_rule_targets(targets: PolicyRuleSet, operation: &str) -> 
   }
 
   if targets.source_validation_guard {
-    match check_policy_rules().await {
+    match check_policy_rules(layout).await {
       Ok(current) => {
         decision = policy_rule_deletion_decision(targets, current);
         if decision.remove_source_validation_guard
-          && let Err(error) = delete_policy_rule(PolicyRuleKind::SourceValidationGuard).await
+          && let Err(error) =
+            delete_policy_rule(layout, PolicyRuleKind::SourceValidationGuard).await
         {
           errors.push(format!(
             "SourceValidationGuard rule {operation} failed: {error:#}"
@@ -1708,7 +2066,7 @@ async fn delete_policy_rule_targets(targets: PolicyRuleSet, operation: &str) -> 
   // Always make this best-effort attempt even when the dependent cleanup
   // above failed, so nft removal failures still converge toward fail-open.
   if decision.remove_output_route
-    && let Err(error) = delete_policy_rule(PolicyRuleKind::OutputRoute).await
+    && let Err(error) = delete_policy_rule(layout, PolicyRuleKind::OutputRoute).await
   {
     errors.push(format!("OutputRoute rule {operation} failed: {error:#}"));
   }
@@ -1716,12 +2074,17 @@ async fn delete_policy_rule_targets(targets: PolicyRuleSet, operation: &str) -> 
   errors
 }
 
-async fn rollback_policy_rules(previous: PolicyRuleSet) -> Vec<String> {
-  let current = match check_policy_rules().await {
+async fn rollback_policy_rules(layout: MarkLayout, previous: PolicyRuleSet) -> Vec<String> {
+  let current = match check_policy_rules(layout).await {
     Ok(current) => current,
     Err(error) => return vec![format!("rule rollback inspection failed: {error:#}")],
   };
-  delete_policy_rule_targets(policy_rule_removal_targets(previous, current), "rollback").await
+  delete_policy_rule_targets(
+    layout,
+    policy_rule_removal_targets(previous, current),
+    "rollback",
+  )
+  .await
 }
 
 async fn delete_route() -> anyhow::Result<()> {
@@ -1770,7 +2133,7 @@ async fn run_ip_mutation_checked(
   ensure_success(IP, &output)
 }
 
-async fn verify_marked_routes() -> anyhow::Result<()> {
+async fn verify_marked_routes(layout: MarkLayout) -> anyhow::Result<()> {
   let output = run_command(
     IP,
     &[
@@ -1780,7 +2143,7 @@ async fn verify_marked_routes() -> anyhow::Result<()> {
       "get",
       "198.51.100.1",
       "mark",
-      &format!("{TPROXY_OUTPUT_ROUTE_MARK:#x}"),
+      &format!("{:#010x}", layout.output),
     ],
     None,
   )
@@ -1800,7 +2163,7 @@ async fn verify_marked_routes() -> anyhow::Result<()> {
     );
   }
 
-  let arguments = source_validation_route_get_arguments();
+  let arguments = source_validation_route_get_arguments(layout);
   let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
   let output = run_command(IP, &arguments, None).await?;
   ensure_success(IP, &output)?;
@@ -1820,7 +2183,7 @@ async fn verify_marked_routes() -> anyhow::Result<()> {
   Ok(())
 }
 
-fn source_validation_route_get_arguments() -> Vec<String> {
+fn source_validation_route_get_arguments(layout: MarkLayout) -> Vec<String> {
   // An output route lookup has loopback as its RPDB input interface, which
   // exercises the same guard selector used by fib_validate_source(). Passing
   // an explicit `iif lo` instead asks the kernel for an input-route lookup and
@@ -1832,7 +2195,7 @@ fn source_validation_route_get_arguments() -> Vec<String> {
     "get".to_owned(),
     "198.51.100.1".to_owned(),
     "mark".to_owned(),
-    format!("{TPROXY_PREROUTING_ROUTE_MARK:#x}"),
+    format!("{:#010x}", layout.prerouting),
   ]
   .into()
 }
@@ -1898,14 +2261,17 @@ fn ensure_success(program: &str, output: &Output) -> anyhow::Result<()> {
 }
 
 fn write_state(plan: &TproxyNetworkPlan, phase: &str) -> anyhow::Result<()> {
-  ensure_state_directory()?;
-  let boot_id = current_boot_id()?;
-  let encoded = serde_json::to_vec_pretty(&NetworkState {
-    schema: 2,
-    boot_id,
+  write_network_state(&NetworkState {
+    schema: 3,
+    boot_id: current_boot_id()?,
     phase: phase.to_owned(),
     plan: plan.clone(),
-  })?;
+  })
+}
+
+fn write_network_state(state: &NetworkState) -> anyhow::Result<()> {
+  ensure_state_directory()?;
+  let encoded = serde_json::to_vec_pretty(state)?;
   let temporary = format!("{STATE_FILE}.{}.tmp", uuid::Uuid::new_v4());
   let mut file = std::fs::OpenOptions::new()
     .write(true)
@@ -1944,7 +2310,7 @@ fn read_state() -> anyhow::Result<Option<NetworkState>> {
     .context("failed to read TPROXY ownership journal")?;
   let mut state: NetworkState =
     serde_json::from_slice(&encoded).context("invalid TPROXY ownership journal")?;
-  if !matches!(state.schema, 1 | 2) {
+  if !matches!(state.schema, 1..=3) {
     bail!(
       "unsupported TPROXY ownership journal schema {}",
       state.schema
@@ -1954,6 +2320,23 @@ fn read_state() -> anyhow::Result<Option<NetworkState>> {
     // Schema 1 predates system-default DNS ownership. It can authorize the
     // original nft/route/rule objects, but never the dedicated DNS link.
     state.plan.system_default = false;
+  }
+  match state.schema {
+    1 => {
+      state.plan.mark = SCHEMA_ONE_MARK_LAYOUT.output;
+      state.plan.mark_mask = SCHEMA_ONE_MARK_LAYOUT.mask;
+    }
+    2 => {
+      state.plan.mark = SCHEMA_TWO_MARK_LAYOUT.output;
+      state.plan.mark_mask = SCHEMA_TWO_MARK_LAYOUT.mask;
+    }
+    3 => {
+      state
+        .plan
+        .mark_layout()
+        .context("invalid schema 3 TPROXY ownership journal mark layout")?;
+    }
+    _ => unreachable!(),
   }
   if state.boot_id != current_boot_id()? {
     bail!("TPROXY ownership journal belongs to a different system boot");
@@ -1995,7 +2378,7 @@ fn network_state_phase_is_supported(phase: &str) -> bool {
 
 fn restore_state(previous_state: Option<&NetworkState>) -> anyhow::Result<()> {
   match previous_state {
-    Some(state) => write_state(&state.plan, &state.phase),
+    Some(state) => write_network_state(state),
     None => remove_state_file(),
   }
 }
@@ -2076,11 +2459,15 @@ mod tests {
 
   fn journal(plan: TproxyNetworkPlan, phase: &str) -> NetworkState {
     NetworkState {
-      schema: 2,
+      schema: 3,
       boot_id: "test-boot".to_owned(),
       phase: phase.to_owned(),
       plan,
     }
+  }
+
+  fn default_layout() -> MarkLayout {
+    plan().mark_layout().unwrap()
   }
 
   fn exact_system_dns_link() -> Value {
@@ -2391,49 +2778,55 @@ mod tests {
     assert!(!journal_authorizes_system_dns_transition(None));
   }
 
-  fn guard_rule() -> Value {
+  fn guard_rule(layout: MarkLayout) -> Value {
     serde_json::json!({
       "priority": 98,
       "src": "all",
-      "fwmark": "0x53000000",
-      "fwmask": "0xff000000",
+      "fwmark": format!("{:#x}", layout.prerouting),
+      "fwmask": format!("{:#x}", layout.mask),
       "iif": "lo",
       "goto": 100
     })
   }
 
-  fn prerouting_rule() -> Value {
+  fn prerouting_rule(layout: MarkLayout) -> Value {
     serde_json::json!({
       "priority": 99,
       "src": "all",
-      "fwmark": "0x53000000",
-      "fwmask": "0xff000000",
+      "fwmark": format!("{:#x}", layout.prerouting),
+      "fwmask": format!("{:#x}", layout.mask),
       "table": "20230"
     })
   }
 
-  fn output_rule() -> Value {
+  fn output_rule(layout: MarkLayout) -> Value {
     serde_json::json!({
       "priority": 100,
       "src": "all",
-      "fwmark": "0x51000000",
-      "fwmask": "0xff000000",
+      "fwmark": format!("{:#x}", layout.output),
+      "fwmask": format!("{:#x}", layout.mask),
       "table": "20230"
     })
   }
 
   #[test]
-  fn renders_split_route_marks_and_legacy_flow_migration() {
+  fn renders_configured_split_route_marks() {
     let plan = plan();
+    let layout = plan.mark_layout().unwrap();
     let rules = plan.render_nft_batch();
     assert!(rules.starts_with("delete table inet plug2proxy_tproxy\n"));
-    assert!(plan.render_nft_batch_for(NftState::Absent).starts_with(
-      "create table inet plug2proxy_tproxy { comment \"managed-by=plug2proxy;schema=2\"; }\n"
-    ));
-    assert!(rules.contains(&format!("comment \"{TPROXY_NFT_SENTINEL}\"")));
+    assert!(
+      plan
+        .render_nft_batch_for(NftState::Absent)
+        .starts_with(&format!(
+          "create table inet plug2proxy_tproxy {{ comment \"{}\"; }}\n",
+          layout.sentinel()
+        ))
+    );
+    assert!(rules.contains(&format!("comment \"{}\"", layout.sentinel())));
     assert!(rules.contains("meta skuid 989 counter return"));
     assert!(rules.contains(
-      "ct mark & 0xff000000 == 0x51000000 meta mark set (meta mark & 0x00ffffff) | 0x51000000"
+      "ct mark & 0x000000ff == 0x00000070 meta mark set (meta mark & 0xffffff00) | 0x00000070"
     ));
     assert_eq!(
       rules.matches("ct status confirmed counter return").count(),
@@ -2444,57 +2837,68 @@ mod tests {
       2
     );
     assert!(rules.contains(
-      "tcp flags & (fin | syn | rst | ack) == syn ct mark set (ct mark & 0x00ffffff) | 0x51000000"
+      "tcp flags & (fin | syn | rst | ack) == syn ct mark set (ct mark & 0xffffff00) | 0x00000070"
     ));
     assert!(
       rules
-        .contains("meta l4proto udp ct state new ct mark set (ct mark & 0x00ffffff) | 0x51000000")
+        .contains("meta l4proto udp ct state new ct mark set (ct mark & 0xffffff00) | 0x00000070")
     );
-    assert!(rules.contains("meta mark & 0xff000000 == 0x52000000"));
+    assert!(!rules.contains("0x52000000"));
     assert!(rules.contains("tproxy ip to 127.0.0.1:12345"));
     assert!(rules.contains(
-      "meta mark & 0xff000000 == 0x51000000 iifname \"lo\" tproxy ip to 127.0.0.1:12345"
+      "meta mark & 0x000000ff == 0x00000070 iifname \"lo\" tproxy ip to 127.0.0.1:12345"
     ));
     assert!(rules.contains(
-      "meta mark & 0xff000000 == 0x51000000 ct mark set (ct mark & 0x00ffffff) | 0x53000000 meta mark set (meta mark & 0x00ffffff) | 0x53000000 tproxy ip to 127.0.0.1:12345"
+      "meta mark & 0x000000ff == 0x00000070 ct mark set (ct mark & 0xffffff00) | 0x00000071 meta mark set (meta mark & 0xffffff00) | 0x00000071 tproxy ip to 127.0.0.1:12345"
     ));
     assert!(rules.contains(
-      "ct mark & 0xff000000 == 0x51000000 iifname \"lo\" meta mark set (meta mark & 0x00ffffff) | 0x51000000 tproxy ip to 127.0.0.1:12345"
+      "ct mark & 0x000000ff == 0x00000070 iifname \"lo\" meta mark set (meta mark & 0xffffff00) | 0x00000070 tproxy ip to 127.0.0.1:12345"
     ));
     assert!(rules.contains(
-      "ct mark & 0xff000000 == 0x51000000 ct mark set (ct mark & 0x00ffffff) | 0x53000000 meta mark set (meta mark & 0x00ffffff) | 0x53000000 tproxy ip to 127.0.0.1:12345"
+      "ct mark & 0x000000ff == 0x00000070 ct mark set (ct mark & 0xffffff00) | 0x00000071 meta mark set (meta mark & 0xffffff00) | 0x00000071 tproxy ip to 127.0.0.1:12345"
     ));
     assert!(rules.contains(
-      "ct mark & 0xff000000 == 0x53000000 meta mark set (meta mark & 0x00ffffff) | 0x53000000 tproxy ip to 127.0.0.1:12345"
+      "ct mark & 0x000000ff == 0x00000071 meta mark set (meta mark & 0xffffff00) | 0x00000071 tproxy ip to 127.0.0.1:12345"
     ));
     assert!(rules.contains(
-      "tcp flags & (fin | syn | rst | ack) == syn ct mark set (ct mark & 0x00ffffff) | 0x53000000"
+      "tcp flags & (fin | syn | rst | ack) == syn ct mark set (ct mark & 0xffffff00) | 0x00000071"
     ));
     let prerouting = rules.split("chain prerouting").nth(1).unwrap();
     assert!(
       prerouting.find("ct direction reply").unwrap()
         < prerouting
-          .find("ct mark & 0xff000000 == 0x51000000")
+          .find("ct mark & 0x000000ff == 0x00000070")
           .unwrap()
     );
     assert_eq!(rules.matches("meta mark != 0 counter return").count(), 1);
-    assert!(rules.contains("meta mark & 0xff000000 != 0 counter return"));
-    assert!(rules.contains("ct mark & 0xff000000 != 0 counter return"));
+    assert!(rules.contains("meta mark & 0x000000ff != 0 counter return"));
+    assert!(rules.contains("ct mark & 0x000000ff != 0 counter return"));
+    assert!(rules.contains("meta mark & 0x00ff0000 == 0x00080000 counter return"));
     assert!(!rules.contains("10.0.0.0/8"));
     assert!(!rules.contains("100.64.0.0/10"));
   }
 
   #[test]
-  fn legacy_renderer_keeps_schema_one_and_single_route_mark() {
-    let rules = plan().render_legacy_nft_batch();
+  fn schema_one_renderer_keeps_single_route_mark() {
+    let rules = plan().render_schema_one_nft_batch();
 
-    assert!(rules.contains(&format!("comment \"{LEGACY_TPROXY_NFT_SENTINEL}\"")));
-    assert!(!rules.contains(TPROXY_NFT_SENTINEL));
+    assert!(rules.contains(&format!("comment \"{SCHEMA_ONE_TPROXY_NFT_SENTINEL}\"")));
+    assert!(!rules.contains(SCHEMA_THREE_TPROXY_NFT_SENTINEL_PREFIX));
     assert!(!rules.contains("0x53000000"));
     assert!(!rules.contains("iifname \"lo\""));
     assert!(rules.contains(
       "ct mark & 0xff000000 == 0x51000000 meta mark set (meta mark & 0x00ffffff) | 0x51000000 tproxy ip to 127.0.0.1:12345"
     ));
+  }
+
+  #[test]
+  fn schema_two_renderer_restores_previous_split_marks() {
+    let rules = plan().render_schema_two_nft_batch();
+
+    assert!(rules.contains(&format!("comment \"{SCHEMA_TWO_TPROXY_NFT_SENTINEL}\"")));
+    assert!(rules.contains("0x51000000"));
+    assert!(rules.contains("0x52000000"));
+    assert!(rules.contains("0x53000000"));
   }
 
   #[test]
@@ -2577,73 +2981,270 @@ mod tests {
   }
 
   #[test]
+  fn validates_and_derives_configured_mark_layouts() {
+    let layout = MarkLayout::from_base(0x0000_0070, 0x0000_00ff).unwrap();
+    assert_eq!(layout.output, 0x0000_0070);
+    assert_eq!(layout.prerouting, 0x0000_0071);
+    assert_eq!(layout.keep_mask(), 0xffff_ff00);
+
+    let high_byte = MarkLayout::from_base(0x7000_0000, 0xff00_0000).unwrap();
+    assert_eq!(high_byte.prerouting, 0x7100_0000);
+
+    for (mark, mask, message) in [
+      (0x0000_0000, 0x0000_00ff, "must be non-zero"),
+      (0x0000_0070, 0x0000_0001, "at least two bits"),
+      (0x0000_0170, 0x0000_00ff, "outside mark_mask"),
+      (0x0000_0071, 0x0000_00ff, "lowest bit"),
+    ] {
+      assert!(
+        MarkLayout::from_base(mark, mask)
+          .unwrap_err()
+          .to_string()
+          .contains(message)
+      );
+    }
+  }
+
+  #[test]
+  fn schema_three_sentinel_round_trips_padded_mark_and_mask() {
+    let layout = default_layout();
+    let sentinel = layout.sentinel();
+    assert_eq!(
+      sentinel,
+      "managed-by=plug2proxy;schema=3;mark=0x00000070;mark_mask=0x000000ff"
+    );
+    assert_eq!(
+      parse_schema_three_sentinel(&sentinel).unwrap(),
+      Some(layout)
+    );
+    assert_eq!(
+      parse_schema_three_sentinel(SCHEMA_TWO_TPROXY_NFT_SENTINEL).unwrap(),
+      None
+    );
+    assert!(
+      parse_schema_three_sentinel("managed-by=plug2proxy;schema=3;mark=0x70;mark_mask=0xff")
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn journal_schema_selects_its_own_mark_layout() {
+    let mut schema_one = journal(plan(), "applied");
+    schema_one.schema = 1;
+    schema_one.plan.mark = 0;
+    schema_one.plan.mark_mask = 0;
+    assert_eq!(schema_one.mark_layout().unwrap(), SCHEMA_ONE_MARK_LAYOUT);
+
+    let mut schema_two = schema_one.clone();
+    schema_two.schema = 2;
+    assert_eq!(schema_two.mark_layout().unwrap(), SCHEMA_TWO_MARK_LAYOUT);
+
+    let mut schema_three = schema_two;
+    schema_three.schema = 3;
+    assert!(schema_three.mark_layout().is_err());
+    schema_three.plan.mark = 0x0000_0070;
+    schema_three.plan.mark_mask = 0x0000_00ff;
+    assert_eq!(schema_three.mark_layout().unwrap(), default_layout());
+  }
+
+  #[test]
+  fn active_mark_changes_require_remove_before_apply() {
+    let desired = default_layout();
+    assert!(ensure_desired_mark_layout(desired, None).is_ok());
+    assert!(ensure_desired_mark_layout(desired, Some(desired)).is_ok());
+    assert!(
+      ensure_desired_mark_layout(desired, Some(SCHEMA_TWO_MARK_LAYOUT))
+        .unwrap_err()
+        .to_string()
+        .contains("restart the service")
+    );
+  }
+
+  #[test]
   fn parses_numeric_and_hex_json_values() {
     assert_eq!(json_u32(Some(&Value::from(20230))), Some(20230));
     assert_eq!(
       json_u32(Some(&Value::from("0x51000000"))),
-      Some(TPROXY_OUTPUT_ROUTE_MARK)
+      Some(SCHEMA_TWO_MARK_LAYOUT.output)
     );
     assert_eq!(json_u32(Some(&Value::from("20230"))), Some(20230));
   }
 
   #[test]
   fn classifies_exact_legacy_and_partial_policy_rule_sets() {
+    let layout = default_layout();
     assert_eq!(
-      classify_policy_rules(&[]).unwrap().state(),
+      classify_policy_rules(&[], layout).unwrap().state(),
       PolicyRuleState::Absent
     );
     assert_eq!(
-      classify_policy_rules(&[output_rule()]).unwrap().state(),
+      classify_policy_rules(&[output_rule(layout)], layout)
+        .unwrap()
+        .state(),
       PolicyRuleState::Legacy
     );
     assert_eq!(
-      classify_policy_rules(&[output_rule(), prerouting_rule()])
+      classify_policy_rules(&[output_rule(layout), prerouting_rule(layout)], layout)
         .unwrap()
         .state(),
       PolicyRuleState::Partial
     );
     assert_eq!(
-      classify_policy_rules(&[guard_rule(), prerouting_rule(), output_rule()])
-        .unwrap()
-        .state(),
+      classify_policy_rules(
+        &[
+          guard_rule(layout),
+          prerouting_rule(layout),
+          output_rule(layout),
+        ],
+        layout,
+      )
+      .unwrap()
+      .state(),
       PolicyRuleState::Exact
     );
   }
 
   #[test]
   fn rejects_duplicate_or_non_exact_reserved_policy_rules() {
-    let duplicate = classify_policy_rules(&[output_rule(), output_rule()])
+    let layout = default_layout();
+    let duplicate = classify_policy_rules(&[output_rule(layout), output_rule(layout)], layout)
       .unwrap_err()
       .to_string();
     assert!(duplicate.contains("duplicate"));
 
-    let mut extra_selector = prerouting_rule();
+    let mut extra_selector = prerouting_rule(layout);
     extra_selector["oif"] = Value::from("eth0");
     assert!(
-      classify_policy_rules(&[extra_selector])
+      classify_policy_rules(&[extra_selector], layout)
         .unwrap_err()
         .to_string()
         .contains("conflicts")
     );
 
-    let mut wrong_goto = guard_rule();
+    let mut wrong_goto = guard_rule(layout);
     wrong_goto["goto"] = Value::from(99);
-    assert!(classify_policy_rules(&[wrong_goto]).is_err());
+    assert!(classify_policy_rules(&[wrong_goto], layout).is_err());
 
-    let mut wrong_action = output_rule();
+    let mut wrong_action = output_rule(layout);
     wrong_action["action"] = Value::from("blackhole");
-    assert!(classify_policy_rules(&[wrong_action]).is_err());
+    assert!(classify_policy_rules(&[wrong_action], layout).is_err());
 
     let foreign_reserved_priority = serde_json::json!({
       "priority": 99,
       "src": "all",
       "table": "main"
     });
-    assert!(classify_policy_rules(&[foreign_reserved_priority]).is_err());
+    assert!(classify_policy_rules(&[foreign_reserved_priority], layout).is_err());
+  }
+
+  #[test]
+  fn policy_rule_conflicts_use_mask_overlap_not_integer_equality() {
+    let layout = default_layout();
+    let tailscale_rule = serde_json::json!({
+      "priority": 5210,
+      "fwmark": "0x00080000",
+      "fwmask": "0x00ff0000",
+      "table": "main"
+    });
+    assert_eq!(
+      classify_policy_rules(&[tailscale_rule], layout)
+        .unwrap()
+        .state(),
+      PolicyRuleState::Absent
+    );
+
+    let overlapping_rule = serde_json::json!({
+      "priority": 1000,
+      "fwmark": "0x00000070",
+      "fwmask": "0x000000f0",
+      "table": "main"
+    });
+    assert!(classify_policy_rules(&[overlapping_rule], layout).is_err());
+
+    let early_disjoint_rule = serde_json::json!({
+      "priority": 50,
+      "fwmark": "0x00040000",
+      "fwmask": "0x00ff0000",
+      "table": "main"
+    });
+    assert!(classify_policy_rules(&[early_disjoint_rule], layout).is_err());
+
+    let early_mutually_exclusive_rule = serde_json::json!({
+      "priority": 50,
+      "fwmark": "0x00000080",
+      "fwmask": "0x000000ff",
+      "table": "main"
+    });
+    assert_eq!(
+      classify_policy_rules(&[early_mutually_exclusive_rule], layout)
+        .unwrap()
+        .state(),
+      PolicyRuleState::Absent
+    );
+
+    let early_inverted_rule = serde_json::json!({
+      "priority": 50,
+      "not": true,
+      "fwmark": "0x00000080",
+      "fwmask": "0x000000ff",
+      "table": "main"
+    });
+    assert!(classify_policy_rules(&[early_inverted_rule], layout).is_err());
+
+    let early_inverted_output_only_rule = serde_json::json!({
+      "priority": 50,
+      "invert": true,
+      "fwmark": "0x00000070",
+      "fwmask": "0x000000ff",
+      "table": "main"
+    });
+    assert!(classify_policy_rules(&[early_inverted_output_only_rule], layout).is_err());
+
+    let early_inverted_safe_rule = serde_json::json!({
+      "priority": 50,
+      "not": true,
+      "fwmark": "0x00000070",
+      "fwmask": "0x000000fe",
+      "table": "main"
+    });
+    assert_eq!(
+      classify_policy_rules(&[early_inverted_safe_rule], layout)
+        .unwrap()
+        .state(),
+      PolicyRuleState::Absent
+    );
+
+    let early_inverted_rule_with_selector = serde_json::json!({
+      "priority": 50,
+      "not": true,
+      "fwmark": "0x00000070",
+      "fwmask": "0x000000fe",
+      "iif": "tailscale0",
+      "table": "main"
+    });
+    assert!(classify_policy_rules(&[early_inverted_rule_with_selector], layout).is_err());
+  }
+
+  #[test]
+  fn full_width_policy_mask_may_be_omitted_by_iproute2() {
+    let layout = MarkLayout::from_base(0x0000_0070, u32::MAX).unwrap();
+    let mut rules = [
+      guard_rule(layout),
+      prerouting_rule(layout),
+      output_rule(layout),
+    ];
+    for rule in &mut rules {
+      rule.as_object_mut().unwrap().remove("fwmask");
+    }
+    assert_eq!(
+      classify_policy_rules(&rules, layout).unwrap().state(),
+      PolicyRuleState::Exact
+    );
   }
 
   #[test]
   fn policy_rule_commands_preserve_legacy_output_priority_and_safe_order() {
+    let layout = default_layout();
     assert_eq!(
       POLICY_RULE_INSTALL_ORDER,
       [
@@ -2661,7 +3262,7 @@ mod tests {
       ]
     );
     assert_eq!(
-      policy_rule_arguments(PolicyRuleKind::SourceValidationGuard, "add"),
+      policy_rule_arguments(layout, PolicyRuleKind::SourceValidationGuard, "add"),
       [
         "-4",
         "rule",
@@ -2671,13 +3272,13 @@ mod tests {
         "iif",
         "lo",
         "fwmark",
-        "0x53000000/0xff000000",
+        "0x00000071/0x000000ff",
         "goto",
         "100",
       ]
     );
     assert_eq!(
-      policy_rule_arguments(PolicyRuleKind::PreroutingRoute, "add"),
+      policy_rule_arguments(layout, PolicyRuleKind::PreroutingRoute, "add"),
       [
         "-4",
         "rule",
@@ -2685,13 +3286,13 @@ mod tests {
         "priority",
         "99",
         "fwmark",
-        "0x53000000/0xff000000",
+        "0x00000071/0x000000ff",
         "lookup",
         "20230",
       ]
     );
     assert_eq!(
-      policy_rule_arguments(PolicyRuleKind::OutputRoute, "add"),
+      policy_rule_arguments(layout, PolicyRuleKind::OutputRoute, "add"),
       [
         "-4",
         "rule",
@@ -2699,7 +3300,7 @@ mod tests {
         "priority",
         "100",
         "fwmark",
-        "0x51000000/0xff000000",
+        "0x00000070/0x000000ff",
         "lookup",
         "20230",
       ]
@@ -2797,7 +3398,7 @@ mod tests {
   #[test]
   fn source_validation_route_probe_uses_the_local_output_lookup() {
     assert_eq!(
-      source_validation_route_get_arguments(),
+      source_validation_route_get_arguments(default_layout()),
       [
         "-j",
         "-4",
@@ -2805,7 +3406,7 @@ mod tests {
         "get",
         "198.51.100.1",
         "mark",
-        "0x53000000",
+        "0x00000071",
       ]
     );
   }

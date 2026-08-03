@@ -20,30 +20,38 @@ IPv6 透明代理，应先保持原有 IPv6 路径，不能把本文配置当作
   -> Plug2Proxy 路由与 QomT
 ```
 
-Plug2Proxy 的网络控制器会管理以下专用对象：
+Plug2Proxy 的网络控制器会管理以下专用对象。表中的 mark 是默认布局，可以
+通过配置调整：
 
-| 对象 | 固定值 |
+| 对象 | 默认值或固定值 |
 | --- | --- |
 | nftables table | `inet plug2proxy_tproxy` |
-| 本机 OUTPUT 路由 mark / mask | `0x51000000/0xff000000` |
-| bypass mark / mask | `0x52000000/0xff000000` |
-| 外部 PREROUTING 路由 mark / mask | `0x53000000/0xff000000` |
+| 本机 OUTPUT 路由 mark / mask | `0x00000070/0x000000ff` |
+| 外部 PREROUTING 路由 mark / mask | `0x00000071/0x000000ff` |
 | IPv4 policy rule priorities | `98`（源校验 guard）、`99`（PREROUTING）、`100`（OUTPUT） |
 | IPv4 route table | `20230` |
 | system DNS route（可选） | `plug2proxy-dns0` dummy link，`192.0.2.1/32`，route-only domain `~.` |
 
-写入 mark 时只修改高 8 位，保留低 24 位。OUTPUT 链会绕过 Plug2Proxy
-运行用户产生的连接、reply 方向流量、bypass mark、已存在的非零外部 mark，
-并显式保护 Tailscale 的已知 mark。因此 Plug2Proxy 自己的 mTCP、UDP QUIC
-连接不会再次进入 TPROXY，tailscaled 的外层连接也不会被套娃代理。
+`network.mark` 是 OUTPUT 值；`network.mark_mask` 中最低的有效 bit 是路径
+角色位，PREROUTING 值等于 `mark | role_bit`。默认 mask 的角色位是
+`0x00000001`，所以两个默认值分别为 `0x00000070` 和 `0x00000071`。写入
+packet mark 或 conntrack mark 时只修改 mask 覆盖的 bit，其余 bit 原样保留；
+默认布局即修改低 8 位、保留高 24 位。
+
+当前没有独立的 bypass mark。OUTPUT 链会绕过 Plug2Proxy 运行用户产生的
+连接、reply 方向流量和已存在的非零外部 mark，并显式保护 Tailscale 的已知
+mark。因此 Plug2Proxy 自己的 mTCP、UDP QUIC 连接和透明 UDP 响应依靠专用
+UID 绕过，不会再次进入 TPROXY；tailscaled 的外层连接也不会被套娃代理。
 
 本机 OUTPUT 和转发 PREROUTING 流量都按 flow 分类。只有规则启用后到达的
 第一个 TCP SYN 或 UDP 数据包会建立 Plug2Proxy 的 conntrack 路由标记；
 同一 flow 的后续包从 conntrack 恢复标记。规则启用前已经由 conntrack 确认、
 且没有 Plug2Proxy 标记的 flow 保持原路径，不会在字节流中途被切入 TPROXY。
-`network reconcile` 原子替换 Plug2Proxy 自己的 nft table，但不清空 conntrack，
-因此已有 flow 会继续使用原来的分类。它不等于跨 Plug2Proxy 进程重启保留
-TCP 会话：数据平面进程退出后，进程内连接仍然会结束。
+mark 布局不变时，`network reconcile` 会原子替换 Plug2Proxy 自己的 nft
+table，但不清空 conntrack，因此已有 flow 会继续使用原来的分类。布局变化
+时 reconcile 会拒绝修改活动规则，必须 restart，或先 `network remove` 再
+`network apply`。这也不等于跨 Plug2Proxy 进程重启保留 TCP 会话：数据平面
+进程退出后，进程内连接仍然会结束。
 
 OUTPUT 与 PREROUTING 必须使用不同 mark。[Tailscale 1.98.1 更新说明](https://tailscale.com/changelog)
 明确记录其 Linux 客户端会启用
@@ -116,6 +124,8 @@ nftables 和 policy routing 的 `network` 子命令由 systemd 以 root 短暂�
       "hijack_dns": false,
       "network": {
         "bypass_user": "plug2proxy",
+        "mark": "0x00000070",
+        "mark_mask": "0x000000ff",
         "exclude_ipv4": [
           "192.168.0.0/16"
         ]
@@ -144,6 +154,14 @@ nftables 和 policy routing 的 `network` 子命令由 systemd 以 root 短暂�
 - `network.bypass_user`：运行 Plug2Proxy 数据平面的专用用户，默认
   `plug2proxy`。启动时会校验进程有效 UID 必须与该用户的 UID 相同；网络
   规则也按这个 UID 绕过代理。
+- `network.mark`、`network.mark_mask`：可选的 mark 布局，默认分别为
+  `"0x00000070"` 和 `"0x000000ff"`；也接受 JSON 整数。`mark` 是 OUTPUT
+  值，必须非零、所有有效 bit 都位于 mask 内，并且必须清除 mask 中最低的
+  有效 bit。这个最低 bit 留作角色位，PREROUTING 值由程序设置为
+  `mark | role_bit`，默认即 `0x00000071`。mask 至少要包含两个 bit，避免只
+  剩角色位而没有非零的基础标记。规则设置和恢复 mark 时只改写 mask 内的
+  bit，因此可与使用其他 bit 的组件组合。修改正在使用的布局不能通过
+  reconcile 热切换，应 restart，或先 `network remove` 再 `network apply`。
 - `network.exclude_ipv4`：额外不接管的 IPv4 CIDR 列表。适合保留管理网、
   局域网或其他必须直达的网段；只接受 IPv4。程序已经内置排除 `0/8`、
   loopback、link-local、multicast 和保留地址，但不会默认排除 RFC 1918
@@ -278,7 +296,7 @@ sudo /usr/sbin/plug2proxy \
 | `network render` | 输出将生成的 nftables transaction，不修改系统 |
 | `network check` | 检查对象所有权、固定编号冲突与 nft 语法，不修改系统 |
 | `network apply` | 等待 TCP/UDP 数据平面就绪，幂等安装 policy route 和 nft table |
-| `network reconcile` | 数据平面就绪时重新应用期望状态，用于外部 ruleset reload 后恢复 |
+| `network reconcile` | mark 布局不变且数据平面就绪时重新应用期望状态，用于外部 ruleset reload 后恢复 |
 | `network status` | 查看 nft、route、rule 与所有权日志的状态 |
 | `network remove` | 仅移除经所有权标记确认属于 Plug2Proxy 的对象 |
 
@@ -292,19 +310,36 @@ sudo /usr/sbin/plug2proxy network remove
 ```
 
 控制器不会覆盖同名的外部 nft table，也不会静默删除占用 rule priority
-`98`–`100`、route table `20230` 或保留 mark 的外部规则。`check` 报告冲突时，
-先确认对象的实际所有者，再调整冲突组件；不要直接删除未知规则。
+`98`–`100`、route table `20230` 的外部规则。它还会比较 policy rule 的
+mark 与 mask；只要某条外部 matcher 可能与配置的 OUTPUT 或 PREROUTING
+matcher 重叠，`network check` 就会报冲突，而不要求两个整数完全相同。
+优先级数值小于 `98` 的 fwmark rule 会更早执行；即使它使用不相交的 bit，
+也可能匹配由多个组件组合出的 mark，因此 preflight 会拒绝可能共同匹配的
+正向或 `not`/`invert` 规则。默认低 8 位布局不与 Tailscale 当前使用的
+`0x00ff0000` 位域重叠，且 Plug2Proxy 的规则先执行。
 
-从只使用 priority `100` 和 mark `0x51000000` 的旧版升级时，新控制器会保留
-这条规则作为 OUTPUT 规则，先补 priority `98` 的源校验 guard，再添加
-priority `99` 的 PREROUTING local route，最后原子升级 nft
-table；旧的外部 conntrack mark 会在后续原方向包到达时转换为 PREROUTING
-mark。若要降级到不认识三规则、schema 2 ownership journal 或 system DNS
-link 的旧二进制，必须先用新版停止服务并执行 `network remove`；只有
+Linux 没有全局 mark 注册表，控制器也不会扫描其他 nftables table、tc/eBPF
+程序或任意进程设置的 `SO_MARK`。如果其他组件会写入 `mark_mask` 覆盖的 bit，
+应为 Plug2Proxy 选择另一组至少包含两个 bit 的 mark/mask，并重新执行
+`network check`；即使 bit 不相交，也要保证对方更高优先级的 policy rule
+不会先匹配组合 mark。遇到冲突时先确认对象的实际所有者，不要直接删除未知
+规则。
+
+当前 nft ownership sentinel 和同 boot journal 使用 schema 3，并在 sentinel
+中记录完整的 mark/mask。新控制器仍能识别 schema 1 的单值
+`0x51000000/0xff000000` 布局和 schema 2 的
+`0x51000000/0xff000000`、`0x53000000/0xff000000` 双值布局，以便安全 remove
+或在失败回滚时恢复旧对象；它不会在活动状态下通过 reconcile 把旧布局热换成
+schema 3。升级已运行的旧服务时，在安装新二进制后执行 restart，让 unit 先
+remove 再 apply；也可以显式执行 `network remove`，确认清理完成后再
+`network apply`。
+
+若要降级到不认识 schema 3 ownership sentinel/journal 或 system DNS link 的
+旧二进制，必须先用新版停止服务并执行 `network remove`；只有
 `network status` 已确认 `nft=Absent, route=Absent, rules=Absent`、
 `dns_link=Absent, dns_route=Absent, state_phase=Absent` 后，才能替换二进制
 并重新启动，不能直接覆盖后降级。若清理未完成，应保留新版二进制用于继续
-恢复，不能让旧版接管它无法识别的 schema 2 状态。
+恢复，不能让旧版接管它无法识别的 schema 3 状态。
 
 ## 启动与重载
 
@@ -419,8 +454,9 @@ sudo /usr/sbin/plug2proxy network remove
   时必须同时配置一个不与 TPROXY listener 冲突的 `dns.listen`。
 - `dns.strategy = "ipv4_only"` 只抑制 AAAA 答案，不能代理 IPv6 literal、
   客户端自行使用的加密 DNS，或其他绕过该 DNS listener 获得的 IPv6 目标。
-- `reconcile` 能平滑保留内核中已有 flow 的分类，但数据平面进程重启仍会
-  中断其持有的 TCP 会话和其他进程内状态。
+- mark 布局不变时，`reconcile` 能平滑保留内核中已有 flow 的分类；活动布局
+  与配置不同时会拒绝 reconcile。数据平面进程重启仍会中断其持有的 TCP
+  会话和其他进程内状态。
 
 ## 文件描述符上限
 
