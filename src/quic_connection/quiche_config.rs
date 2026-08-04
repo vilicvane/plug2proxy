@@ -66,8 +66,22 @@ fn create_common_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<qui
 pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche::Config> {
   let mut config = create_common_quiche_config(pem_path)?;
 
+  // Keep the main connection's rolling receive windows aligned with its
+  // initial limits. quiche's defaults (24 MiB per connection and 16 MiB per
+  // stream) delay MAX_DATA until the 512 MiB initial allowance is almost
+  // exhausted. A small amount of unread data across many concurrent streams
+  // can then prevent the update threshold from ever being reached and stall
+  // every stream on this long-lived QomT connection.
+  config.set_max_connection_window(MAX_DATA_BUFFER_SIZE);
+  config.set_max_stream_window(MAX_DATA_BUFFER_SIZE_PER_STREAM);
   config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
   config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+  // QUIC packets are striped across multiple reliable TCP connections. A
+  // temporarily slower TCP path can therefore be overtaken by many later
+  // packets without any packet actually being lost. In our quiche fork this
+  // mode disables packet-gap loss detection for legacy CUBIC and retains a
+  // conservative time threshold plus PTO recovery for stalled/failed paths.
+  config.set_enable_relaxed_loss_threshold(true);
   // QomT is carried by TCP, whose kernel congestion control already paces
   // writes. QUIC pacing here would throttle the same bytes a second time and
   // prevent the main QomT connection from filling mTCP's parallel underlying

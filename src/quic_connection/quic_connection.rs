@@ -453,8 +453,9 @@ fn format_connection_diagnostics(
      externally_dropped_streams={externally_dropped_streams} \
      underlying_send_pending={} underlying_send_idle_ms={} underlying_recv_idle_ms={} \
      quic_sent_packets={} quic_recv_packets={} quic_sent_bytes={} quic_recv_bytes={} \
-     quic_acked_bytes={} quic_lost_packets={} quic_lost_bytes={} quic_retrans_packets={} \
-     quic_stream_retrans_bytes={} data_blocked_sent={} data_blocked_recv={} \
+     quic_acked_bytes={} quic_lost_packets={} quic_spurious_lost_packets={} \
+     quic_lost_bytes={} quic_retrans_packets={} quic_stream_retrans_bytes={} \
+     data_blocked_sent={} data_blocked_recv={} \
      stream_data_blocked_sent={} stream_data_blocked_recv={} \
      streams_blocked_bidi_recv={} reset_local={} reset_remote={} stopped_local={} \
      stopped_remote={} tx_buffered={:?} path=[{}] transport_closed={} driver_failed={}",
@@ -470,6 +471,7 @@ fn format_connection_diagnostics(
     stats.recv_bytes,
     stats.acked_bytes,
     stats.lost,
+    stats.spurious_lost,
     stats.lost_bytes,
     stats.retrans,
     stats.stream_retrans_bytes,

@@ -1072,9 +1072,11 @@ async fn concurrent_bulk_streams_survive_lossy_transport() -> anyhow::Result<()>
   // mid-transfer, matching production QOMT pressure.
   for config in [&mut hub_quiche_config, &mut out_quiche_config] {
     config.set_initial_max_data(bytes!("64 MiB"));
+    config.set_max_connection_window(bytes!("64 MiB"));
     config.set_initial_max_stream_data_bidi_local(bytes!("256 KiB"));
     config.set_initial_max_stream_data_bidi_remote(bytes!("256 KiB"));
     config.set_initial_max_stream_data_uni(bytes!("256 KiB"));
+    config.set_max_stream_window(bytes!("256 KiB"));
   }
 
   let (hub_to_out_packet_sender, hub_to_out_packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
