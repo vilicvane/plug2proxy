@@ -30,7 +30,7 @@ static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
 });
 
 #[tokio::test]
-async fn configures_tcp_liveness_detection() -> anyhow::Result<()> {
+async fn configures_mt_tcp_stream_options() -> anyhow::Result<()> {
   let listener = TcpListener::bind("127.0.0.1:0").await?;
   let address = listener.local_addr()?;
 
@@ -49,6 +49,12 @@ async fn configures_tcp_liveness_detection() -> anyhow::Result<()> {
   {
     assert_eq!(socket.tcp_congestion()?, b"bbr");
   }
+
+  #[cfg(any(target_os = "android", target_os = "linux"))]
+  assert_eq!(
+    socket.tcp_notsent_lowat()?,
+    MT_CONNECTIONS_TCP_NOTSENT_LOWAT
+  );
 
   assert!(socket.keepalive()?);
   assert_eq!(socket.tcp_keepalive_time()?, MT_CONNECTIONS_KEEPALIVE_TIME);

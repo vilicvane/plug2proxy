@@ -33,6 +33,10 @@ pub const MT_CONNECTIONS_KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 pub const MT_CONNECTIONS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 pub const MT_CONNECTIONS_KEEPALIVE_RETRIES: u32 = 3;
 pub const MT_CONNECTIONS_TCP_USER_TIMEOUT: Duration = Duration::from_secs(60);
+// Linux treats zero as "use net.ipv4.tcp_notsent_lowat", whose default is
+// UINT_MAX. One is therefore the smallest effective per-socket value: the
+// socket becomes writable again only after its unsent queue drains to zero.
+pub const MT_CONNECTIONS_TCP_NOTSENT_LOWAT: u32 = 1;
 const MT_CONNECTIONS_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct MtConnectionsDiagnostics {
@@ -129,6 +133,9 @@ pub(crate) fn configure_mt_tcp_stream(tcp_stream: &TcpStream) -> std::io::Result
       log::warn!("failed to enable BBR for mTCP connection: {error}");
     })
     .ok();
+
+  #[cfg(any(target_os = "android", target_os = "linux"))]
+  socket.set_tcp_notsent_lowat(MT_CONNECTIONS_TCP_NOTSENT_LOWAT)?;
 
   socket.set_tcp_keepalive(
     &TcpKeepalive::new()
