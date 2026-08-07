@@ -630,12 +630,14 @@ pub(crate) async fn qomt_connect_with_udp_policy(
       .await
       .context("failed to create mTCP connections.")?;
   let mt_connections_id = mt_connections.id();
+  let underlay_metrics = mt_connections.underlay_metrics();
 
   let connection_id = QuicConnection::generate_connection_id();
 
   mt_connections.send(connection_id.to_vec().into()).await?;
 
-  let inner = QuicConnection::connect(&connection_id, quiche_config, mt_connections);
+  let mut inner = QuicConnection::connect(&connection_id, quiche_config, mt_connections);
+  inner.attach_reliable_underlay_metrics(underlay_metrics);
 
   let qomt_connection = match udp_quiche_config {
     Some(udp_quiche_config) => {
@@ -686,8 +688,10 @@ pub async fn qomt_accept(
 
   // MtConnections 将随 QUIC 连接 move，先取出 UDP 槽位以便之后等待。
   let udp_duplex_slot = mt_connections.udp_duplex_slot();
+  let underlay_metrics = mt_connections.underlay_metrics();
 
-  let inner = QuicConnection::accept(&connection_id, quiche_config, mt_connections);
+  let mut inner = QuicConnection::accept(&connection_id, quiche_config, mt_connections);
+  inner.attach_reliable_underlay_metrics(underlay_metrics);
 
   // The supervisor waits for every UDP generation without delaying the main
   // handshake. Each generation still has its own absolute Initial/QUIC

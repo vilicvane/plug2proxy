@@ -1,4 +1,6 @@
 use std::{
+  collections::HashMap,
+  fmt,
   net::SocketAddr,
   pin::Pin,
   sync::{
@@ -8,6 +10,9 @@ use std::{
   task::{Context, Poll},
   time::{Duration, Instant},
 };
+
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 use futures::{Sink, Stream};
 use lowkit::{DropCallback, SelfWrapExt, TurnArcWeak, tokio_join_set};
@@ -38,6 +43,233 @@ pub const MT_CONNECTIONS_TCP_USER_TIMEOUT: Duration = Duration::from_secs(60);
 // socket becomes writable again only after its unsent queue drains to zero.
 pub const MT_CONNECTIONS_TCP_NOTSENT_LOWAT: u32 = 1;
 const MT_CONNECTIONS_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const MT_CONNECTIONS_TCP_INFO_INTERVAL: Duration = Duration::from_millis(50);
+const MT_CONNECTIONS_TCP_INFO_STALE_AFTER: Duration = Duration::from_millis(250);
+const MT_CONNECTIONS_LOSS_DELAY_FLOOR_MAX: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MtTcpInfo {
+  pub(crate) rtt: Duration,
+  pub(crate) rttvar: Duration,
+  pub(crate) rto: Duration,
+  pub(crate) unacked: u32,
+  pub(crate) retrans: u32,
+  pub(crate) total_retrans: u32,
+  pub(crate) last_ack_recv: Duration,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MtTcpPathSample {
+  info: MtTcpInfo,
+  sampled_at: Instant,
+  ack_stall: Duration,
+}
+
+#[derive(Debug)]
+struct MtTcpPathState {
+  local_address: Option<SocketAddr>,
+  peer_address: SocketAddr,
+  outstanding_since: Option<Instant>,
+  sample: Option<MtTcpPathSample>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MtConnectionsUnderlaySnapshot {
+  pub paths: usize,
+  pub sampled_paths: usize,
+  pub loss_delay_floor: Duration,
+  pub max_rtt: Duration,
+  pub max_rttvar: Duration,
+  pub max_rto: Duration,
+  pub max_ack_stall: Duration,
+  pub total_unacked: u64,
+  pub retransmitting_paths: usize,
+  pub total_retrans: u64,
+}
+
+impl fmt::Display for MtConnectionsUnderlaySnapshot {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      formatter,
+      "paths={} sampled_paths={} loss_floor_ms={} max_rtt_ms={} max_rttvar_ms={} \
+       max_rto_ms={} max_ack_stall_ms={} total_unacked={} retransmitting_paths={} \
+       total_retrans={}",
+      self.paths,
+      self.sampled_paths,
+      self.loss_delay_floor.as_millis(),
+      self.max_rtt.as_millis(),
+      self.max_rttvar.as_millis(),
+      self.max_rto.as_millis(),
+      self.max_ack_stall.as_millis(),
+      self.total_unacked,
+      self.retransmitting_paths,
+      self.total_retrans,
+    )
+  }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MtConnectionsUnderlayMetrics {
+  next_path_id: AtomicU64,
+  paths: Mutex<HashMap<u64, MtTcpPathState>>,
+}
+
+impl MtConnectionsUnderlayMetrics {
+  pub(crate) fn register_path(
+    &self,
+    local_address: Option<SocketAddr>,
+    peer_address: SocketAddr,
+  ) -> u64 {
+    let path_id = self.next_path_id.fetch_add(1, atomic::Ordering::Relaxed);
+    self.paths.lock().unwrap().insert(
+      path_id,
+      MtTcpPathState {
+        local_address,
+        peer_address,
+        outstanding_since: None,
+        sample: None,
+      },
+    );
+    path_id
+  }
+
+  pub(crate) fn remove_path(&self, path_id: u64) {
+    self.paths.lock().unwrap().remove(&path_id);
+  }
+
+  pub(crate) fn update_path(&self, path_id: u64, info: MtTcpInfo, now: Instant) {
+    let mut paths = self.paths.lock().unwrap();
+    let Some(path) = paths.get_mut(&path_id) else {
+      return;
+    };
+
+    if info.unacked == 0 {
+      path.outstanding_since = None;
+    } else if path.sample.is_none_or(|sample| sample.info.unacked == 0) {
+      path.outstanding_since = Some(now);
+    }
+
+    let ack_stall = path
+      .outstanding_since
+      .map(|since| now.saturating_duration_since(since).min(info.last_ack_recv))
+      .unwrap_or_default();
+
+    path.sample = Some(MtTcpPathSample {
+      info,
+      sampled_at: now,
+      ack_stall,
+    });
+  }
+
+  pub(crate) fn snapshot(&self) -> MtConnectionsUnderlaySnapshot {
+    let now = Instant::now();
+    let paths = self.paths.lock().unwrap();
+    let mut snapshot = MtConnectionsUnderlaySnapshot {
+      paths: paths.len(),
+      ..Default::default()
+    };
+
+    for path in paths.values() {
+      let Some(sample) = path.sample.filter(|sample| {
+        now.saturating_duration_since(sample.sampled_at) <= MT_CONNECTIONS_TCP_INFO_STALE_AFTER
+      }) else {
+        continue;
+      };
+
+      snapshot.sampled_paths += 1;
+      snapshot.max_rtt = snapshot.max_rtt.max(sample.info.rtt);
+      snapshot.max_rttvar = snapshot.max_rttvar.max(sample.info.rttvar);
+      snapshot.max_rto = snapshot.max_rto.max(sample.info.rto);
+      snapshot.max_ack_stall = snapshot.max_ack_stall.max(sample.ack_stall);
+      snapshot.total_unacked += u64::from(sample.info.unacked);
+      snapshot.total_retrans += u64::from(sample.info.total_retrans);
+      snapshot.retransmitting_paths += usize::from(sample.info.retrans > 0);
+
+      let delay_estimate = sample
+        .info
+        .rtt
+        .saturating_add(sample.info.rttvar.saturating_mul(4))
+        .max(sample.info.rto);
+      let path_floor = delay_estimate
+        .saturating_add(sample.ack_stall)
+        .min(MT_CONNECTIONS_LOSS_DELAY_FLOOR_MAX);
+      snapshot.loss_delay_floor = snapshot.loss_delay_floor.max(path_floor);
+    }
+
+    snapshot
+  }
+
+  fn describe_path(&self, path_id: u64) -> String {
+    self
+      .paths
+      .lock()
+      .unwrap()
+      .get(&path_id)
+      .map(|path| format!("{:?}->{}", path.local_address, path.peer_address))
+      .unwrap_or_else(|| format!("path#{path_id}"))
+  }
+}
+
+#[cfg(target_os = "linux")]
+fn read_mt_tcp_info(raw_fd: std::os::fd::RawFd) -> std::io::Result<MtTcpInfo> {
+  let mut info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
+  let mut length = size_of::<libc::tcp_info>() as libc::socklen_t;
+  let result = unsafe {
+    libc::getsockopt(
+      raw_fd,
+      libc::IPPROTO_TCP,
+      libc::TCP_INFO,
+      info.as_mut_ptr().cast(),
+      &mut length,
+    )
+  };
+  if result != 0 {
+    return Err(std::io::Error::last_os_error());
+  }
+
+  let info = unsafe { info.assume_init() };
+  Ok(MtTcpInfo {
+    rtt: Duration::from_micros(u64::from(info.tcpi_rtt)),
+    rttvar: Duration::from_micros(u64::from(info.tcpi_rttvar)),
+    rto: Duration::from_micros(u64::from(info.tcpi_rto)),
+    unacked: info.tcpi_unacked,
+    retrans: info.tcpi_retrans,
+    total_retrans: info.tcpi_total_retrans,
+    last_ack_recv: Duration::from_millis(u64::from(info.tcpi_last_ack_recv)),
+  })
+}
+
+#[cfg(target_os = "linux")]
+async fn monitor_mt_tcp_info(
+  raw_fd: std::os::fd::RawFd,
+  path_id: u64,
+  metrics: Arc<MtConnectionsUnderlayMetrics>,
+) {
+  let mut interval = interval_at(TokioInstant::now(), MT_CONNECTIONS_TCP_INFO_INTERVAL);
+  interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+  loop {
+    interval.tick().await;
+    match read_mt_tcp_info(raw_fd) {
+      Ok(info) => metrics.update_path(path_id, info, Instant::now()),
+      Err(error) => {
+        log::debug!(
+          "failed to sample mTCP TCP_INFO for {}: {error}",
+          metrics.describe_path(path_id),
+        );
+      }
+    }
+  }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn monitor_mt_tcp_info(
+  _raw_fd: i32,
+  _path_id: u64,
+  _metrics: Arc<MtConnectionsUnderlayMetrics>,
+) {
+  std::future::pending().await
+}
 
 struct MtConnectionsDiagnostics {
   created_at: Instant,
@@ -159,6 +391,7 @@ where
   packet_sink: flume::r#async::SendSink<'static, TPacket>,
   packet_stream: flume::r#async::RecvStream<'static, TPacket>,
   connection_count: Arc<AtomicUsize>,
+  underlay_metrics: Arc<MtConnectionsUnderlayMetrics>,
   udp_duplex: Arc<UdpDuplexSlot<TPacket>>,
   _udp_registration: Option<UdpDispatchRegistration>,
   join_set: JoinSet<()>,
@@ -237,8 +470,10 @@ where
 
     let connection_count = Arc::new(AtomicUsize::new(0));
     let diagnostics = Arc::new(MtConnectionsDiagnostics::new());
+    let underlay_metrics = Arc::new(MtConnectionsUnderlayMetrics::default());
     let manager_connection_count = connection_count.clone();
     let manager_diagnostics = diagnostics.clone();
+    let manager_underlay_metrics = underlay_metrics.clone();
 
     let manager = async move {
       let (all_connections_closed_sender, mut all_connections_closed_receiver) = mpsc::channel(1);
@@ -253,6 +488,7 @@ where
 
         let connection_count = manager_connection_count.clone();
         let diagnostics = manager_diagnostics.clone();
+        let underlay_metrics = manager_underlay_metrics.clone();
 
         let all_connections_closed_sender = all_connections_closed_sender.clone();
 
@@ -260,6 +496,15 @@ where
           let Some(packet_sender) = packet_sender.lock().unwrap().get_arc() else {
             return;
           };
+
+          let local_address = tcp_stream.local_addr().ok();
+          let peer_address = tcp_stream.peer_addr().unwrap_or(peer_address);
+          let path_id = underlay_metrics.register_path(local_address, peer_address);
+
+          #[cfg(target_os = "linux")]
+          let raw_fd = tcp_stream.as_raw_fd();
+          #[cfg(not(target_os = "linux"))]
+          let raw_fd = -1;
 
           let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
@@ -316,7 +561,12 @@ where
 
               anyhow::Ok(())
             } => result,
+            _ = monitor_mt_tcp_info(raw_fd, path_id, underlay_metrics.clone()) => {
+              unreachable!("mTCP TCP_INFO monitor unexpectedly ended")
+            },
           };
+
+          underlay_metrics.remove_path(path_id);
 
           copy_result
             .inspect_err(|error| {
@@ -350,6 +600,7 @@ where
 
     let diagnostic_connection_count = connection_count.clone();
     let diagnostic_counters = diagnostics.clone();
+    let diagnostic_underlay_metrics = underlay_metrics.clone();
     let diagnostics_loop = async move {
       let mut interval = interval_at(
         TokioInstant::now() + MT_CONNECTIONS_DIAGNOSTIC_INTERVAL,
@@ -366,8 +617,9 @@ where
         }
 
         log::debug!(
-          "mTCP diagnostic: side={side} peer={peer_address} paths={paths} {}",
-          diagnostic_counters.snapshot()
+          "mTCP diagnostic: side={side} peer={peer_address} paths={paths} {} tcp_info=[{}]",
+          diagnostic_counters.snapshot(),
+          diagnostic_underlay_metrics.snapshot(),
         );
       }
     };
@@ -378,6 +630,7 @@ where
       packet_sink: external_packet_sender.into_sink(),
       packet_stream: external_packet_receiver.into_stream(),
       connection_count: connection_count.clone(),
+      underlay_metrics,
       udp_duplex: Arc::new(UdpDuplexSlot::new()),
       _udp_registration: None,
       join_set: tokio_join_set!(manager, diagnostics_loop),
@@ -400,6 +653,10 @@ where
 
   pub fn connection_count(&self) -> usize {
     self.connection_count.load(atomic::Ordering::Relaxed)
+  }
+
+  pub(crate) fn underlay_metrics(&self) -> Arc<MtConnectionsUnderlayMetrics> {
+    self.underlay_metrics.clone()
   }
 
   #[cfg(test)]

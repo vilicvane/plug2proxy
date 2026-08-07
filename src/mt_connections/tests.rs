@@ -1,4 +1,7 @@
-use std::{sync::LazyLock, time::Instant};
+use std::{
+  sync::LazyLock,
+  time::{Duration, Instant},
+};
 
 use futures::{SinkExt, StreamExt};
 use lits::duration;
@@ -28,6 +31,40 @@ static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
   rand::rng().fill(&mut random_data[..]);
   random_data
 });
+
+#[test]
+fn tcp_info_loss_floor_tracks_current_ack_stall() {
+  let metrics = MtConnectionsUnderlayMetrics::default();
+  let path_id = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+  let now = Instant::now();
+  let info = MtTcpInfo {
+    rtt: Duration::from_millis(100),
+    rttvar: Duration::from_millis(20),
+    rto: Duration::from_millis(250),
+    unacked: 1,
+    retrans: 1,
+    total_retrans: 3,
+    last_ack_recv: Duration::from_millis(300),
+  };
+
+  metrics.update_path(path_id, info, now - Duration::from_millis(300));
+  metrics.update_path(path_id, info, now);
+
+  let snapshot = metrics.snapshot();
+  assert_eq!(snapshot.paths, 1);
+  assert_eq!(snapshot.sampled_paths, 1);
+  assert_eq!(snapshot.loss_delay_floor, Duration::from_millis(550));
+  assert_eq!(snapshot.max_rtt, Duration::from_millis(100));
+  assert_eq!(snapshot.max_rttvar, Duration::from_millis(20));
+  assert_eq!(snapshot.max_rto, Duration::from_millis(250));
+  assert_eq!(snapshot.max_ack_stall, Duration::from_millis(300));
+  assert_eq!(snapshot.total_unacked, 1);
+  assert_eq!(snapshot.retransmitting_paths, 1);
+  assert_eq!(snapshot.total_retrans, 3);
+
+  metrics.remove_path(path_id);
+  assert_eq!(metrics.snapshot().paths, 0);
+}
 
 #[tokio::test]
 async fn configures_mt_tcp_stream_options() -> anyhow::Result<()> {
