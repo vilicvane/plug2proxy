@@ -82,6 +82,7 @@ pub(crate) struct MtConnectionsUnderlaySnapshot {
   pub max_rttvar: Duration,
   pub max_rto: Duration,
   pub max_ack_stall: Duration,
+  pub quorum_ack_stall: Duration,
   pub total_unacked: u64,
   pub retransmitting_paths: usize,
   pub total_retrans: u64,
@@ -92,7 +93,8 @@ impl fmt::Display for MtConnectionsUnderlaySnapshot {
     write!(
       formatter,
       "paths={} sampled_paths={} loss_floor_ms={} max_rtt_ms={} max_rttvar_ms={} \
-       max_rto_ms={} max_ack_stall_ms={} total_unacked={} retransmitting_paths={} \
+       max_rto_ms={} max_ack_stall_ms={} quorum_ack_stall_ms={} total_unacked={} \
+       retransmitting_paths={} \
        total_retrans={}",
       self.paths,
       self.sampled_paths,
@@ -101,6 +103,7 @@ impl fmt::Display for MtConnectionsUnderlaySnapshot {
       self.max_rttvar.as_millis(),
       self.max_rto.as_millis(),
       self.max_ack_stall.as_millis(),
+      self.quorum_ack_stall.as_millis(),
       self.total_unacked,
       self.retransmitting_paths,
       self.total_retrans,
@@ -168,6 +171,8 @@ impl MtConnectionsUnderlayMetrics {
       paths: paths.len(),
       ..Default::default()
     };
+    let mut path_floors = Vec::with_capacity(paths.len());
+    let mut ack_stalls = Vec::with_capacity(paths.len());
 
     for path in paths.values() {
       let Some(sample) = path.sample.filter(|sample| {
@@ -193,7 +198,20 @@ impl MtConnectionsUnderlayMetrics {
       let path_floor = delay_estimate
         .saturating_add(sample.ack_stall)
         .min(MT_CONNECTIONS_LOSS_DELAY_FLOOR_MAX);
-      snapshot.loss_delay_floor = snapshot.loss_delay_floor.max(path_floor);
+      path_floors.push(path_floor);
+      ack_stalls.push(sample.ack_stall);
+    }
+
+    if !path_floors.is_empty() {
+      // mTCP can route around one slow subpath. Calibrate QUIC from the
+      // second-worst of four paths (and the equivalent half-path quorum for
+      // other pool sizes), so a single stalled socket does not delay loss
+      // detection for the whole QomT connection.
+      path_floors.sort_unstable_by(|left, right| right.cmp(left));
+      ack_stalls.sort_unstable_by(|left, right| right.cmp(left));
+      let quorum_index = path_floors.len().div_ceil(2) - 1;
+      snapshot.loss_delay_floor = path_floors[quorum_index];
+      snapshot.quorum_ack_stall = ack_stalls[quorum_index];
     }
 
     snapshot

@@ -531,7 +531,6 @@ impl QuicConnection {
       interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
       let quantum_micros = UNDERLAY_LOSS_DELAY_QUANTUM.as_micros() as u64;
       let mut applied_floor = Duration::ZERO;
-      let mut guard_active = false;
       let mut last_log = Instant::now()
         .checked_sub(UNDERLAY_LOSS_DELAY_LOG_INTERVAL)
         .unwrap_or_else(Instant::now);
@@ -569,30 +568,16 @@ impl QuicConnection {
           connection_signals.connection_send.notify_one();
         }
 
-        let now_guard_active = snapshot.max_ack_stall >= UNDERLAY_LOSS_DELAY_LOG_ACK_STALL
+        let now_guard_active = snapshot.quorum_ack_stall >= UNDERLAY_LOSS_DELAY_LOG_ACK_STALL
           && quic_rtt.is_some_and(|rtt| floor > rtt.saturating_mul(2));
-        let should_log = (now_guard_active
-          && (!guard_active || last_log.elapsed() >= UNDERLAY_LOSS_DELAY_LOG_INTERVAL))
-          || (guard_active && !now_guard_active);
-
-        if should_log {
-          if now_guard_active {
-            log::info!(
-              "QomT TCP loss guard active: cid={diagnostic_id} side={side} \
-               quic_rtt_ms={} tcp_info=[{snapshot}]",
-              quic_rtt.unwrap_or_default().as_millis(),
-            );
-          } else {
-            log::info!(
-              "QomT TCP loss guard released: cid={diagnostic_id} side={side} \
-               quic_rtt_ms={} tcp_info=[{snapshot}]",
-              quic_rtt.unwrap_or_default().as_millis(),
-            );
-          }
+        if now_guard_active && last_log.elapsed() >= UNDERLAY_LOSS_DELAY_LOG_INTERVAL {
+          log::info!(
+            "QomT TCP loss guard active: cid={diagnostic_id} side={side} \
+             quic_rtt_ms={} tcp_info=[{snapshot}]",
+            quic_rtt.unwrap_or_default().as_millis(),
+          );
           last_log = Instant::now();
         }
-
-        guard_active = now_guard_active;
       }
     });
   }

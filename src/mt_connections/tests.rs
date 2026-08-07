@@ -58,12 +58,55 @@ fn tcp_info_loss_floor_tracks_current_ack_stall() {
   assert_eq!(snapshot.max_rttvar, Duration::from_millis(20));
   assert_eq!(snapshot.max_rto, Duration::from_millis(250));
   assert_eq!(snapshot.max_ack_stall, Duration::from_millis(300));
+  assert_eq!(snapshot.quorum_ack_stall, Duration::from_millis(300));
   assert_eq!(snapshot.total_unacked, 1);
   assert_eq!(snapshot.retransmitting_paths, 1);
   assert_eq!(snapshot.total_retrans, 3);
 
   metrics.remove_path(path_id);
   assert_eq!(metrics.snapshot().paths, 0);
+}
+
+#[test]
+fn tcp_info_loss_floor_requires_a_path_quorum() {
+  let metrics = MtConnectionsUnderlayMetrics::default();
+  let now = Instant::now();
+  let mut path_ids = Vec::new();
+
+  for stall in [
+    Duration::from_millis(900),
+    Duration::from_millis(400),
+    Duration::from_millis(20),
+    Duration::ZERO,
+  ] {
+    let path_id = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+    let info = MtTcpInfo {
+      rtt: Duration::from_millis(100),
+      rttvar: Duration::from_millis(20),
+      rto: Duration::from_millis(250),
+      unacked: u32::from(!stall.is_zero()),
+      retrans: 0,
+      total_retrans: 0,
+      last_ack_recv: stall,
+    };
+    metrics.update_path(path_id, info, now - stall);
+    metrics.update_path(path_id, info, now);
+    path_ids.push(path_id);
+  }
+
+  let snapshot = metrics.snapshot();
+  assert_eq!(snapshot.sampled_paths, 4);
+  assert_eq!(snapshot.loss_delay_floor, Duration::from_millis(650));
+  assert_eq!(snapshot.max_ack_stall, Duration::from_millis(900));
+  assert_eq!(snapshot.quorum_ack_stall, Duration::from_millis(400));
+
+  metrics.remove_path(path_ids[1]);
+  metrics.remove_path(path_ids[2]);
+  metrics.remove_path(path_ids[3]);
+  let snapshot = metrics.snapshot();
+  assert_eq!(snapshot.sampled_paths, 1);
+  assert_eq!(snapshot.loss_delay_floor, Duration::from_millis(1150));
+  assert_eq!(snapshot.quorum_ack_stall, Duration::from_millis(900));
 }
 
 #[tokio::test]
