@@ -11,7 +11,7 @@ use tokio::{
 use crate::{
   mt_connections::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections,
-    MtConnectionsMagic, MtConnectionsPacket, MtConnectionsPacketMode, MtConnectionsRequestHead,
+    MtConnectionsMagic, MtConnectionsPacket, MtConnectionsRequestHead,
     MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
     configure_mt_tcp_stream,
   },
@@ -26,19 +26,38 @@ pub async fn mt_connections_connect<TPacket>(
 where
   TPacket: MtConnectionsPacket,
 {
-  let (tcp_stream, id, packet_mode) =
-    match create_initial_stream(address, MtConnectionsRequestHeadData::CreateSequenced).await {
-      Ok(created) => created,
-      Err(error) => {
-        log::debug!(
-          "peer {address} did not accept sequenced mTCP framing ({error}); retrying legacy framing"
-        );
-        create_initial_stream(address, MtConnectionsRequestHeadData::Create).await?
-      }
-    };
+  let mut tcp_stream = timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    TcpStream::connect(address),
+  )
+  .await
+  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
+
+  configure_mt_tcp_stream(&tcp_stream)?;
+
+  timeout(
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    send_request_head(&mut tcp_stream, MtConnectionsRequestHeadData::Create),
+  )
+  .await
+  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
+
+  let id = {
+    let response_head = timeout(
+      MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+      postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream),
+    )
+    .await
+    .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
+
+    match response_head.data {
+      MtConnectionsResponseHeadData::Created(id) => id,
+      _ => return Err(MtConnectionsConnectError::InvalidResponseHead),
+    }
+  };
 
   let (mut mt_connections, tcp_stream_sender, mut tcp_stream_close_receiver) =
-    MtConnections::<TPacket>::new(tcp_stream, ConnectionSide::Client, id, packet_mode);
+    MtConnections::<TPacket>::new(tcp_stream, ConnectionSide::Client, id);
 
   let (extend_signal_sender, extend_signal_receiver) = oneshot::channel();
 
@@ -137,50 +156,6 @@ where
   });
 
   Ok((mt_connections, extend_signal_sender))
-}
-
-async fn create_initial_stream(
-  address: SocketAddr,
-  request: MtConnectionsRequestHeadData,
-) -> Result<
-  (
-    TcpStream,
-    crate::mt_connections::MtConnectionsId,
-    MtConnectionsPacketMode,
-  ),
-  MtConnectionsConnectError,
-> {
-  let mut tcp_stream = timeout(
-    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
-    TcpStream::connect(address),
-  )
-  .await
-  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
-
-  configure_mt_tcp_stream(&tcp_stream)?;
-  timeout(
-    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
-    send_request_head(&mut tcp_stream, request),
-  )
-  .await
-  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
-
-  let response_head = timeout(
-    MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
-    postcard_read_stream::<MtConnectionsResponseHead>(&mut tcp_stream),
-  )
-  .await
-  .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
-
-  match response_head.data {
-    MtConnectionsResponseHeadData::CreatedSequenced(id) => {
-      Ok((tcp_stream, id, MtConnectionsPacketMode::Sequenced))
-    }
-    MtConnectionsResponseHeadData::Created(id) => {
-      Ok((tcp_stream, id, MtConnectionsPacketMode::Legacy))
-    }
-    _ => Err(MtConnectionsConnectError::InvalidResponseHead),
-  }
 }
 
 #[derive(thiserror::Error, Debug)]

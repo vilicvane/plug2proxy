@@ -2,7 +2,7 @@ use std::{
   path::PathBuf,
   sync::{
     Arc, LazyLock,
-    atomic::{self, AtomicBool, AtomicU64, AtomicUsize},
+    atomic::{self, AtomicBool, AtomicUsize},
   },
 };
 
@@ -13,18 +13,14 @@ use rand::Rng;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
   net::TcpListener,
-  sync::{mpsc, oneshot},
+  sync::oneshot,
   task::JoinSet,
   time::{sleep, timeout},
 };
 
 use crate::{
   cert::{generate_ca_pem_file, generate_node_pem_file},
-  mt_connections::{
-    MtConnectionsDiagnostics, MtConnectionsListener, MtConnectionsReceivedPacket,
-    MtConnectionsUnderlayMetrics, deliver_mt_packets, mt_connections_connect,
-  },
-  primitives::ConnectionSide,
+  mt_connections::{MtConnectionsListener, MtConnectionsUnderlayMetrics, mt_connections_connect},
   quic_connection::{
     MAX_UDP_DATAGRAM_SIZE, QuicBytesPacket, QuicConnection, QuicConnectionError,
     QuicDatagramSendError, create_quiche_config, create_udp_quiche_config,
@@ -1044,7 +1040,7 @@ async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()
             stream.read_to_end(&mut request).await?;
             anyhow::ensure!(request.len() == 1);
 
-            stream.write_all(&[request[0]; 32]).await?;
+            stream.write_all(&vec![request[0]; 32]).await?;
             stream.shutdown().await?;
 
             anyhow::Ok(())
@@ -1066,62 +1062,43 @@ async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[test_log::test]
-async fn sequenced_mtcp_prevents_quic_loss_from_deep_reordering() -> anyhow::Result<()> {
+async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::Result<()> {
   timeout(duration!("20s"), async {
     let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
     let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
       flume::bounded::<QuicBytesPacket>(0);
-    let (out_to_reorder_sender, out_to_reorder_receiver) = flume::bounded::<QuicBytesPacket>(0);
-    let (received_packet_sender, received_packet_receiver) = mpsc::unbounded_channel();
-    let (ordered_packet_sender, ordered_packet_receiver) = flume::bounded(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
     let reorder_enabled = Arc::new(AtomicBool::new(false));
-    let reordered_packet_count = Arc::new(AtomicUsize::new(0));
-    let sequence = Arc::new(AtomicU64::new(0));
+    let packet_delayed = Arc::new(AtomicBool::new(false));
+    let reordered_out_packets = out_to_hub_packet_receiver
+      .into_stream()
+      .map({
+        let reorder_enabled = reorder_enabled.clone();
+        let packet_delayed = packet_delayed.clone();
 
-    let reorder_task = tokio::spawn(
-      out_to_reorder_receiver
-        .into_stream()
-        .map({
-          let reorder_enabled = reorder_enabled.clone();
-          let reordered_packet_count = reordered_packet_count.clone();
-          let sequence = sequence.clone();
+        move |packet| {
+          let delay = reorder_enabled.load(atomic::Ordering::Acquire)
+            && !packet_delayed.swap(true, atomic::Ordering::AcqRel);
 
-          move |packet| {
-            let sequence = sequence.fetch_add(1, atomic::Ordering::Relaxed);
-            let delay = reorder_enabled.load(atomic::Ordering::Acquire)
-              && reordered_packet_count.fetch_add(1, atomic::Ordering::AcqRel) == 127;
-            async move {
-              if delay {
-                sleep(duration!("6s")).await;
-              }
-              MtConnectionsReceivedPacket {
-                sequence: Some(sequence),
-                packet,
-              }
-            }
-          }
-        })
-        .buffer_unordered(1024)
-        .for_each(move |packet| {
-          let received_packet_sender = received_packet_sender.clone();
           async move {
-            received_packet_sender.send(packet).unwrap();
+            if delay {
+              sleep(duration!("750ms")).await;
+            }
+
+            packet
           }
-        }),
-    );
-    let delivery_task = tokio::spawn(deliver_mt_packets(
-      received_packet_receiver,
-      ordered_packet_sender,
-      Arc::new(MtConnectionsDiagnostics::new()),
-      ConnectionSide::Server,
-      "127.0.0.1:1122".parse()?,
-    ));
+        }
+      })
+      .buffer_unordered(1024);
 
     let connection_id = QuicConnection::generate_connection_id();
     let mut out_quic_connection = QuicConnection::connect_with_sink_and_stream(
       &connection_id,
       &mut out_quiche_config,
-      out_to_reorder_sender.into_sink(),
+      out_to_hub_packet_sender.into_sink(),
       hub_to_out_packet_receiver.into_stream(),
     );
     let underlay_metrics = Arc::new(MtConnectionsUnderlayMetrics::default());
@@ -1129,11 +1106,12 @@ async fn sequenced_mtcp_prevents_quic_loss_from_deep_reordering() -> anyhow::Res
     underlay_metrics.register_path(None, "127.0.0.1:1123".parse()?);
     out_quic_connection.attach_reliable_underlay_metrics(underlay_metrics);
     let out_quic_connection = Arc::new(out_quic_connection);
+
     let hub_quic_connection = Arc::new(QuicConnection::accept_with_sink_and_stream(
       out_quic_connection.id(),
       &mut hub_quiche_config,
       hub_to_out_packet_sender.into_sink(),
-      ordered_packet_receiver.into_stream(),
+      Box::pin(reordered_out_packets),
     ));
 
     tokio::try_join!(
@@ -1153,7 +1131,7 @@ async fn sequenced_mtcp_prevents_quic_loss_from_deep_reordering() -> anyhow::Res
         let mut stream = hub_quic_connection
           .accept_stream()
           .await?
-          .ok_or_else(|| anyhow::anyhow!("missing deeply reordered bulk stream"))?;
+          .ok_or_else(|| anyhow::anyhow!("missing reordered bulk stream"))?;
         let mut received = Vec::new();
         stream.read_to_end(&mut received).await?;
         anyhow::ensure!(received == *RANDOM_DATA_1);
@@ -1161,19 +1139,18 @@ async fn sequenced_mtcp_prevents_quic_loss_from_deep_reordering() -> anyhow::Res
       },
     )?;
 
-    let diagnostics = out_quic_connection.diagnostics();
     anyhow::ensure!(
-      reordered_packet_count.load(atomic::Ordering::Acquire) > 128,
-      "test transport did not create reordering deeper than QUIC's receive window",
+      packet_delayed.load(atomic::Ordering::Acquire),
+      "test transport did not delay a packet",
     );
     anyhow::ensure!(
-      diagnostics.contains("quic_lost_packets=0 ")
-        && diagnostics.contains("quic_lost_bytes=0 ")
-        && diagnostics.contains("quic_spurious_lost_packets=0 "),
-      "sequenced mTCP delivery still triggered QUIC loss: {diagnostics}",
+      out_quic_connection
+        .diagnostics()
+        .contains("quic_lost_packets=0 "),
+      "reliable reordering triggered QUIC loss: {}",
+      out_quic_connection.diagnostics(),
     );
-    reorder_task.abort();
-    delivery_task.abort();
+
     anyhow::Ok(())
   })
   .await?
@@ -1211,7 +1188,7 @@ async fn concurrent_bulk_streams_survive_lossy_transport() -> anyhow::Result<()>
       rng_state ^= rng_state >> 7;
       rng_state ^= rng_state << 17;
 
-      let keep = !rng_state.is_multiple_of(50);
+      let keep = rng_state % 50 != 0;
 
       async move { keep.then_some(packet) }
     }))
