@@ -40,6 +40,14 @@ const UNDERLAY_LOSS_DELAY_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
 const UNDERLAY_LOSS_DELAY_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const UNDERLAY_LOSS_DELAY_QUANTUM: Duration = Duration::from_millis(10);
 const UNDERLAY_LOSS_DELAY_LOG_ACK_STALL: Duration = Duration::from_millis(250);
+// Packets on the main QomT connection are distributed across independent,
+// reliable TCP streams. A path with older queued bytes can be overtaken for
+// seconds even while every TCP socket reports a healthy RTT and no
+// retransmissions, so TCP_INFO cannot measure the resulting receive-side
+// merge delay. Keep time-threshold loss detection beyond the largest
+// reordering delay observed in production. PTO remains enabled, and a packet
+// lost when a TCP path closes is still recovered after this bounded delay.
+const RELIABLE_MULTIPATH_REORDER_DELAY_FLOOR: Duration = Duration::from_secs(5);
 
 // Upper bound for how long the send loop may park after quiche reports
 // Done. quiche's own timer can legitimately be far in the future (the
@@ -538,7 +546,14 @@ impl QuicConnection {
       loop {
         interval.tick().await;
         let snapshot = metrics.snapshot();
-        let floor_micros = snapshot.loss_delay_floor.as_micros().min(u64::MAX as u128) as u64;
+        let loss_delay_floor = if snapshot.paths > 1 {
+          snapshot
+            .loss_delay_floor
+            .max(RELIABLE_MULTIPATH_REORDER_DELAY_FLOOR)
+        } else {
+          snapshot.loss_delay_floor
+        };
+        let floor_micros = loss_delay_floor.as_micros().min(u64::MAX as u128) as u64;
         let quantized_micros = floor_micros.saturating_add(quantum_micros.saturating_sub(1))
           / quantum_micros
           * quantum_micros;

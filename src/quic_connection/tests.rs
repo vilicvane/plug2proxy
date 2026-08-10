@@ -2,7 +2,7 @@ use std::{
   path::PathBuf,
   sync::{
     Arc, LazyLock,
-    atomic::{self, AtomicUsize},
+    atomic::{self, AtomicBool, AtomicUsize},
   },
 };
 
@@ -20,7 +20,7 @@ use tokio::{
 
 use crate::{
   cert::{generate_ca_pem_file, generate_node_pem_file},
-  mt_connections::{MtConnectionsListener, mt_connections_connect},
+  mt_connections::{MtConnectionsListener, MtConnectionsUnderlayMetrics, mt_connections_connect},
   quic_connection::{
     MAX_UDP_DATAGRAM_SIZE, QuicBytesPacket, QuicConnection, QuicConnectionError,
     QuicDatagramSendError, create_quiche_config, create_udp_quiche_config,
@@ -1054,6 +1054,102 @@ async fn concurrent_stream_fins_survive_delayed_transport() -> anyhow::Result<()
         anyhow::Ok(())
       },
     )?;
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::Result<()> {
+  timeout(duration!("20s"), async {
+    let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+    let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+    let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+      flume::bounded::<QuicBytesPacket>(0);
+
+    let reorder_enabled = Arc::new(AtomicBool::new(false));
+    let packet_delayed = Arc::new(AtomicBool::new(false));
+    let reordered_out_packets = out_to_hub_packet_receiver
+      .into_stream()
+      .map({
+        let reorder_enabled = reorder_enabled.clone();
+        let packet_delayed = packet_delayed.clone();
+
+        move |packet| {
+          let delay = reorder_enabled.load(atomic::Ordering::Acquire)
+            && !packet_delayed.swap(true, atomic::Ordering::AcqRel);
+
+          async move {
+            if delay {
+              sleep(duration!("750ms")).await;
+            }
+
+            packet
+          }
+        }
+      })
+      .buffer_unordered(1024);
+
+    let connection_id = QuicConnection::generate_connection_id();
+    let mut out_quic_connection = QuicConnection::connect_with_sink_and_stream(
+      &connection_id,
+      &mut out_quiche_config,
+      out_to_hub_packet_sender.into_sink(),
+      hub_to_out_packet_receiver.into_stream(),
+    );
+    let underlay_metrics = Arc::new(MtConnectionsUnderlayMetrics::default());
+    underlay_metrics.register_path(None, "127.0.0.1:1122".parse()?);
+    underlay_metrics.register_path(None, "127.0.0.1:1123".parse()?);
+    out_quic_connection.attach_reliable_underlay_metrics(underlay_metrics);
+    let out_quic_connection = Arc::new(out_quic_connection);
+
+    let hub_quic_connection = Arc::new(QuicConnection::accept_with_sink_and_stream(
+      out_quic_connection.id(),
+      &mut hub_quiche_config,
+      hub_to_out_packet_sender.into_sink(),
+      Box::pin(reordered_out_packets),
+    ));
+
+    tokio::try_join!(
+      out_quic_connection.established(),
+      hub_quic_connection.established()
+    )?;
+    reorder_enabled.store(true, atomic::Ordering::Release);
+
+    tokio::try_join!(
+      async {
+        let mut stream = out_quic_connection.open_stream();
+        stream.write_all(&RANDOM_DATA_1).await?;
+        stream.shutdown().await?;
+        anyhow::Ok(())
+      },
+      async {
+        let mut stream = hub_quic_connection
+          .accept_stream()
+          .await?
+          .ok_or_else(|| anyhow::anyhow!("missing reordered bulk stream"))?;
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).await?;
+        anyhow::ensure!(received == *RANDOM_DATA_1);
+        anyhow::Ok(())
+      },
+    )?;
+
+    anyhow::ensure!(
+      packet_delayed.load(atomic::Ordering::Acquire),
+      "test transport did not delay a packet",
+    );
+    anyhow::ensure!(
+      out_quic_connection
+        .diagnostics()
+        .contains("quic_lost_packets=0 "),
+      "reliable reordering triggered QUIC loss: {}",
+      out_quic_connection.diagnostics(),
+    );
 
     anyhow::Ok(())
   })
