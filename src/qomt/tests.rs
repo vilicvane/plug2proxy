@@ -19,7 +19,9 @@ use tokio::{
 };
 
 use crate::{
-  mt_connections::{MtConnectionsListener, MtConnectionsPacket, decode_udp_frame},
+  mt_connections::{
+    MtConnectionsListener, MtConnectionsPacket, MtConnectionsPacketMode, decode_udp_frame,
+  },
   qomt::{
     QomtConnection, QomtPacketDelivery, QomtPacketSendOutcome, QomtPacketStream,
     QomtUdpReconnectPolicy, QomtUdpState, qomt_accept, qomt_connect, qomt_connect_with_udp_policy,
@@ -1106,31 +1108,50 @@ async fn test_packet_frame_roundtrip() -> anyhow::Result<()> {
 
   let payload = vec![0xab; MAX_DATAGRAM_SIZE - 8];
 
-  QuicBytesPacket::write_packet(&mut left_write, payload.clone().into()).await?;
-  QuicBytesPacket::write_packet(&mut left_write, vec![].into()).await?;
+  QuicBytesPacket::write_packet(&mut left_write, None, payload.clone().into()).await?;
+  QuicBytesPacket::write_packet(&mut left_write, None, vec![].into()).await?;
 
   // 关闭写端，让读端在缓冲排空后收到 EOF。
   drop(left_write);
 
-  let packet = QuicBytesPacket::read_next_packet(&mut right_read)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("missing first packet"))?;
+  let (sequence, packet) =
+    QuicBytesPacket::read_next_packet(&mut right_read, MtConnectionsPacketMode::Legacy)
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("missing first packet"))?;
 
+  assert_eq!(sequence, None);
   assert_eq!(&*packet, &payload[..]);
 
-  let empty = QuicBytesPacket::read_next_packet(&mut right_read)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("missing empty packet"))?;
+  let (_, empty) =
+    QuicBytesPacket::read_next_packet(&mut right_read, MtConnectionsPacketMode::Legacy)
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("missing empty packet"))?;
 
   assert!(empty.is_empty());
 
   // EOF 之后返回 None。
   assert!(
-    QuicBytesPacket::read_next_packet(&mut right_read)
+    QuicBytesPacket::read_next_packet(&mut right_read, MtConnectionsPacketMode::Legacy)
       .await?
       .is_none()
   );
 
+  Ok(())
+}
+
+#[tokio::test]
+async fn test_sequenced_packet_frame_roundtrip() -> anyhow::Result<()> {
+  let (mut left_write, mut right_read) = duplex(MAX_DATAGRAM_SIZE * 2);
+  let payload = vec![0xcd; MAX_DATAGRAM_SIZE - 8];
+
+  QuicBytesPacket::write_packet(&mut left_write, Some(42), payload.clone().into()).await?;
+  let (sequence, packet) =
+    QuicBytesPacket::read_next_packet(&mut right_read, MtConnectionsPacketMode::Sequenced)
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("missing sequenced packet"))?;
+
+  assert_eq!(sequence, Some(42));
+  assert_eq!(&*packet, &payload[..]);
   Ok(())
 }
 
@@ -1142,7 +1163,7 @@ async fn test_packet_frame_rejects_oversized_length() -> anyhow::Result<()> {
 
   left_write.write_u32((MAX_DATAGRAM_SIZE + 1) as u32).await?;
 
-  let error = QuicBytesPacket::read_next_packet(&mut right_read)
+  let error = QuicBytesPacket::read_next_packet(&mut right_read, MtConnectionsPacketMode::Legacy)
     .await
     .expect_err("oversized frame must be rejected");
 
@@ -1153,9 +1174,10 @@ async fn test_packet_frame_rejects_oversized_length() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_packet_frame_rejects_oversized_write() {
-  let error = QuicBytesPacket::write_packet(&mut sink(), vec![0; MAX_DATAGRAM_SIZE + 1].into())
-    .await
-    .expect_err("oversized outgoing frame must be rejected");
+  let error =
+    QuicBytesPacket::write_packet(&mut sink(), None, vec![0; MAX_DATAGRAM_SIZE + 1].into())
+      .await
+      .expect_err("oversized outgoing frame must be rejected");
 
   assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
@@ -1166,9 +1188,10 @@ async fn test_packet_frame_reports_truncated_frames() -> anyhow::Result<()> {
   prefix_writer.write_all(&[0, 0]).await?;
   drop(prefix_writer);
 
-  let prefix_error = QuicBytesPacket::read_next_packet(&mut prefix_reader)
-    .await
-    .expect_err("partial length prefix must be rejected");
+  let prefix_error =
+    QuicBytesPacket::read_next_packet(&mut prefix_reader, MtConnectionsPacketMode::Legacy)
+      .await
+      .expect_err("partial length prefix must be rejected");
   assert_eq!(prefix_error.kind(), std::io::ErrorKind::UnexpectedEof);
 
   let (mut body_writer, mut body_reader) = duplex(8);
@@ -1176,9 +1199,10 @@ async fn test_packet_frame_reports_truncated_frames() -> anyhow::Result<()> {
   body_writer.write_all(&[1, 2]).await?;
   drop(body_writer);
 
-  let body_error = QuicBytesPacket::read_next_packet(&mut body_reader)
-    .await
-    .expect_err("partial packet body must be rejected");
+  let body_error =
+    QuicBytesPacket::read_next_packet(&mut body_reader, MtConnectionsPacketMode::Legacy)
+      .await
+      .expect_err("partial packet body must be rejected");
   assert_eq!(body_error.kind(), std::io::ErrorKind::UnexpectedEof);
 
   Ok(())

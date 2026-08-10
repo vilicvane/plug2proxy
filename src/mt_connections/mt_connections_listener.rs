@@ -18,10 +18,10 @@ use crate::{
   mt_connections::{
     MAX_UDP_WIRE_DATAGRAM_SIZE, MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
     MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsId, MtConnectionsMagic,
-    MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
-    MtConnectionsResponseHead, MtConnectionsResponseHeadData, MtConnectionsSideUdpDuplex,
-    MtConnectionsUdpPacket, UDP_RECV_BUFFER_SIZE, UdpDuplexSlot, configure_mt_tcp_stream,
-    decode_udp_frame,
+    MtConnectionsPacket, MtConnectionsPacketMode, MtConnectionsRequestHead,
+    MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
+    MtConnectionsSideUdpDuplex, MtConnectionsUdpPacket, UDP_RECV_BUFFER_SIZE, UdpDuplexSlot,
+    configure_mt_tcp_stream, decode_udp_frame,
   },
   primitives::ConnectionSide,
   utils::postcard::{PostcardStreamError, postcard_read_stream},
@@ -137,26 +137,34 @@ where
       };
 
       match request_head.data {
-        MtConnectionsRequestHeadData::Create => {
+        create @ (MtConnectionsRequestHeadData::Create
+        | MtConnectionsRequestHeadData::CreateSequenced) => {
           let id = MtConnectionsId::new();
+          let packet_mode = if create == MtConnectionsRequestHeadData::CreateSequenced {
+            MtConnectionsPacketMode::Sequenced
+          } else {
+            MtConnectionsPacketMode::Legacy
+          };
+          let response = if packet_mode == MtConnectionsPacketMode::Sequenced {
+            MtConnectionsResponseHeadData::CreatedSequenced(id)
+          } else {
+            MtConnectionsResponseHeadData::Created(id)
+          };
 
-          if send_response_head_with_timeout(
-            &mut stream,
-            MtConnectionsResponseHeadData::Created(id),
-          )
-          .await
-          .inspect_err(|error| {
-            log::warn!(
-              "error sending response head (created) to incoming mTCP connections: {error}"
-            )
-          })
-          .is_err()
+          if send_response_head_with_timeout(&mut stream, response)
+            .await
+            .inspect_err(|error| {
+              log::warn!(
+                "error sending response head (created) to incoming mTCP connections: {error}"
+              )
+            })
+            .is_err()
           {
             continue;
           }
 
           let (mut mt_connections, tcp_stream_sender, _) =
-            MtConnections::new(stream, ConnectionSide::Server, id);
+            MtConnections::new(stream, ConnectionSide::Server, id, packet_mode);
 
           self
             .tcp_stream_sender_map

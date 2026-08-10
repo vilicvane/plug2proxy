@@ -1,5 +1,5 @@
 use std::{
-  collections::HashMap,
+  collections::{BTreeMap, HashMap},
   fmt,
   net::SocketAddr,
   pin::Pin,
@@ -15,7 +15,7 @@ use std::{
 use std::os::fd::AsRawFd;
 
 use futures::{Sink, Stream};
-use lowkit::{DropCallback, SelfWrapExt, TurnArcWeak, tokio_join_set};
+use lowkit::{DropCallback, tokio_join_set};
 use serde::{Deserialize, Serialize};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::{
@@ -23,7 +23,7 @@ use tokio::{
   net::TcpStream,
   sync::{Notify, mpsc},
   task::JoinSet,
-  time::{Instant as TokioInstant, MissedTickBehavior, interval_at, timeout},
+  time::{Instant as TokioInstant, MissedTickBehavior, interval_at, timeout, timeout_at},
 };
 use uuid::{Uuid, serde::compact};
 
@@ -42,6 +42,8 @@ pub const MT_CONNECTIONS_TCP_USER_TIMEOUT: Duration = Duration::from_secs(60);
 // UINT_MAX. One is therefore the smallest effective per-socket value: the
 // socket becomes writable again only after its unsent queue drains to zero.
 pub const MT_CONNECTIONS_TCP_NOTSENT_LOWAT: u32 = 1;
+const MT_CONNECTIONS_REORDER_TIMEOUT: Duration = Duration::from_secs(10);
+const MT_CONNECTIONS_REORDER_BUFFER_PACKETS: usize = 2048;
 const MT_CONNECTIONS_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MT_CONNECTIONS_TCP_INFO_INTERVAL: Duration = Duration::from_millis(50);
 const MT_CONNECTIONS_TCP_INFO_STALE_AFTER: Duration = Duration::from_millis(250);
@@ -289,7 +291,7 @@ async fn monitor_mt_tcp_info(
   std::future::pending().await
 }
 
-struct MtConnectionsDiagnostics {
+pub(crate) struct MtConnectionsDiagnostics {
   created_at: Instant,
   tcp_write_packets: AtomicU64,
   tcp_write_bytes: AtomicU64,
@@ -297,12 +299,15 @@ struct MtConnectionsDiagnostics {
   tcp_read_bytes: AtomicU64,
   pending_tcp_writes: AtomicUsize,
   pending_packet_deliveries: AtomicUsize,
+  reorder_buffered_packets: AtomicUsize,
+  reorder_gap_skips: AtomicU64,
+  reorder_late_packets: AtomicU64,
   last_tcp_write_progress_millis: AtomicU64,
   last_tcp_read_progress_millis: AtomicU64,
 }
 
 impl MtConnectionsDiagnostics {
-  fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
       created_at: Instant::now(),
       tcp_write_packets: AtomicU64::new(0),
@@ -311,6 +316,9 @@ impl MtConnectionsDiagnostics {
       tcp_read_bytes: AtomicU64::new(0),
       pending_tcp_writes: AtomicUsize::new(0),
       pending_packet_deliveries: AtomicUsize::new(0),
+      reorder_buffered_packets: AtomicUsize::new(0),
+      reorder_gap_skips: AtomicU64::new(0),
+      reorder_late_packets: AtomicU64::new(0),
       last_tcp_write_progress_millis: AtomicU64::new(0),
       last_tcp_read_progress_millis: AtomicU64::new(0),
     }
@@ -356,7 +364,8 @@ impl MtConnectionsDiagnostics {
     format!(
       "age_ms={age_millis} tcp_write_packets={} tcp_write_bytes={} \
        tcp_read_packets={} tcp_read_bytes={} pending_tcp_writes={} \
-       pending_packet_deliveries={} tcp_write_idle_ms={} tcp_read_idle_ms={}",
+       pending_packet_deliveries={} reorder_buffered_packets={} \
+       reorder_gap_skips={} reorder_late_packets={} tcp_write_idle_ms={} tcp_read_idle_ms={}",
       self.tcp_write_packets.load(atomic::Ordering::Relaxed),
       self.tcp_write_bytes.load(atomic::Ordering::Relaxed),
       self.tcp_read_packets.load(atomic::Ordering::Relaxed),
@@ -365,6 +374,11 @@ impl MtConnectionsDiagnostics {
       self
         .pending_packet_deliveries
         .load(atomic::Ordering::Acquire),
+      self
+        .reorder_buffered_packets
+        .load(atomic::Ordering::Acquire),
+      self.reorder_gap_skips.load(atomic::Ordering::Relaxed),
+      self.reorder_late_packets.load(atomic::Ordering::Relaxed),
       age_millis.saturating_sub(last_write_millis),
       age_millis.saturating_sub(last_read_millis),
     )
@@ -413,6 +427,148 @@ where
   udp_duplex: Arc<UdpDuplexSlot<TPacket>>,
   _udp_registration: Option<UdpDispatchRegistration>,
   join_set: JoinSet<()>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MtConnectionsPacketMode {
+  Legacy,
+  Sequenced,
+}
+
+pub(crate) struct MtConnectionsReceivedPacket<TPacket> {
+  pub(crate) sequence: Option<u64>,
+  pub(crate) packet: TPacket,
+}
+
+struct MtConnectionsSendPacket<TPacket> {
+  sequence: Option<u64>,
+  packet: TPacket,
+}
+
+pub(crate) async fn deliver_mt_packets<TPacket>(
+  mut received_packet_receiver: mpsc::UnboundedReceiver<MtConnectionsReceivedPacket<TPacket>>,
+  packet_sender: flume::Sender<TPacket>,
+  diagnostics: Arc<MtConnectionsDiagnostics>,
+  side: ConnectionSide,
+  peer_address: SocketAddr,
+) where
+  TPacket: MtConnectionsPacket,
+{
+  let mut expected_sequence = 0u64;
+  let mut buffered = BTreeMap::new();
+  let mut gap_deadline = None;
+
+  loop {
+    while let Some(packet) = buffered.remove(&expected_sequence) {
+      diagnostics
+        .pending_packet_deliveries
+        .fetch_add(1, atomic::Ordering::AcqRel);
+      let send_result = packet_sender.send_async(packet).await;
+      diagnostics
+        .pending_packet_deliveries
+        .fetch_sub(1, atomic::Ordering::AcqRel);
+      if send_result.is_err() {
+        return;
+      }
+      expected_sequence = expected_sequence.wrapping_add(1);
+      gap_deadline = None;
+    }
+    diagnostics
+      .reorder_buffered_packets
+      .store(buffered.len(), atomic::Ordering::Release);
+
+    if !buffered.is_empty() && gap_deadline.is_none() {
+      gap_deadline = Some(TokioInstant::now() + MT_CONNECTIONS_REORDER_TIMEOUT);
+    }
+
+    if buffered.len() >= MT_CONNECTIONS_REORDER_BUFFER_PACKETS {
+      let next_sequence = *buffered.first_key_value().unwrap().0;
+      log::warn!(
+        "mTCP sequenced delivery buffer reached {} packets: side={side} \
+         peer={peer_address} expected={expected_sequence} next={next_sequence}; skipping gap",
+        buffered.len(),
+      );
+      diagnostics
+        .reorder_gap_skips
+        .fetch_add(1, atomic::Ordering::Relaxed);
+      expected_sequence = next_sequence;
+      gap_deadline = None;
+      continue;
+    }
+
+    let received_packet = if let Some(deadline) = gap_deadline {
+      match timeout_at(deadline, received_packet_receiver.recv()).await {
+        Ok(received_packet) => received_packet,
+        Err(_) => {
+          let next_sequence = *buffered.first_key_value().unwrap().0;
+          log::warn!(
+            "mTCP sequenced delivery gap timed out after {:?}: side={side} \
+             peer={peer_address} expected={expected_sequence} next={next_sequence} \
+             buffered={}",
+            MT_CONNECTIONS_REORDER_TIMEOUT,
+            buffered.len(),
+          );
+          diagnostics
+            .reorder_gap_skips
+            .fetch_add(1, atomic::Ordering::Relaxed);
+          expected_sequence = next_sequence;
+          gap_deadline = None;
+          continue;
+        }
+      }
+    } else {
+      received_packet_receiver.recv().await
+    };
+
+    let Some(received_packet) = received_packet else {
+      if let Some((&next_sequence, _)) = buffered.first_key_value() {
+        log::warn!(
+          "mTCP sequenced delivery ended with a gap: side={side} peer={peer_address} \
+           expected={expected_sequence} next={next_sequence} buffered={}",
+          buffered.len(),
+        );
+        diagnostics
+          .reorder_gap_skips
+          .fetch_add(1, atomic::Ordering::Relaxed);
+        expected_sequence = next_sequence;
+        continue;
+      }
+      return;
+    };
+
+    let Some(sequence) = received_packet.sequence else {
+      diagnostics
+        .pending_packet_deliveries
+        .fetch_add(1, atomic::Ordering::AcqRel);
+      let send_result = packet_sender.send_async(received_packet.packet).await;
+      diagnostics
+        .pending_packet_deliveries
+        .fetch_sub(1, atomic::Ordering::AcqRel);
+      if send_result.is_err() {
+        return;
+      }
+      continue;
+    };
+
+    if sequence < expected_sequence {
+      log::debug!(
+        "dropping late mTCP packet: side={side} peer={peer_address} \
+         sequence={sequence} expected={expected_sequence}",
+      );
+      diagnostics
+        .reorder_late_packets
+        .fetch_add(1, atomic::Ordering::Relaxed);
+      continue;
+    }
+
+    buffered.entry(sequence).or_insert(received_packet.packet);
+    diagnostics
+      .reorder_buffered_packets
+      .store(buffered.len(), atomic::Ordering::Release);
+    if sequence > expected_sequence && gap_deadline.is_none() {
+      gap_deadline = Some(TokioInstant::now() + MT_CONNECTIONS_REORDER_TIMEOUT);
+    }
+  }
 }
 
 /// UDP 侧双工通道的共享槽位：duplex 由 connect 侧建立、listener 侧分发
@@ -473,6 +629,7 @@ where
     initial_tcp_stream: TcpStream,
     side: ConnectionSide,
     id: MtConnectionsId,
+    packet_mode: MtConnectionsPacketMode,
   ) -> (
     Self,
     mpsc::UnboundedSender<TcpStream>,
@@ -483,8 +640,11 @@ where
     let (tcp_stream_sender, mut tcp_stream_receiver) = mpsc::unbounded_channel();
     let (tcp_stream_close_sender, tcp_stream_close_receiver) = mpsc::unbounded_channel();
 
-    let (external_packet_sender, packet_receiver) = flume::bounded::<TPacket>(0);
+    let (external_packet_sender, outbound_packet_receiver) = flume::bounded::<TPacket>(0);
+    let (outbound_packet_sender, packet_receiver) =
+      flume::bounded::<MtConnectionsSendPacket<TPacket>>(0);
     let (packet_sender, external_packet_receiver) = flume::bounded::<TPacket>(0);
+    let (received_packet_sender, received_packet_receiver) = mpsc::unbounded_channel();
 
     let connection_count = Arc::new(AtomicUsize::new(0));
     let diagnostics = Arc::new(MtConnectionsDiagnostics::new());
@@ -492,16 +652,15 @@ where
     let manager_connection_count = connection_count.clone();
     let manager_diagnostics = diagnostics.clone();
     let manager_underlay_metrics = underlay_metrics.clone();
+    let delivery_diagnostics = diagnostics.clone();
 
     let manager = async move {
       let (all_connections_closed_sender, mut all_connections_closed_receiver) = mpsc::channel(1);
 
-      let packet_sender = TurnArcWeak::new(packet_sender).mutex().arc();
-
       let pipe_bidirectional = |tcp_stream: TcpStream| {
         let tcp_stream_close_sender = tcp_stream_close_sender.clone();
 
-        let packet_sender = packet_sender.clone();
+        let received_packet_sender = received_packet_sender.clone();
         let packet_receiver = packet_receiver.clone();
 
         let connection_count = manager_connection_count.clone();
@@ -511,10 +670,6 @@ where
         let all_connections_closed_sender = all_connections_closed_sender.clone();
 
         async move {
-          let Some(packet_sender) = packet_sender.lock().unwrap().get_arc() else {
-            return;
-          };
-
           let local_address = tcp_stream.local_addr().ok();
           let peer_address = tcp_stream.peer_addr().unwrap_or(peer_address);
           let path_id = underlay_metrics.register_path(local_address, peer_address);
@@ -534,14 +689,14 @@ where
               result = async move {
               loop {
                 match packet_receiver.recv_async().await {
-                  Ok(packet) => {
+                  Ok(MtConnectionsSendPacket { sequence, packet }) => {
                     let packet_length = packet.len();
                       write_diagnostics
                         .pending_tcp_writes
                         .fetch_add(1, atomic::Ordering::AcqRel);
                     let write_result = timeout(
                       MT_CONNECTIONS_PACKET_WRITE_TIMEOUT,
-                      TPacket::write_packet(&mut tcp_write, packet),
+                      TPacket::write_packet(&mut tcp_write, sequence, packet),
                     )
                     .await;
                       write_diagnostics
@@ -561,18 +716,15 @@ where
             } => result,
             result = async move {
               loop {
-                let Some(packet) = TPacket::read_next_packet(&mut tcp_read).await? else {
+                let Some((sequence, packet)) =
+                  TPacket::read_next_packet(&mut tcp_read, packet_mode).await?
+                else {
                   break;
                 };
                   read_diagnostics.record_tcp_read(packet.len());
-                  read_diagnostics
-                    .pending_packet_deliveries
-                    .fetch_add(1, atomic::Ordering::AcqRel);
-                  let send_result = packet_sender.send_async(packet).await;
-                  read_diagnostics
-                    .pending_packet_deliveries
-                  .fetch_sub(1, atomic::Ordering::AcqRel);
-                send_result?;
+                received_packet_sender
+                  .send(MtConnectionsReceivedPacket { sequence, packet })
+                  .map_err(|_| anyhow::anyhow!("mTCP packet delivery loop ended"))?;
               }
 
               log::debug!("{side} read tcp stream loop ended");
@@ -616,6 +768,24 @@ where
       }
     };
 
+    let send_dispatcher = async move {
+      let mut next_send_sequence = 0u64;
+      while let Ok(packet) = outbound_packet_receiver.recv_async().await {
+        let sequence = (packet_mode == MtConnectionsPacketMode::Sequenced).then(|| {
+          let sequence = next_send_sequence;
+          next_send_sequence = next_send_sequence.wrapping_add(1);
+          sequence
+        });
+        if outbound_packet_sender
+          .send_async(MtConnectionsSendPacket { sequence, packet })
+          .await
+          .is_err()
+        {
+          break;
+        }
+      }
+    };
+
     let diagnostic_connection_count = connection_count.clone();
     let diagnostic_counters = diagnostics.clone();
     let diagnostic_underlay_metrics = underlay_metrics.clone();
@@ -635,12 +805,21 @@ where
         }
 
         log::debug!(
-          "mTCP diagnostic: side={side} peer={peer_address} paths={paths} {} tcp_info=[{}]",
+          "mTCP diagnostic: side={side} peer={peer_address} packet_mode={packet_mode:?} \
+           paths={paths} {} tcp_info=[{}]",
           diagnostic_counters.snapshot(),
           diagnostic_underlay_metrics.snapshot(),
         );
       }
     };
+
+    let delivery_loop = deliver_mt_packets(
+      received_packet_receiver,
+      packet_sender,
+      delivery_diagnostics,
+      side,
+      peer_address,
+    );
 
     let mt_connections = Self {
       id,
@@ -651,7 +830,7 @@ where
       underlay_metrics,
       udp_duplex: Arc::new(UdpDuplexSlot::new()),
       _udp_registration: None,
-      join_set: tokio_join_set!(manager, diagnostics_loop),
+      join_set: tokio_join_set!(manager, send_dispatcher, diagnostics_loop, delivery_loop),
     };
 
     (mt_connections, tcp_stream_sender, tcp_stream_close_receiver)
@@ -759,10 +938,12 @@ pub trait MtConnectionsPacket: Sized + Send + Sync + 'static {
 
   fn read_next_packet(
     stream: &mut (dyn AsyncRead + Unpin + Send),
-  ) -> impl Future<Output = Result<Option<Self>, std::io::Error>> + Send;
+    packet_mode: MtConnectionsPacketMode,
+  ) -> impl Future<Output = Result<Option<(Option<u64>, Self)>, std::io::Error>> + Send;
 
   fn write_packet(
     stream: &mut (dyn AsyncWrite + Unpin + Send),
+    sequence: Option<u64>,
     packet: Self,
   ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
 }
@@ -835,6 +1016,7 @@ pub struct MtConnectionsRequestHead {
 pub enum MtConnectionsRequestHeadData {
   Create,
   Extend(MtConnectionsId),
+  CreateSequenced,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -848,6 +1030,7 @@ pub enum MtConnectionsResponseHeadData {
   Created(MtConnectionsId),
   Extended,
   AlreadyClosed,
+  CreatedSequenced(MtConnectionsId),
 }
 
 #[derive(thiserror::Error, Debug)]

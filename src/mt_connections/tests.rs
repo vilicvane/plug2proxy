@@ -1,5 +1,5 @@
 use std::{
-  sync::LazyLock,
+  sync::{Arc, LazyLock},
   time::{Duration, Instant},
 };
 
@@ -9,14 +9,16 @@ use lowkit::SelfWrapExt;
 use rand::Rng;
 use socket2::SockRef;
 use tokio::{
-  io::copy_bidirectional,
+  io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
   net::{TcpListener, TcpStream, UdpSocket},
   sync::{mpsc, oneshot},
   task::AbortHandle,
   time::{sleep, timeout},
 };
 
+use crate::primitives::ConnectionSide;
 use crate::quic_connection::{MAX_DATAGRAM_SIZE, QuicBytesPacket};
+use crate::utils::postcard::postcard_read_stream;
 
 use super::*;
 
@@ -31,6 +33,140 @@ static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
   rand::rng().fill(&mut random_data[..]);
   random_data
 });
+
+#[tokio::test]
+async fn sequenced_delivery_restores_order_beyond_quic_receive_window() -> anyhow::Result<()> {
+  const PACKETS: u64 = 512;
+  let (received_packet_sender, received_packet_receiver) = mpsc::unbounded_channel();
+  let (packet_sender, packet_receiver) = flume::bounded::<QuicBytesPacket>(0);
+  let diagnostics = Arc::new(MtConnectionsDiagnostics::new());
+
+  let delivery = tokio::spawn(deliver_mt_packets(
+    received_packet_receiver,
+    packet_sender,
+    diagnostics,
+    ConnectionSide::Client,
+    "127.0.0.1:1122".parse()?,
+  ));
+  let collect = tokio::spawn(async move {
+    let mut delivered = Vec::new();
+    while let Ok(packet) = packet_receiver.recv_async().await {
+      delivered.push(u64::from_be_bytes(packet[..].try_into().unwrap()));
+    }
+    delivered
+  });
+
+  let send_packet = |sequence| {
+    received_packet_sender
+      .send(MtConnectionsReceivedPacket {
+        sequence: Some(sequence),
+        packet: sequence.to_be_bytes().to_vec().into(),
+      })
+      .unwrap();
+  };
+
+  send_packet(0);
+  for sequence in 2..PACKETS {
+    send_packet(sequence);
+  }
+  sleep(duration!("100ms")).await;
+  send_packet(1);
+  drop(received_packet_sender);
+
+  let delivered = timeout(duration!("5s"), collect).await??;
+  delivery.await?;
+  assert_eq!(delivered, (0..PACKETS).collect::<Vec<_>>());
+
+  Ok(())
+}
+
+#[tokio::test]
+async fn new_listener_accepts_legacy_client_framing() -> anyhow::Result<()> {
+  let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+  let address = tcp_listener.local_addr()?;
+  let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener, None);
+  let payload = b"legacy client".to_vec();
+
+  timeout(duration!("5s"), async {
+    tokio::try_join!(
+      async {
+        let mut mt_connections = listener.accept().await?;
+        let packet = mt_connections
+          .next()
+          .await
+          .ok_or_else(|| anyhow::anyhow!("legacy client did not deliver a packet"))?;
+        anyhow::ensure!(&packet[..] == payload);
+        anyhow::Ok(())
+      },
+      async {
+        let mut stream = TcpStream::connect(address).await?;
+        let request = postcard::to_allocvec(&MtConnectionsRequestHead {
+          magic: MtConnectionsMagic,
+          data: MtConnectionsRequestHeadData::Create,
+        })?;
+        stream.write_all(&request).await?;
+        let response = postcard_read_stream::<MtConnectionsResponseHead>(&mut stream).await?;
+        anyhow::ensure!(matches!(
+          response.data,
+          MtConnectionsResponseHeadData::Created(_)
+        ));
+        stream.write_u32(payload.len() as u32).await?;
+        stream.write_all(&payload).await?;
+        anyhow::Ok(())
+      },
+    )?;
+    anyhow::Ok(())
+  })
+  .await??;
+
+  Ok(())
+}
+
+#[tokio::test]
+async fn new_connector_falls_back_to_legacy_server_framing() -> anyhow::Result<()> {
+  let listener = TcpListener::bind("127.0.0.1:0").await?;
+  let address = listener.local_addr()?;
+  let payload = b"legacy server".to_vec();
+
+  timeout(duration!("5s"), async {
+    tokio::try_join!(
+      async {
+        let (mut unsupported_stream, _) = listener.accept().await?;
+        let unsupported =
+          postcard_read_stream::<MtConnectionsRequestHead>(&mut unsupported_stream).await?;
+        anyhow::ensure!(unsupported.data == MtConnectionsRequestHeadData::CreateSequenced);
+        drop(unsupported_stream);
+
+        let (mut legacy_stream, _) = listener.accept().await?;
+        let legacy = postcard_read_stream::<MtConnectionsRequestHead>(&mut legacy_stream).await?;
+        anyhow::ensure!(legacy.data == MtConnectionsRequestHeadData::Create);
+        let id = MtConnectionsId::new();
+        let response = postcard::to_allocvec(&MtConnectionsResponseHead {
+          magic: MtConnectionsMagic,
+          data: MtConnectionsResponseHeadData::Created(id),
+        })?;
+        legacy_stream.write_all(&response).await?;
+
+        let encoded_length = legacy_stream.read_u32().await?;
+        anyhow::ensure!(encoded_length as usize == payload.len());
+        let mut received = vec![0; encoded_length as usize];
+        legacy_stream.read_exact(&mut received).await?;
+        anyhow::ensure!(received == payload);
+        anyhow::Ok(())
+      },
+      async {
+        let (mut mt_connections, _extend) =
+          mt_connections_connect::<QuicBytesPacket>(address, 1).await?;
+        mt_connections.send(payload.clone().into()).await?;
+        anyhow::Ok(())
+      },
+    )?;
+    anyhow::Ok(())
+  })
+  .await??;
+
+  Ok(())
+}
 
 #[test]
 fn tcp_info_loss_floor_tracks_current_ack_stall() {

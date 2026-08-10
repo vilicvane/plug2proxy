@@ -17,7 +17,8 @@ use tokio::{
 use crate::{
   mt_connections::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnections, MtConnectionsId, MtConnectionsPacket,
-    MtConnectionsSideUdpDuplex, MtConnectionsUdpPacket, UdpDuplexSlot, mt_connections_connect,
+    MtConnectionsPacketMode, MtConnectionsSideUdpDuplex, MtConnectionsUdpPacket, UdpDuplexSlot,
+    mt_connections_connect,
   },
   qomt::QomtStream,
   quic_connection::{
@@ -63,6 +64,7 @@ impl Default for QomtUdpReconnectPolicy {
 /// 未认证 UDP route 上允许丢弃的非法首包数量。除了绝对 deadline，
 /// 再设包数预算，避免攻击者靠持续填满队列长时间占用 worker。
 const QOMT_MAX_REJECTED_UDP_INITIAL_PACKETS: usize = 64;
+const MT_CONNECTIONS_SEQUENCED_FRAME_FLAG: u32 = 1 << 31;
 
 impl MtConnectionsUdpPacket for QuicBytesPacket {
   fn as_bytes(&self) -> &[u8] {
@@ -81,7 +83,8 @@ impl MtConnectionsPacket for QuicBytesPacket {
 
   async fn read_next_packet(
     stream: &mut (dyn AsyncRead + Unpin + Send),
-  ) -> Result<Option<Self>, std::io::Error> {
+    packet_mode: MtConnectionsPacketMode,
+  ) -> Result<Option<(Option<u64>, Self)>, std::io::Error> {
     let mut length_bytes = [0; size_of::<u32>()];
 
     // 只有在帧头尚未开始时遇到 EOF 才是干净关闭；半个长度字段或半个
@@ -91,7 +94,16 @@ impl MtConnectionsPacket for QuicBytesPacket {
     }
     stream.read_exact(&mut length_bytes[1..]).await?;
 
-    let length = u32::from_be_bytes(length_bytes) as usize;
+    let encoded_length = u32::from_be_bytes(length_bytes);
+    let has_sequence = encoded_length & MT_CONNECTIONS_SEQUENCED_FRAME_FLAG != 0;
+    let expected_sequence = packet_mode == MtConnectionsPacketMode::Sequenced;
+    if has_sequence != expected_sequence {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "mTCP packet framing mode changed within a connection",
+      ));
+    }
+    let length = (encoded_length & !MT_CONNECTIONS_SEQUENCED_FRAME_FLAG) as usize;
 
     if length > MAX_DATAGRAM_SIZE {
       return Err(std::io::Error::new(
@@ -100,14 +112,20 @@ impl MtConnectionsPacket for QuicBytesPacket {
       ));
     }
 
+    let sequence = if has_sequence {
+      Some(stream.read_u64().await?)
+    } else {
+      None
+    };
     let mut buffer = vec![0; length];
     stream.read_exact(&mut buffer).await?;
 
-    Ok(Some(buffer.into()))
+    Ok(Some((sequence, buffer.into())))
   }
 
   async fn write_packet(
     stream: &mut (dyn AsyncWrite + Unpin + Send),
+    sequence: Option<u64>,
     packet: Self,
   ) -> Result<(), std::io::Error> {
     if packet.len() > MAX_DATAGRAM_SIZE {
@@ -117,7 +135,16 @@ impl MtConnectionsPacket for QuicBytesPacket {
       ));
     }
 
-    stream.write_u32(packet.len() as u32).await?;
+    let encoded_length = packet.len() as u32
+      | if sequence.is_some() {
+        MT_CONNECTIONS_SEQUENCED_FRAME_FLAG
+      } else {
+        0
+      };
+    stream.write_u32(encoded_length).await?;
+    if let Some(sequence) = sequence {
+      stream.write_u64(sequence).await?;
+    }
     stream.write_all(packet.deref()).await?;
     Ok(())
   }

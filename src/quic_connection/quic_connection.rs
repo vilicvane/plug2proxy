@@ -44,10 +44,11 @@ const UNDERLAY_LOSS_DELAY_LOG_ACK_STALL: Duration = Duration::from_millis(250);
 // reliable TCP streams. A path with older queued bytes can be overtaken for
 // seconds even while every TCP socket reports a healthy RTT and no
 // retransmissions, so TCP_INFO cannot measure the resulting receive-side
-// merge delay. Keep time-threshold loss detection beyond the largest
-// reordering delay observed in production. PTO remains enabled, and a packet
-// lost when a TCP path closes is still recovered after this bounded delay.
-const RELIABLE_MULTIPATH_REORDER_DELAY_FLOOR: Duration = Duration::from_secs(5);
+// merge delay. mTCP restores global packet order and declares a missing
+// sequence after 10 seconds. Apply a slightly larger QUIC floor before the
+// connection starts and keep it while paths are added or replaced, so QUIC
+// never races the reorder window while still recovering a real gap promptly.
+const RELIABLE_UNDERLAY_REORDER_DELAY_FLOOR: Duration = Duration::from_secs(12);
 
 // Upper bound for how long the send loop may park after quiche reports
 // Done. quiche's own timer can legitimately be far in the future (the
@@ -533,12 +534,21 @@ impl QuicConnection {
     let connection_signals = self.connection_signals.clone();
     let diagnostic_id = self.diagnostic_id();
     let side = self.side;
+    let reliable_floor_micros = RELIABLE_UNDERLAY_REORDER_DELAY_FLOOR.as_micros() as u64;
+
+    connection
+      .lock()
+      .unwrap()
+      .set_loss_detection_delay_floor(RELIABLE_UNDERLAY_REORDER_DELAY_FLOOR);
+    connection_signals
+      .underlay_loss_delay_floor_micros
+      .store(reliable_floor_micros, atomic::Ordering::Release);
 
     self._join_set.spawn(async move {
       let mut interval = interval_at(TokioInstant::now(), UNDERLAY_LOSS_DELAY_UPDATE_INTERVAL);
       interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
       let quantum_micros = UNDERLAY_LOSS_DELAY_QUANTUM.as_micros() as u64;
-      let mut applied_floor = Duration::ZERO;
+      let mut applied_floor = RELIABLE_UNDERLAY_REORDER_DELAY_FLOOR;
       let mut last_log = Instant::now()
         .checked_sub(UNDERLAY_LOSS_DELAY_LOG_INTERVAL)
         .unwrap_or_else(Instant::now);
@@ -546,13 +556,9 @@ impl QuicConnection {
       loop {
         interval.tick().await;
         let snapshot = metrics.snapshot();
-        let loss_delay_floor = if snapshot.paths > 1 {
-          snapshot
-            .loss_delay_floor
-            .max(RELIABLE_MULTIPATH_REORDER_DELAY_FLOOR)
-        } else {
-          snapshot.loss_delay_floor
-        };
+        let loss_delay_floor = snapshot
+          .loss_delay_floor
+          .max(RELIABLE_UNDERLAY_REORDER_DELAY_FLOOR);
         let floor_micros = loss_delay_floor.as_micros().min(u64::MAX as u128) as u64;
         let quantized_micros = floor_micros.saturating_add(quantum_micros.saturating_sub(1))
           / quantum_micros
