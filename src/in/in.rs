@@ -101,6 +101,7 @@ pub struct InOptions {
 pub struct InHubOptions {
   pub address: SocketAddr,
   pub connections: usize,
+  pub peer_connections: usize,
 }
 
 impl In {
@@ -467,7 +468,7 @@ impl In {
     };
 
     let node_id = in_node_arc.id;
-    let connections = in_node_arc.hub_options.connections.max(1);
+    let connections = in_node_arc.hub_options.peer_connections.max(1);
     let pem_path = in_node_arc.context_dir.join(NODE_PEM_FILE_NAME);
     drop(in_node_arc);
 
@@ -685,6 +686,7 @@ mod tests {
         hub: InHubOptions {
           address: "127.0.0.1:1".parse().unwrap(),
           connections: 1,
+          peer_connections: 1,
         },
         context_dir,
       },
@@ -711,6 +713,7 @@ mod tests {
         hub: InHubOptions {
           address: "127.0.0.1:1".parse().unwrap(),
           connections: 1,
+          peer_connections: 1,
         },
         context_dir,
       },
@@ -829,6 +832,7 @@ mod tests {
           hub: InHubOptions {
             address: "127.0.0.1:1".parse()?,
             connections: 1,
+            peer_connections: 1,
           },
           context_dir: in_dir,
         },

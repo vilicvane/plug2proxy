@@ -15,6 +15,7 @@ pub struct InConfig {
 pub struct InHubConfig {
   pub address: SerdeSocketAddress,
   pub connections: Option<usize>,
+  pub peer_connections: Option<usize>,
 }
 
 impl From<InHubConfig> for InHubOptions {
@@ -22,11 +23,41 @@ impl From<InHubConfig> for InHubOptions {
     InHubConfig {
       address,
       connections,
+      peer_connections,
     }: InHubConfig,
   ) -> Self {
+    let connections = connections.unwrap_or(4);
+
     InHubOptions {
       address: address.into(),
-      connections: connections.unwrap_or(4),
+      connections,
+      peer_connections: peer_connections.unwrap_or(connections),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn peer_connections_default_to_hub_connections() {
+    let config: InHubConfig =
+      serde_json::from_str(r#"{"address":"127.0.0.1:1122","connections":3}"#).unwrap();
+    let options = InHubOptions::from(config);
+
+    assert_eq!(options.connections, 3);
+    assert_eq!(options.peer_connections, 3);
+  }
+
+  #[test]
+  fn peer_connections_can_be_configured_independently() {
+    let config: InHubConfig =
+      serde_json::from_str(r#"{"address":"127.0.0.1:1122","connections":4,"peer_connections":1}"#)
+        .unwrap();
+    let options = InHubOptions::from(config);
+
+    assert_eq!(options.connections, 4);
+    assert_eq!(options.peer_connections, 1);
   }
 }
