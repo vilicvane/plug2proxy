@@ -44,6 +44,10 @@ static NEXT_OUT_DISPATCHER: AtomicUsize = AtomicUsize::new(0);
 static NEXT_TCP_FLOW_ID: AtomicU64 = AtomicU64::new(1);
 const PENDING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 const TRANSFER_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+// Preserve useful TCP half-close semantics while bounding sockets whose open
+// direction has stopped making progress after the other direction reached EOF.
+const HALF_CLOSE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UDP_FLOW_LOG_CACHE_CAPACITY: u64 = 1024 * 64;
 const UDP_FLOW_LOG_IDLE_TIMEOUT: Duration = duration!("1m");
 const UDP_ROUTER_QUEUE_CAPACITY: usize = 4096;
@@ -56,6 +60,7 @@ struct FlowIoMetrics {
   read_bytes: AtomicU64,
   written_bytes: AtomicU64,
   read_pending: AtomicBool,
+  read_eof: AtomicBool,
   write_pending: AtomicBool,
   last_read_progress_millis: AtomicU64,
   last_write_progress_millis: AtomicU64,
@@ -68,6 +73,7 @@ impl FlowIoMetrics {
       read_bytes: AtomicU64::new(0),
       written_bytes: AtomicU64::new(0),
       read_pending: AtomicBool::new(false),
+      read_eof: AtomicBool::new(false),
       write_pending: AtomicBool::new(false),
       last_read_progress_millis: AtomicU64::new(0),
       last_write_progress_millis: AtomicU64::new(0),
@@ -102,20 +108,80 @@ impl FlowIoMetrics {
       .store(self.elapsed_millis(), Ordering::Release);
   }
 
+  fn read_bytes(&self) -> u64 {
+    self.read_bytes.load(Ordering::Relaxed)
+  }
+
+  fn read_idle_millis(&self) -> u64 {
+    self
+      .elapsed_millis()
+      .saturating_sub(self.last_read_progress_millis.load(Ordering::Acquire))
+  }
+
+  fn write_idle_millis(&self) -> u64 {
+    self
+      .elapsed_millis()
+      .saturating_sub(self.last_write_progress_millis.load(Ordering::Acquire))
+  }
+
   fn snapshot(&self) -> String {
     let elapsed_millis = self.elapsed_millis();
 
     format!(
-      "read_bytes={} written_bytes={} read_pending={} write_pending={} \
+      "read_bytes={} written_bytes={} read_pending={} read_eof={} write_pending={} \
        read_idle_ms={} write_idle_ms={}",
       self.read_bytes.load(Ordering::Relaxed),
       self.written_bytes.load(Ordering::Relaxed),
       self.read_pending.load(Ordering::Acquire),
+      self.read_eof.load(Ordering::Acquire),
       self.write_pending.load(Ordering::Acquire),
-      elapsed_millis.saturating_sub(self.last_read_progress_millis.load(Ordering::Acquire)),
-      elapsed_millis.saturating_sub(self.last_write_progress_millis.load(Ordering::Acquire)),
+      self.read_idle_millis().min(elapsed_millis),
+      self.write_idle_millis().min(elapsed_millis),
     )
   }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HalfCloseIdleDirection {
+  ClientToOutbound,
+  OutboundToClient,
+}
+
+impl HalfCloseIdleDirection {
+  fn label(self) -> &'static str {
+    match self {
+      Self::ClientToOutbound => "client-to-outbound",
+      Self::OutboundToClient => "outbound-to-client",
+    }
+  }
+}
+
+fn half_close_idle_direction(
+  client: &FlowIoMetrics,
+  outbound: &FlowIoMetrics,
+  idle_timeout: Duration,
+) -> Option<HalfCloseIdleDirection> {
+  let idle_timeout_millis = idle_timeout.as_millis().min(u64::MAX as u128) as u64;
+  let client_eof = client.read_eof.load(Ordering::Acquire);
+  let outbound_eof = outbound.read_eof.load(Ordering::Acquire);
+
+  if outbound_eof
+    && !client_eof
+    && client.read_idle_millis() >= idle_timeout_millis
+    && outbound.write_idle_millis() >= idle_timeout_millis
+  {
+    return Some(HalfCloseIdleDirection::ClientToOutbound);
+  }
+
+  if client_eof
+    && !outbound_eof
+    && outbound.read_idle_millis() >= idle_timeout_millis
+    && client.write_idle_millis() >= idle_timeout_millis
+  {
+    return Some(HalfCloseIdleDirection::OutboundToClient);
+  }
+
+  None
 }
 
 struct MeteredBidiStream {
@@ -142,12 +208,13 @@ impl AsyncRead for MeteredBidiStream {
     match &result {
       Poll::Ready(Ok(())) => {
         this.metrics.read_pending.store(false, Ordering::Release);
-        this
-          .metrics
-          .record_read(buffer.filled().len().saturating_sub(previous_length));
+        let bytes = buffer.filled().len().saturating_sub(previous_length);
+        this.metrics.read_eof.store(bytes == 0, Ordering::Release);
+        this.metrics.record_read(bytes);
       }
       Poll::Ready(Err(_)) => {
         this.metrics.read_pending.store(false, Ordering::Release);
+        this.metrics.read_eof.store(false, Ordering::Release);
       }
       Poll::Pending => {
         this.metrics.read_pending.store(true, Ordering::Release);
@@ -384,9 +451,21 @@ pub trait Node {
       let transfer = copy_bidirectional(&mut metered_client, &mut metered_outbound);
       tokio::pin!(transfer);
       let mut diagnostic_interval = new_diagnostic_interval(TRANSFER_DIAGNOSTIC_INTERVAL);
+      let mut half_close_check_interval = new_diagnostic_interval(HALF_CLOSE_CHECK_INTERVAL);
+      let mut half_close_idle = None;
       let transfer_result = loop {
         tokio::select! {
           result = &mut transfer => break result.map_err(Error::from),
+          _ = half_close_check_interval.tick() => {
+            if let Some(direction) = half_close_idle_direction(
+              &client_metrics,
+              &outbound_metrics,
+              HALF_CLOSE_IDLE_TIMEOUT,
+            ) {
+              half_close_idle = Some(direction);
+              break Ok((client_metrics.read_bytes(), outbound_metrics.read_bytes()));
+            }
+          }
           _ = diagnostic_interval.tick() => {
             log::debug!(
               "TCP flow {flow_id} attempt {attempt} transfer diagnostic after {} ms: \
@@ -406,8 +485,20 @@ pub trait Node {
 
       out_dispatcher.transfer_finished(transferred_bytes, started_at.elapsed());
 
-      match &transfer_result {
-        Ok((upstream, downstream)) => {
+      match (&transfer_result, half_close_idle) {
+        (Ok((upstream, downstream)), Some(direction)) => {
+          log::debug!(
+            "TCP flow {flow_id} attempt {attempt} closed after half-close idle timeout: \
+             destination={dial_destination}, dispatcher={dispatcher_label}, \
+             idle_direction={}, timeout_ms={}, upstream_bytes={upstream}, \
+             downstream_bytes={downstream}, client=[{}], outbound=[{}]",
+            direction.label(),
+            HALF_CLOSE_IDLE_TIMEOUT.as_millis(),
+            client_metrics.snapshot(),
+            outbound_metrics.snapshot(),
+          );
+        }
+        (Ok((upstream, downstream)), None) => {
           log::debug!(
             "TCP flow {flow_id} attempt {attempt} completed after {} ms: \
              destination={dial_destination}, dispatcher={dispatcher_label}, \
@@ -415,7 +506,7 @@ pub trait Node {
             started_at.elapsed().as_millis(),
           );
         }
-        Err(error) => {
+        (Err(error), _) => {
           log::warn!(
             "TCP flow {flow_id} attempt {attempt} transfer failed after {} ms: \
              destination={dial_destination}, dispatcher={dispatcher_label}, \
@@ -1015,12 +1106,61 @@ mod tests {
 
   use futures::{Sink, Stream};
   use tokio::{
-    io::{DuplexStream, duplex},
+    io::{AsyncReadExt, DuplexStream, duplex},
     sync::oneshot,
     time::{Duration, sleep, timeout},
   };
 
   use super::*;
+
+  #[test]
+  fn half_close_idle_requires_eof_and_an_idle_remaining_direction() {
+    let client = FlowIoMetrics::new();
+    let outbound = FlowIoMetrics::new();
+
+    assert_eq!(
+      half_close_idle_direction(&client, &outbound, Duration::ZERO),
+      None
+    );
+
+    outbound.read_eof.store(true, Ordering::Release);
+    assert_eq!(
+      half_close_idle_direction(&client, &outbound, Duration::ZERO),
+      Some(HalfCloseIdleDirection::ClientToOutbound)
+    );
+
+    assert_eq!(
+      half_close_idle_direction(&client, &outbound, Duration::from_secs(1)),
+      None,
+      "a fresh half-close must retain its grace period"
+    );
+  }
+
+  #[test]
+  fn half_close_idle_detects_the_reverse_direction() {
+    let client = FlowIoMetrics::new();
+    let outbound = FlowIoMetrics::new();
+    client.read_eof.store(true, Ordering::Release);
+
+    assert_eq!(
+      half_close_idle_direction(&client, &outbound, Duration::ZERO),
+      Some(HalfCloseIdleDirection::OutboundToClient)
+    );
+  }
+
+  #[tokio::test]
+  async fn metered_stream_records_read_eof() -> anyhow::Result<()> {
+    let metrics = Arc::new(FlowIoMetrics::new());
+    let (stream, peer) = duplex(64);
+    drop(peer);
+    let mut stream = MeteredBidiStream::new(Box::new(stream), metrics.clone());
+    let mut byte = [0_u8; 1];
+
+    assert_eq!(stream.read(&mut byte).await?, 0);
+    assert!(metrics.read_eof.load(Ordering::Acquire));
+
+    Ok(())
+  }
 
   struct TakingTestNode {
     dispatchers: Mutex<Option<Vec<Arc<dyn OutDispatcher>>>>,
