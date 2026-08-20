@@ -602,6 +602,7 @@ async fn forward_udp(
   let mut association_tasks = JoinSet::new();
   let logged_flows = new_udp_flow_log_cache(UDP_FLOW_LOG_IDLE_TIMEOUT);
   let mut out_dispatcher_revision = node.out_dispatcher_revision();
+  let mut association_open_failures = 0_u64;
   let mut dropped_outgoing = 0_u64;
 
   loop {
@@ -647,13 +648,29 @@ async fn forward_udp(
             break;
           }
 
-          let Some((matched_route, outbound, is_local)) = open_udp_association(
+          let association = open_udp_association(
             node,
             std::slice::from_ref(requested_route),
             &outgoing.destination,
           )
-          .await?
-          else {
+          .await;
+          let Some((matched_route, outbound, is_local)) = (match association {
+            Ok(association) => {
+              association_open_failures = 0;
+              association
+            }
+            Err(error) => {
+              association_open_failures = association_open_failures.wrapping_add(1);
+              if association_open_failures.is_power_of_two() {
+                log::warn!(
+                  "UDP association open failed; dropped {association_open_failures} consecutive \
+                   packets (last destination: {}, requested exit: {requested_exit}): {error}",
+                  outgoing.destination.route_label(),
+                );
+              }
+              None
+            }
+          }) else {
             continue;
           };
           let (association_sender, association_receiver) =
@@ -1458,7 +1475,14 @@ mod tests {
 
   struct RecoveringUdpTestDispatcher {
     exit: OutExit,
+    failure: RecoveringUdpFailure,
     association_attempts: AtomicUsize,
+  }
+
+  #[derive(Clone, Copy)]
+  enum RecoveringUdpFailure {
+    Open,
+    Send,
   }
 
   struct RecordingUdpTestDispatcher {
@@ -1560,7 +1584,13 @@ mod tests {
 
     async fn associate(&self, _exit: OutExit) -> Result<Box<dyn OutboundUdpPacketStream>, Error> {
       if self.association_attempts.fetch_add(1, Ordering::Relaxed) == 0 {
-        return Ok(Box::new(FailingUdpPacketStream));
+        return match self.failure {
+          RecoveringUdpFailure::Open => Err(
+            UdpPacketStreamError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+              .into(),
+          ),
+          RecoveringUdpFailure::Send => Ok(Box::new(FailingUdpPacketStream)),
+        };
       }
 
       let (stream, peer) = duplex(4096);
@@ -2245,8 +2275,9 @@ mod tests {
     Ok(())
   }
 
-  #[tokio::test]
-  async fn udp_association_failure_does_not_stop_the_inbound() -> anyhow::Result<()> {
+  async fn assert_udp_association_failure_recovers(
+    failure: RecoveringUdpFailure,
+  ) -> anyhow::Result<()> {
     use crate::{
       route::FallbackRule,
       test::test_dir,
@@ -2256,6 +2287,7 @@ mod tests {
     let exit = OutExit::from("us");
     let dispatcher = Arc::new(RecoveringUdpTestDispatcher {
       exit: exit.clone(),
+      failure,
       association_attempts: AtomicUsize::new(0),
     });
     let node = Arc::new(StaticTestNode {
@@ -2296,6 +2328,16 @@ mod tests {
     route_task.await.unwrap_err();
 
     Ok(())
+  }
+
+  #[tokio::test]
+  async fn udp_association_open_failure_does_not_stop_the_inbound() -> anyhow::Result<()> {
+    assert_udp_association_failure_recovers(RecoveringUdpFailure::Open).await
+  }
+
+  #[tokio::test]
+  async fn udp_association_send_failure_does_not_stop_the_inbound() -> anyhow::Result<()> {
+    assert_udp_association_failure_recovers(RecoveringUdpFailure::Send).await
   }
 
   #[tokio::test]
