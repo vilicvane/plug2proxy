@@ -28,30 +28,32 @@ impl GeoLite2 {
   pub fn new(dir: impl AsRef<Path>) -> Self {
     let path = dir.as_ref().join("geolite2.mmdb");
 
-    let modified_time = fs::metadata(&path).map_or_else(
-      |error| {
-        if error.kind() == io::ErrorKind::NotFound {
-          None
-        } else {
-          panic!("failed to get metadata of GeoLite2 database: {}", error);
+    let (reader, next_update_time) = match fs::metadata(&path) {
+      Ok(metadata) => match maxminddb::Reader::open_readfile(&path) {
+        Ok(reader) => {
+          let modified_time = metadata.modified().unwrap();
+          let next_update_time = Instant::now()
+            + (UPDATE_INTERVAL.saturating_sub(
+              SystemTime::now()
+                .duration_since(modified_time)
+                .unwrap_or(Duration::from_secs(0)),
+            ));
+
+          (Some(reader), next_update_time)
+        }
+        Err(error) => {
+          log::error!(
+            "failed to open GeoLite2 database at {}: {error}; scheduling an immediate update",
+            path.display()
+          );
+          (None, Instant::now())
         }
       },
-      |metadata| Some(metadata.modified().unwrap()),
-    );
+      Err(error) if error.kind() == io::ErrorKind::NotFound => (None, Instant::now()),
+      Err(error) => panic!("failed to get metadata of GeoLite2 database: {error}"),
+    };
 
-    let next_update_time = modified_time.map_or_else(Instant::now, |modified_time| {
-      Instant::now()
-        + (UPDATE_INTERVAL.saturating_sub(
-          SystemTime::now()
-            .duration_since(modified_time)
-            .unwrap_or(Duration::from_secs(0)),
-        ))
-    });
-
-    let reader = modified_time
-      .map(|_| maxminddb::Reader::open_readfile(&path).expect("failed to open GeoLite2 database."))
-      .mutex()
-      .arc();
+    let reader = reader.mutex().arc();
 
     Self {
       reader: reader.clone(),
@@ -84,14 +86,14 @@ impl GeoLite2 {
       let updated = async {
         log::info!("updating GeoLite2 database...");
 
-        let data = reqwest::get(GEOLITE2_URL).await?.bytes().await?.to_vec();
+        let data = reqwest::get(GEOLITE2_URL)
+          .await?
+          .error_for_status()?
+          .bytes()
+          .await?
+          .to_vec();
 
-        tokio::fs::write(&path, &data).await?;
-
-        reader
-          .lock()
-          .unwrap()
-          .replace(maxminddb::Reader::from_source(data)?);
+        install_database(&reader, &path, data).await?;
 
         log::info!("GeoLite2 database updated successfully.");
 
@@ -116,6 +118,21 @@ impl GeoLite2 {
   }
 }
 
+async fn install_database(
+  reader: &Arc<Mutex<Option<GeoLite2Reader>>>,
+  path: &Path,
+  data: Vec<u8>,
+) -> anyhow::Result<()> {
+  let new_reader = maxminddb::Reader::from_source(data.clone())?;
+  let temporary_path = path.with_extension(format!("mmdb.{}.tmp", uuid::Uuid::new_v4()));
+
+  tokio::fs::write(&temporary_path, &data).await?;
+  tokio::fs::rename(&temporary_path, path).await?;
+  reader.lock().unwrap().replace(new_reader);
+
+  Ok(())
+}
+
 fn region_codes(record: &Country<'_>) -> Option<Vec<String>> {
   let mut codes = Vec::new();
 
@@ -136,9 +153,42 @@ fn region_codes(record: &Country<'_>) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::{Arc, Mutex};
+
   use maxminddb::geoip2::{Country, country};
 
-  use super::region_codes;
+  use super::{GeoLite2, install_database, region_codes};
+  use crate::test::test_dir;
+
+  #[tokio::test]
+  async fn invalid_download_does_not_replace_existing_database() {
+    let dir = test_dir().join(format!("geolite_invalid_{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let path = dir.join("geolite2.mmdb");
+    let existing = b"existing database placeholder";
+    tokio::fs::write(&path, existing).await.unwrap();
+
+    let reader = Arc::new(Mutex::new(None));
+    install_database(&reader, &path, b"not a MaxMind database".to_vec())
+      .await
+      .unwrap_err();
+
+    assert_eq!(tokio::fs::read(path).await.unwrap(), existing);
+    assert!(reader.lock().unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn invalid_existing_database_recovers_without_panicking() {
+    let dir = test_dir().join(format!("geolite_existing_{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("geolite2.mmdb"), b"not a MaxMind database")
+      .await
+      .unwrap();
+
+    let database = GeoLite2::new(dir);
+
+    assert!(database.lookup("127.0.0.1".parse().unwrap()).is_none());
+  }
 
   #[test]
   fn region_codes_falls_back_to_registered_country() {
