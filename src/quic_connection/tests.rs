@@ -1143,12 +1143,11 @@ async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::R
       packet_delayed.load(atomic::Ordering::Acquire),
       "test transport did not delay a packet",
     );
+    let diagnostics = out_quic_connection.diagnostics();
     anyhow::ensure!(
-      out_quic_connection
-        .diagnostics()
-        .contains("quic_lost_packets=0 "),
-      "reliable reordering triggered QUIC loss: {}",
-      out_quic_connection.diagnostics(),
+      diagnostics.contains("quic_retrans_packets=0 ")
+        && diagnostics.contains("quic_stream_retrans_bytes=0 "),
+      "reliable reordering retransmitted QUIC data: {diagnostics}",
     );
 
     anyhow::Ok(())
