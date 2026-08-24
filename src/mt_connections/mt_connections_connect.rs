@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, num::NonZeroU64};
+use std::net::SocketAddr;
 
 use lits::duration;
 use tokio::{
@@ -13,7 +13,7 @@ use crate::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE, MtConnections,
     MtConnectionsMagic, MtConnectionsPacket, MtConnectionsRequestHead,
     MtConnectionsRequestHeadData, MtConnectionsResponseHead, MtConnectionsResponseHeadData,
-    configure_mt_tcp_connect_stream,
+    configure_mt_tcp_stream,
   },
   primitives::ConnectionSide,
   utils::postcard::{PostcardStreamError, postcard_read_stream},
@@ -26,17 +26,6 @@ pub async fn mt_connections_connect<TPacket>(
 where
   TPacket: MtConnectionsPacket,
 {
-  mt_connections_connect_with_tcp_max_pacing_rate(address, target_connections, None).await
-}
-
-pub async fn mt_connections_connect_with_tcp_max_pacing_rate<TPacket>(
-  address: SocketAddr,
-  target_connections: usize,
-  max_pacing_rate_bps: Option<NonZeroU64>,
-) -> Result<(MtConnections<TPacket>, oneshot::Sender<()>), MtConnectionsConnectError>
-where
-  TPacket: MtConnectionsPacket,
-{
   let mut tcp_stream = timeout(
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
     TcpStream::connect(address),
@@ -44,7 +33,7 @@ where
   .await
   .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
-  configure_mt_tcp_connect_stream(&tcp_stream, max_pacing_rate_bps)?;
+  configure_mt_tcp_stream(&tcp_stream)?;
 
   timeout(
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
@@ -83,7 +72,7 @@ where
           .await
           .map_err(|_| MtConnectionsConnectError::HandshakeTimeout)??;
 
-          configure_mt_tcp_connect_stream(&tcp_stream, max_pacing_rate_bps)?;
+          configure_mt_tcp_stream(&tcp_stream)?;
 
           timeout(
             MT_CONNECTIONS_HANDSHAKE_TIMEOUT,

@@ -156,45 +156,6 @@ async fn configures_mt_tcp_stream_options() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn configures_tcp_max_pacing_rate() -> anyhow::Result<()> {
-  use std::{mem::MaybeUninit, num::NonZeroU64, os::fd::AsRawFd};
-
-  let listener = TcpListener::bind("127.0.0.1:0").await?;
-  let address = listener.local_addr()?;
-  let connect = TcpStream::connect(address);
-  let accept = listener.accept();
-  let (client_stream, _) = tokio::try_join!(connect, accept)?;
-
-  configure_mt_tcp_connect_stream(&client_stream, NonZeroU64::new(2_000_000))?;
-
-  let mut value = MaybeUninit::<u64>::uninit();
-  let mut length = size_of::<u64>() as libc::socklen_t;
-  let result = unsafe {
-    // SAFETY: value points to writable u64 storage and length matches it.
-    libc::getsockopt(
-      client_stream.as_raw_fd(),
-      libc::SOL_SOCKET,
-      libc::SO_MAX_PACING_RATE,
-      value.as_mut_ptr().cast(),
-      &mut length,
-    )
-  };
-  if result == -1 {
-    return Err(std::io::Error::last_os_error().into());
-  }
-
-  assert_eq!(length as usize, size_of::<u64>());
-  let max_pacing_rate_bytes_per_second = unsafe {
-    // SAFETY: getsockopt succeeded and reported a complete u64 value.
-    value.assume_init()
-  };
-  assert_eq!(max_pacing_rate_bytes_per_second, 250_000);
-
-  Ok(())
-}
-
 #[tokio::test]
 #[test_log::test]
 async fn test_mt_connections() -> anyhow::Result<()> {

@@ -94,8 +94,6 @@ async fn test_hub_out() -> anyhow::Result<()> {
           hub: InHubOptions {
             address: hub_address,
             connections: 2,
-            peer_connections: 2,
-            peer_tcp_max_pacing_rate_bps: None,
           },
         },
       );
@@ -273,8 +271,6 @@ async fn test_hub_out_resolve() -> anyhow::Result<()> {
       hub: InHubOptions {
         address: hub_address,
         connections: 2,
-        peer_connections: 2,
-        peer_tcp_max_pacing_rate_bps: None,
       },
     },
   )

@@ -1,6 +1,5 @@
 use std::{
   net::SocketAddr,
-  num::NonZeroU64,
   ops::Deref,
   sync::{Arc, Mutex},
   time::Duration,
@@ -18,8 +17,7 @@ use tokio::{
 use crate::{
   mt_connections::{
     MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnections, MtConnectionsId, MtConnectionsPacket,
-    MtConnectionsSideUdpDuplex, MtConnectionsUdpPacket, UdpDuplexSlot,
-    mt_connections_connect_with_tcp_max_pacing_rate,
+    MtConnectionsSideUdpDuplex, MtConnectionsUdpPacket, UdpDuplexSlot, mt_connections_connect,
   },
   qomt::QomtStream,
   quic_connection::{
@@ -610,36 +608,16 @@ pub async fn qomt_connect(
   address: SocketAddr,
   connections: usize,
 ) -> anyhow::Result<QomtConnection> {
-  qomt_connect_with_options(
+  qomt_connect_with_udp_policy(
     quiche_config,
     udp_quiche_config,
     address,
     connections,
-    None,
     QomtUdpReconnectPolicy::default(),
   )
   .await
 }
 
-pub(crate) async fn qomt_connect_with_tcp_max_pacing_rate(
-  quiche_config: &mut quiche::Config,
-  udp_quiche_config: Option<quiche::Config>,
-  address: SocketAddr,
-  connections: usize,
-  max_pacing_rate_bps: Option<NonZeroU64>,
-) -> anyhow::Result<QomtConnection> {
-  qomt_connect_with_options(
-    quiche_config,
-    udp_quiche_config,
-    address,
-    connections,
-    max_pacing_rate_bps,
-    QomtUdpReconnectPolicy::default(),
-  )
-  .await
-}
-
-#[cfg(test)]
 pub(crate) async fn qomt_connect_with_udp_policy(
   quiche_config: &mut quiche::Config,
   udp_quiche_config: Option<quiche::Config>,
@@ -647,33 +625,10 @@ pub(crate) async fn qomt_connect_with_udp_policy(
   connections: usize,
   udp_policy: QomtUdpReconnectPolicy,
 ) -> anyhow::Result<QomtConnection> {
-  qomt_connect_with_options(
-    quiche_config,
-    udp_quiche_config,
-    address,
-    connections,
-    None,
-    udp_policy,
-  )
-  .await
-}
-
-async fn qomt_connect_with_options(
-  quiche_config: &mut quiche::Config,
-  udp_quiche_config: Option<quiche::Config>,
-  address: SocketAddr,
-  connections: usize,
-  max_pacing_rate_bps: Option<NonZeroU64>,
-  udp_policy: QomtUdpReconnectPolicy,
-) -> anyhow::Result<QomtConnection> {
   let (mut mt_connections, extend_signal_sender) =
-    mt_connections_connect_with_tcp_max_pacing_rate::<QuicBytesPacket>(
-      address,
-      connections,
-      max_pacing_rate_bps,
-    )
-    .await
-    .context("failed to create mTCP connections.")?;
+    mt_connections_connect::<QuicBytesPacket>(address, connections)
+      .await
+      .context("failed to create mTCP connections.")?;
   let mt_connections_id = mt_connections.id();
   let underlay_metrics = mt_connections.underlay_metrics();
 

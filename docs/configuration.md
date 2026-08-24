@@ -328,9 +328,7 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
   "type": "in",
   "hub": {
     "address": "203.0.113.10:1122",
-    "connections": 4,
-    "peer_connections": 1,
-    "peer_tcp_max_pacing_rate_bps": 2000000
+    "connections": 4
   },
   "inbounds": {
     "socks5": {
@@ -346,17 +344,9 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 非 fallback 路由快照。IN 自身始终保留一个私有 `DIRECT`，HUB 不需要把
 自己的 local exit 下发给 IN。
 
-IN 的 `hub.connections: 4` 表示到 HUB 的 QomT 主路径使用四条并行的
-底层 TCP connection。`hub.peer_connections` 可以单独设置 IN 到 peer OUT
-的底层 TCP 数量；省略时沿用 `hub.connections`。当 peer 路径经过共享的低速
-或突发限速链路时，可以设为 `1`，避免多条独立 TCP 拥塞控制同时冲击同一个
-瓶颈，而不降低 IN 到 HUB 的并行度。
-
-`hub.peer_tcp_max_pacing_rate_bps` 分别限制 IN 发往 peer OUT 的每条底层
-TCP socket，不影响 IN 到 HUB，也不限制 peer OUT 返回 IN 的方向。遇到已确认
-的聚合上行 policer 时，可把它设在无丢包的安全速率；`2000000` 表示
-2 Mbit/s。省略时不设应用级 pacing 上限。该选项要求 Linux；配置为 `0`
-会被拒绝。
+IN 的 `hub.connections: 4` 表示一个 QomT 主路径使用 mTCP 承载，而该
+mTCP 内含四条并行的底层 TCP connection；IN 建立 peer connection 时也使用
+这个底层 TCP 数量。
 
 `sniff` 默认为 `true`，推荐显式保留：
 
