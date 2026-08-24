@@ -2,6 +2,7 @@ use std::{
   collections::HashMap,
   future::Future,
   net::SocketAddr,
+  num::NonZeroU64,
   path::{Path, PathBuf},
   pin::Pin,
   sync::{
@@ -31,7 +32,10 @@ use crate::{
   },
   out::PeerOut,
   primitives::OutExits,
-  qomt::{QomtConnection, QomtStream, State as QuicConnectionState, qomt_connect},
+  qomt::{
+    QomtConnection, QomtStream, State as QuicConnectionState, qomt_connect,
+    qomt_connect_with_tcp_max_pacing_rate,
+  },
   quic_connection::{create_quiche_config, create_udp_quiche_config},
   route::Router,
   utils::postcard::postcard_read_stream,
@@ -102,6 +106,7 @@ pub struct InHubOptions {
   pub address: SocketAddr,
   pub connections: usize,
   pub peer_connections: usize,
+  pub peer_tcp_max_pacing_rate_bps: Option<NonZeroU64>,
 }
 
 impl In {
@@ -469,16 +474,26 @@ impl In {
 
     let node_id = in_node_arc.id;
     let connections = in_node_arc.hub_options.peer_connections.max(1);
+    let peer_tcp_max_pacing_rate_bps = in_node_arc.hub_options.peer_tcp_max_pacing_rate_bps;
     let pem_path = in_node_arc.context_dir.join(NODE_PEM_FILE_NAME);
     drop(in_node_arc);
 
     let mut quiche_config = create_quiche_config(&pem_path)?;
     let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
-    let qomt_connection = qomt_connect(
+    if let Some(rate) = peer_tcp_max_pacing_rate_bps {
+      log::info!(
+        "connecting to peer OUT {} ({}) with TCP maximum pacing rate {} bit/s",
+        key.address,
+        key.provider_id,
+        rate
+      );
+    }
+    let qomt_connection = qomt_connect_with_tcp_max_pacing_rate(
       &mut quiche_config,
       udp_quiche_config,
       key.address,
       connections,
+      peer_tcp_max_pacing_rate_bps,
     )
     .await?;
     let qomt_connection = qomt_connection.arc();
@@ -687,6 +702,7 @@ mod tests {
           address: "127.0.0.1:1".parse().unwrap(),
           connections: 1,
           peer_connections: 1,
+          peer_tcp_max_pacing_rate_bps: None,
         },
         context_dir,
       },
@@ -714,6 +730,7 @@ mod tests {
           address: "127.0.0.1:1".parse().unwrap(),
           connections: 1,
           peer_connections: 1,
+          peer_tcp_max_pacing_rate_bps: None,
         },
         context_dir,
       },
@@ -833,6 +850,7 @@ mod tests {
             address: "127.0.0.1:1".parse()?,
             connections: 1,
             peer_connections: 1,
+            peer_tcp_max_pacing_rate_bps: None,
           },
           context_dir: in_dir,
         },

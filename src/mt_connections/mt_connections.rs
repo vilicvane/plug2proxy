@@ -2,6 +2,7 @@ use std::{
   collections::HashMap,
   fmt,
   net::SocketAddr,
+  num::NonZeroU64,
   pin::Pin,
   sync::{
     Arc, Mutex,
@@ -398,6 +399,57 @@ pub(crate) fn configure_mt_tcp_stream(tcp_stream: &TcpStream) -> std::io::Result
   socket.set_tcp_user_timeout(Some(MT_CONNECTIONS_TCP_USER_TIMEOUT))?;
 
   Ok(())
+}
+
+pub(crate) fn configure_mt_tcp_connect_stream(
+  tcp_stream: &TcpStream,
+  max_pacing_rate_bps: Option<NonZeroU64>,
+) -> std::io::Result<()> {
+  configure_mt_tcp_stream(tcp_stream)?;
+
+  if let Some(max_pacing_rate_bps) = max_pacing_rate_bps {
+    set_tcp_max_pacing_rate(tcp_stream, max_pacing_rate_bps)?;
+  }
+
+  Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn set_tcp_max_pacing_rate(
+  tcp_stream: &TcpStream,
+  max_pacing_rate_bps: NonZeroU64,
+) -> std::io::Result<()> {
+  // Linux exposes SO_MAX_PACING_RATE in bytes per second. The public config is
+  // in bits per second, so round up to avoid imposing a lower rate than asked.
+  let max_pacing_rate_bytes_per_second = max_pacing_rate_bps.get().div_ceil(8);
+  let result = unsafe {
+    // SAFETY: the file descriptor belongs to a live TCP socket and the option
+    // value pointer/length describe a valid u64 for the duration of this call.
+    libc::setsockopt(
+      tcp_stream.as_raw_fd(),
+      libc::SOL_SOCKET,
+      libc::SO_MAX_PACING_RATE,
+      std::ptr::from_ref(&max_pacing_rate_bytes_per_second).cast(),
+      size_of_val(&max_pacing_rate_bytes_per_second) as libc::socklen_t,
+    )
+  };
+
+  if result == -1 {
+    return Err(std::io::Error::last_os_error());
+  }
+
+  Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_tcp_max_pacing_rate(
+  _tcp_stream: &TcpStream,
+  _max_pacing_rate_bps: NonZeroU64,
+) -> std::io::Result<()> {
+  Err(std::io::Error::new(
+    std::io::ErrorKind::Unsupported,
+    "TCP maximum pacing rate is only supported on Linux",
+  ))
 }
 
 pub struct MtConnections<TPacket>

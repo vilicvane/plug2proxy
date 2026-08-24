@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use lowkit::SerdeSocketAddress;
 use serde::Deserialize;
 
@@ -16,6 +18,7 @@ pub struct InHubConfig {
   pub address: SerdeSocketAddress,
   pub connections: Option<usize>,
   pub peer_connections: Option<usize>,
+  pub peer_tcp_max_pacing_rate_bps: Option<NonZeroU64>,
 }
 
 impl From<InHubConfig> for InHubOptions {
@@ -24,6 +27,7 @@ impl From<InHubConfig> for InHubOptions {
       address,
       connections,
       peer_connections,
+      peer_tcp_max_pacing_rate_bps,
     }: InHubConfig,
   ) -> Self {
     let connections = connections.unwrap_or(4);
@@ -32,6 +36,7 @@ impl From<InHubConfig> for InHubOptions {
       address: address.into(),
       connections,
       peer_connections: peer_connections.unwrap_or(connections),
+      peer_tcp_max_pacing_rate_bps,
     }
   }
 }
@@ -48,6 +53,7 @@ mod tests {
 
     assert_eq!(options.connections, 3);
     assert_eq!(options.peer_connections, 3);
+    assert_eq!(options.peer_tcp_max_pacing_rate_bps, None);
   }
 
   #[test]
@@ -59,5 +65,29 @@ mod tests {
 
     assert_eq!(options.connections, 4);
     assert_eq!(options.peer_connections, 1);
+  }
+
+  #[test]
+  fn peer_tcp_max_pacing_rate_can_be_configured() {
+    let config: InHubConfig = serde_json::from_str(
+      r#"{"address":"127.0.0.1:1122","peer_tcp_max_pacing_rate_bps":2000000}"#,
+    )
+    .unwrap();
+    let options = InHubOptions::from(config);
+
+    assert_eq!(
+      options.peer_tcp_max_pacing_rate_bps,
+      NonZeroU64::new(2_000_000)
+    );
+  }
+
+  #[test]
+  fn peer_tcp_max_pacing_rate_rejects_zero() {
+    assert!(
+      serde_json::from_str::<InHubConfig>(
+        r#"{"address":"127.0.0.1:1122","peer_tcp_max_pacing_rate_bps":0}"#,
+      )
+      .is_err()
+    );
   }
 }
