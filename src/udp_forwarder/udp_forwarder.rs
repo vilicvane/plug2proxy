@@ -2,12 +2,15 @@ use std::{
   collections::HashMap,
   net::{IpAddr, SocketAddr},
   pin::Pin,
-  sync::{Arc, Mutex},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+  },
   task::{Context, Poll},
+  time::{Duration, Instant},
 };
 
 use futures::{Sink, Stream};
-use lits::duration;
 use lowkit::{SelfWrapExt, tokio_join_set};
 use moka::sync::Cache;
 #[cfg(target_os = "linux")]
@@ -16,11 +19,16 @@ use tokio::{net::UdpSocket, task::JoinSet};
 
 use crate::{
   primitives::SocketDestinationHost,
+  sniff::quic_initial_client_connection_id,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource, UdpPacketStreamError},
   utils::net::SocketAddressExt,
 };
 
 const UDP_FORWARDER_QUEUE_CAPACITY: usize = 4096;
+const UDP_SOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_QUIC_FLOWS: usize = 1024 * 16;
+const UDP_SOCKET_DEBUG_REPORT_INTERVAL_MS: u64 = 30_000;
+static NEXT_UDP_SOCKET_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub struct UdpForwarder {
   packet_sink: flume::r#async::SendSink<'static, OutgoingUdpPacket>,
@@ -42,22 +50,25 @@ impl UdpForwarder {
 
     let sockets = Cache::builder()
       .max_capacity(1024 * 16)
-      .time_to_idle(duration!("15m"))
+      .time_to_idle(UDP_SOCKET_IDLE_TIMEOUT)
       .build();
 
     Self {
       packet_sink,
       packet_stream,
       _join_set: tokio_join_set!(async move {
+        let mut quic_flows = UdpQuicFlowTracker::default();
         loop {
           let Ok(packet) = packet_receiver.recv_async().await else {
             break;
           };
+          let quic_flow_id = quic_flows.identify(&packet);
 
           Self::send_outgoing_packet(
             sockets.clone(),
             packet_sender.clone(),
             interface.as_deref(),
+            quic_flow_id,
             packet,
           )
           .await
@@ -74,6 +85,7 @@ impl UdpForwarder {
     sockets: Cache<UdpSocketKey, SocketTuple>,
     packet_sender: flume::Sender<IncomingUdpPacket>,
     interface: Option<&str>,
+    quic_flow_id: Option<u64>,
     OutgoingUdpPacket {
       source,
       destination,
@@ -84,13 +96,15 @@ impl UdpForwarder {
     let socket_key = UdpSocketKey {
       source: source.clone(),
       response_destination,
+      quic_flow_id,
     };
-    let (socket, destination_address) = {
-      if let Some((socket, destination_map, _)) = sockets.get(&socket_key) {
+    let (socket, destination_address, metrics) = {
+      if let Some((socket, destination_map, _, metrics)) = sockets.get(&socket_key) {
         if let Some(destination_ip) = destination_map.lock().unwrap().get(&destination.host) {
           (
             socket.clone(),
             SocketAddr::from((*destination_ip, destination.port)),
+            metrics.clone(),
           )
         } else {
           let socket_ip_version = socket.local_addr()?.get_ip_version();
@@ -109,7 +123,7 @@ impl UdpForwarder {
             .unwrap()
             .insert(destination.host.clone(), destination_address.ip());
 
-          (socket.clone(), destination_address)
+          (socket.clone(), destination_address, metrics.clone())
         }
       } else {
         let destination_socket_address =
@@ -120,6 +134,17 @@ impl UdpForwarder {
         let socket = UdpSocket::bind(source.address.unspecified()).await?;
         bind_socket_to_interface(&socket, interface)?;
         let socket = socket.arc();
+        let metrics = UdpSocketMetrics::new(socket.local_addr()?, quic_flow_id);
+
+        log::debug!(
+          "P2P_UDP_SOCKET_DEBUG action=create generation={} source={} quic_flow_id={:?} \
+           local={} destination={} response_destination={response_destination:?}",
+          metrics.generation,
+          source.address,
+          metrics.quic_flow_id,
+          metrics.local_address,
+          destination_socket_address,
+        );
 
         let mut destination_map = HashMap::new();
 
@@ -130,17 +155,19 @@ impl UdpForwarder {
           source.clone(),
           socket.clone(),
           response_destination,
+          metrics.clone(),
         ));
 
         let socket_tuple = (
           socket.clone(),
           destination_map.mutex().arc(),
           join_set.arc(),
+          metrics.clone(),
         );
 
         sockets.insert(socket_key, socket_tuple);
 
-        (socket, destination_socket_address)
+        (socket, destination_socket_address, metrics)
       }
     };
 
@@ -148,7 +175,8 @@ impl UdpForwarder {
       "UDP outbound destination resolved: requested={destination}, actual={destination_address}, \
        response_destination={response_destination:?}"
     );
-    socket.send_to(&payload, destination_address).await?;
+    let sent = socket.send_to(&payload, destination_address).await?;
+    metrics.record_send(sent, &source, destination_address, response_destination);
 
     Ok(())
   }
@@ -158,6 +186,7 @@ impl UdpForwarder {
     source: UdpPacketSource,
     socket: Arc<UdpSocket>,
     response_destination: Option<SocketAddr>,
+    metrics: Arc<UdpSocketMetrics>,
   ) {
     let mut buffer = vec![0; u16::MAX as usize];
     let mut dropped_packets = 0_u64;
@@ -170,6 +199,7 @@ impl UdpForwarder {
       else {
         break;
       };
+      metrics.record_receive(length, &source, source_socket_address, response_destination);
 
       match packet_sender.try_send(IncomingUdpPacket {
         source: source.clone(),
@@ -192,17 +222,240 @@ impl UdpForwarder {
   }
 }
 
+#[derive(Default)]
+struct UdpQuicFlowTracker {
+  flows: HashMap<UdpQuicFlowKey, UdpQuicFlowState>,
+  received_packets: u64,
+  next_flow_id: u64,
+}
+
+impl UdpQuicFlowTracker {
+  fn identify(&mut self, packet: &OutgoingUdpPacket) -> Option<u64> {
+    self.received_packets = self.received_packets.wrapping_add(1);
+    if self.received_packets.is_multiple_of(256) {
+      self.expire();
+    }
+
+    let key = UdpQuicFlowKey {
+      source: packet.source.clone(),
+      destination_host: packet.destination.host.clone(),
+      destination_port: packet.destination.port,
+      response_destination: packet.response_destination,
+    };
+    let client_connection_id = quic_initial_client_connection_id(&packet.payload);
+    if !self.flows.contains_key(&key) && client_connection_id.is_none() {
+      return None;
+    }
+    let mut replaced_flow_id = None;
+    if client_connection_id.as_ref().is_some_and(|connection_id| {
+      self
+        .flows
+        .get(&key)
+        .is_some_and(|state| state.client_connection_id != *connection_id)
+    }) {
+      replaced_flow_id = self.flows.remove(&key).map(|state| state.flow_id);
+    }
+
+    let client_connection_id = client_connection_id.unwrap_or_else(|| {
+      self
+        .flows
+        .get(&key)
+        .expect("non-Initial packet requires an existing QUIC forwarding flow")
+        .client_connection_id
+        .clone()
+    });
+    if !self.flows.contains_key(&key) {
+      let flow_id = self.next_flow_id;
+      self.next_flow_id = self.next_flow_id.wrapping_add(1);
+      self.flows.insert(
+        key.clone(),
+        UdpQuicFlowState {
+          client_connection_id,
+          flow_id,
+          last_seen: Instant::now(),
+        },
+      );
+    }
+    let state = self
+      .flows
+      .get_mut(&key)
+      .expect("QUIC forwarding flow was inserted above");
+    state.last_seen = Instant::now();
+    if let Some(replaced_flow_id) = replaced_flow_id {
+      log::debug!(
+        "P2P_UDP_SOCKET_DEBUG action=rotate-reused-tuple source={} destination={}:{} \
+         response_destination={:?} previous_quic_flow_id={replaced_flow_id} \
+         quic_flow_id={}",
+        key.source.address,
+        key.destination_host,
+        key.destination_port,
+        key.response_destination,
+        state.flow_id,
+      );
+    }
+    Some(state.flow_id)
+  }
+
+  fn expire(&mut self) {
+    self
+      .flows
+      .retain(|_, state| state.last_seen.elapsed() < UDP_SOCKET_IDLE_TIMEOUT);
+
+    let excess = self.flows.len().saturating_sub(MAX_QUIC_FLOWS);
+    if excess > 0 {
+      let mut oldest = self
+        .flows
+        .iter()
+        .map(|(key, state)| (key.clone(), state.last_seen))
+        .collect::<Vec<_>>();
+      oldest.sort_unstable_by_key(|(_, last_seen)| *last_seen);
+      for (key, _) in oldest.into_iter().take(excess) {
+        self.flows.remove(&key);
+      }
+    }
+  }
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+struct UdpQuicFlowKey {
+  source: UdpPacketSource,
+  destination_host: SocketDestinationHost,
+  destination_port: u16,
+  response_destination: Option<SocketAddr>,
+}
+
+struct UdpQuicFlowState {
+  // The client SCID stays stable when a server Retry changes the Initial DCID,
+  // so it identifies a connection without rotating its socket mid-handshake.
+  client_connection_id: Vec<u8>,
+  flow_id: u64,
+  last_seen: Instant,
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 struct UdpSocketKey {
   source: UdpPacketSource,
   response_destination: Option<SocketAddr>,
+  quic_flow_id: Option<u64>,
 }
 
 type SocketTuple = (
   Arc<UdpSocket>,
   Arc<Mutex<HashMap<SocketDestinationHost, IpAddr>>>,
   Arc<JoinSet<()>>,
+  Arc<UdpSocketMetrics>,
 );
+
+struct UdpSocketMetrics {
+  generation: u64,
+  quic_flow_id: Option<u64>,
+  local_address: SocketAddr,
+  created_at: Instant,
+  sent_packets: AtomicU64,
+  sent_bytes: AtomicU64,
+  received_packets: AtomicU64,
+  received_bytes: AtomicU64,
+  last_receive_elapsed_ms: AtomicU64,
+  last_report_elapsed_ms: AtomicU64,
+}
+
+impl UdpSocketMetrics {
+  fn new(local_address: SocketAddr, quic_flow_id: Option<u64>) -> Arc<Self> {
+    Arc::new(Self {
+      generation: NEXT_UDP_SOCKET_GENERATION.fetch_add(1, Ordering::Relaxed),
+      quic_flow_id,
+      local_address,
+      created_at: Instant::now(),
+      sent_packets: AtomicU64::new(0),
+      sent_bytes: AtomicU64::new(0),
+      received_packets: AtomicU64::new(0),
+      received_bytes: AtomicU64::new(0),
+      last_receive_elapsed_ms: AtomicU64::new(0),
+      last_report_elapsed_ms: AtomicU64::new(0),
+    })
+  }
+
+  fn elapsed_ms(&self) -> u64 {
+    u64::try_from(self.created_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+  }
+
+  fn record_send(
+    &self,
+    length: usize,
+    source: &UdpPacketSource,
+    destination: SocketAddr,
+    response_destination: Option<SocketAddr>,
+  ) {
+    self.sent_packets.fetch_add(1, Ordering::Relaxed);
+    self.sent_bytes.fetch_add(length as u64, Ordering::Relaxed);
+
+    let elapsed_ms = self.elapsed_ms();
+    let last_report_ms = self.last_report_elapsed_ms.load(Ordering::Relaxed);
+    if elapsed_ms.saturating_sub(last_report_ms) < UDP_SOCKET_DEBUG_REPORT_INTERVAL_MS
+      || self
+        .last_report_elapsed_ms
+        .compare_exchange(
+          last_report_ms,
+          elapsed_ms,
+          Ordering::Relaxed,
+          Ordering::Relaxed,
+        )
+        .is_err()
+    {
+      return;
+    }
+
+    let received_packets = self.received_packets.load(Ordering::Relaxed);
+    let response_idle = if received_packets == 0 {
+      "never".to_owned()
+    } else {
+      elapsed_ms
+        .saturating_sub(self.last_receive_elapsed_ms.load(Ordering::Relaxed))
+        .to_string()
+    };
+    log::debug!(
+      "P2P_UDP_SOCKET_DEBUG action=progress generation={} age_ms={elapsed_ms} source={} \
+       quic_flow_id={:?} local={} destination={destination} \
+       response_destination={response_destination:?} sent_packets={} sent_bytes={} \
+       received_packets={received_packets} received_bytes={} response_idle_ms={response_idle}",
+      self.generation,
+      source.address,
+      self.quic_flow_id,
+      self.local_address,
+      self.sent_packets.load(Ordering::Relaxed),
+      self.sent_bytes.load(Ordering::Relaxed),
+      self.received_bytes.load(Ordering::Relaxed),
+    );
+  }
+
+  fn record_receive(
+    &self,
+    length: usize,
+    source: &UdpPacketSource,
+    remote: SocketAddr,
+    response_destination: Option<SocketAddr>,
+  ) {
+    let received_packets = self.received_packets.fetch_add(1, Ordering::Relaxed) + 1;
+    self
+      .received_bytes
+      .fetch_add(length as u64, Ordering::Relaxed);
+    let elapsed_ms = self.elapsed_ms();
+    self
+      .last_receive_elapsed_ms
+      .store(elapsed_ms, Ordering::Relaxed);
+    if received_packets == 1 {
+      log::debug!(
+        "P2P_UDP_SOCKET_DEBUG action=first-response generation={} age_ms={elapsed_ms} source={} \
+         quic_flow_id={:?} local={} remote={remote} \
+         response_destination={response_destination:?} bytes={length}",
+        self.generation,
+        source.address,
+        self.quic_flow_id,
+        self.local_address,
+      );
+    }
+  }
+}
 
 impl Sink<OutgoingUdpPacket> for UdpForwarder {
   type Error = UdpPacketStreamError;
@@ -525,6 +778,99 @@ mod tests {
 
     // Different sources should use different local sockets (different ports)
     assert_ne!(port_1, port_2);
+  }
+
+  #[tokio::test]
+  async fn new_quic_flow_on_reused_source_uses_new_socket() {
+    let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_address = server_socket.local_addr().unwrap();
+    let server_handle = tokio::spawn(async move {
+      let mut buffer = [0; 1500];
+      let mut source_ports = Vec::new();
+      for _ in 0..3 {
+        let (_, source) = server_socket.recv_from(&mut buffer).await.unwrap();
+        source_ports.push(source.port());
+      }
+      source_ports
+    });
+
+    let mut forwarder = UdpForwarder::new();
+    let source_address = "127.0.0.1:20003".parse().unwrap();
+    let first_initial = quic_initial(source_address, server_address, 7);
+    let second_initial = quic_initial(source_address, server_address, 8);
+    for payload in [first_initial.clone(), first_initial, second_initial] {
+      forwarder
+        .send(OutgoingUdpPacket {
+          source: create_source(source_address),
+          destination: create_destination(server_address),
+          response_destination: None,
+          payload,
+        })
+        .await
+        .unwrap();
+    }
+
+    let source_ports = server_handle.await.unwrap();
+    assert_eq!(source_ports[0], source_ports[1]);
+    assert_ne!(source_ports[0], source_ports[2]);
+  }
+
+  fn quic_initial(source: SocketAddr, destination: SocketAddr, connection_id_byte: u8) -> Vec<u8> {
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    config.verify_peer(false);
+    config.set_application_protos(&[b"h3"]).unwrap();
+    let connection_id_bytes = [connection_id_byte; 16];
+    let connection_id = quiche::ConnectionId::from_ref(&connection_id_bytes);
+    let mut connection = quiche::connect(
+      Some("socket-generation.example"),
+      &connection_id,
+      source,
+      destination,
+      &mut config,
+    )
+    .unwrap();
+    let mut packet = vec![0; 1350];
+    let (length, _) = connection.send(&mut packet).unwrap();
+    packet.truncate(length);
+    packet
+  }
+
+  #[tokio::test]
+  async fn server_cid_change_keeps_quic_socket() -> anyhow::Result<()> {
+    let server_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let server_address = server_socket.local_addr()?;
+    let source_address = "127.0.0.1:20004".parse()?;
+    for retry in [false, true] {
+      let mut forwarder = UdpForwarder::new();
+      let [first, next] = crate::test::quic_initials_with_server_cid(
+        source_address,
+        server_address,
+        "socket.example",
+        retry,
+      )
+      .await?;
+      let mut observed_source = None;
+      // Include a retransmitted Initial and subsequent short-header traffic.
+      for payload in [first.clone(), first, next, vec![0x40; 32]] {
+        forwarder
+          .send(OutgoingUdpPacket {
+            source: create_source(source_address),
+            destination: create_destination(server_address),
+            response_destination: None,
+            payload: payload.clone(),
+          })
+          .await?;
+        let mut buffer = [0; 1500];
+        let (length, source) = tokio::time::timeout(
+          std::time::Duration::from_secs(2),
+          server_socket.recv_from(&mut buffer),
+        )
+        .await??;
+        assert_eq!(&buffer[..length], payload);
+        assert_eq!(*observed_source.get_or_insert(source), source);
+      }
+    }
+    Ok(())
   }
 
   #[tokio::test]

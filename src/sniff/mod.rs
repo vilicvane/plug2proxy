@@ -660,6 +660,31 @@ impl QuicSniffer {
   }
 }
 
+pub(crate) fn quic_initial_dcid(payload: &[u8]) -> Option<Vec<u8>> {
+  if !QuicSniffer::looks_like_initial(payload) {
+    return None;
+  }
+  let mut packet = payload.to_vec();
+  let header = quiche::Header::from_slice(&mut packet, quiche::MAX_CONN_ID_LEN).ok()?;
+  (header.ty == quiche::Type::Initial).then(|| header.dcid.to_vec())
+}
+
+pub(crate) fn quic_initial_client_connection_id(payload: &[u8]) -> Option<Vec<u8>> {
+  if !QuicSniffer::looks_like_initial(payload) {
+    return None;
+  }
+  let mut packet = payload.to_vec();
+  let header = quiche::Header::from_slice(&mut packet, quiche::MAX_CONN_ID_LEN).ok()?;
+  if header.ty != quiche::Type::Initial {
+    return None;
+  }
+
+  // An empty SCID is valid (e.g. Chrome). Never substitute the DCID: the
+  // server selects a new DCID during Initial/Retry, within the same handshake.
+  // With no client CID, conservatively retain the socket for the UDP tuple.
+  Some(header.scid.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;

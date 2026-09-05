@@ -10,7 +10,7 @@ use futures::{Sink, Stream};
 
 use crate::{
   primitives::{BidiStream, SniffedProtocol, SocketDestination, SocketDestinationHost},
-  sniff::{QuicSniffer, SniffOutcome, TcpSniffOptions, sniff_tcp_stream},
+  sniff::{QuicSniffer, SniffOutcome, TcpSniffOptions, quic_initial_dcid, sniff_tcp_stream},
   udp_forwarder::{
     InboundUdpPacketStream, IncomingUdpPacket, OutgoingUdpPacket, UdpPacketStreamError,
   },
@@ -81,15 +81,15 @@ impl UdpDestinationSniffer {
     if !self.flows.contains_key(&key) && initial_dcid.is_none() {
       return;
     }
-    if initial_dcid.as_ref().is_some_and(|dcid| {
-      self
-        .flows
-        .get(&key)
-        .is_some_and(|state| state.initial_dcid != *dcid)
-    }) {
-      // UDP tuples can be reused. A different Initial DCID identifies a new
-      // QUIC connection and must not inherit the previous connection's route.
-      self.flows.remove(&key);
+    if let Some(dcid) = &initial_dcid
+      && let Some(state) = self.flows.get_mut(&key)
+      && state.initial_dcid != *dcid
+    {
+      // A server-selected DCID or Retry also changes this value. Probe for a
+      // new ClientHello, but retain the route until its SNI can be decoded.
+      // The probe survives across datagrams for fragmented ClientHellos.
+      state.initial_dcid = dcid.clone();
+      state.sniffer = Some(QuicSniffer::new());
     }
 
     let initial_dcid = initial_dcid.unwrap_or_else(|| {
@@ -109,29 +109,27 @@ impl UdpDestinationSniffer {
     });
     state.last_seen = Instant::now();
 
-    if state.domain.is_none() {
-      if let Some(sniffer) = &mut state.sniffer {
-        match sniffer.sniff_datagram(payload, source, destination_address) {
-          SniffOutcome::Domain(sniffed) => {
-            log::debug!(
-              "sniffed {:?} domain {} while preserving UDP destination {}",
-              sniffed.protocol,
-              sniffed.domain,
-              destination
-            );
-            state.domain = Some(sniffed.domain);
-            state.protocol = Some(sniffed.protocol);
-            state.sniffer = None;
-          }
-          SniffOutcome::Protocol(protocol) => {
-            state.protocol = Some(protocol);
-            state.sniffer = None;
-          }
-          SniffOutcome::NoDomain => {
-            state.sniffer = None;
-          }
-          SniffOutcome::NeedMoreData => {}
+    if let Some(sniffer) = &mut state.sniffer {
+      match sniffer.sniff_datagram(payload, source, destination_address) {
+        SniffOutcome::Domain(sniffed) => {
+          log::debug!(
+            "sniffed {:?} domain {} while preserving UDP destination {}",
+            sniffed.protocol,
+            sniffed.domain,
+            destination
+          );
+          state.domain = Some(sniffed.domain);
+          state.protocol = Some(sniffed.protocol);
+          state.sniffer = None;
         }
+        SniffOutcome::Protocol(protocol) => {
+          state.protocol = Some(protocol);
+          state.sniffer = None;
+        }
+        SniffOutcome::NoDomain => {
+          state.sniffer = None;
+        }
+        SniffOutcome::NeedMoreData => {}
       }
     }
 
@@ -157,15 +155,6 @@ impl UdpDestinationSniffer {
       }
     }
   }
-}
-
-fn quic_initial_dcid(payload: &[u8]) -> Option<Vec<u8>> {
-  if !QuicSniffer::looks_like_initial(payload) {
-    return None;
-  }
-  let mut packet = payload.to_vec();
-  let header = quiche::Header::from_slice(&mut packet, quiche::MAX_CONN_ID_LEN).ok()?;
-  (header.ty == quiche::Type::Initial).then(|| header.dcid.to_vec())
 }
 
 pub struct SniffingUdpPacketStream {
@@ -318,6 +307,37 @@ mod tests {
       Some("stable.example")
     );
     assert_eq!(retransmission.routing_protocol, Some(SniffedProtocol::Quic));
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn server_cid_change_keeps_quic_routing_metadata() -> anyhow::Result<()> {
+    let source = "192.0.2.10:54321".parse()?;
+    let target = "203.0.113.7:443".parse()?;
+    for retry in [false, true] {
+      let mut sniffer = UdpDestinationSniffer::default();
+      let packets =
+        crate::test::quic_initials_with_server_cid(source, target, "stable.example", retry).await?;
+      for packet in packets {
+        let mut destination = destination(target);
+        sniffer.sniff(&mut destination, &packet, source);
+        assert_eq!(
+          destination.routing_domain.as_deref(),
+          Some("stable.example")
+        );
+        assert_eq!(destination.routing_protocol, Some(SniffedProtocol::Quic));
+      }
+      // A genuinely new ClientHello on the same tuple must still refresh SNI,
+      // even when both connections have an empty SCID.
+      let [new_initial, _] =
+        crate::test::quic_initials_with_server_cid(source, target, "new.example", retry).await?;
+      let mut new_destination = destination(target);
+      sniffer.sniff(&mut new_destination, &new_initial, source);
+      assert_eq!(
+        new_destination.routing_domain.as_deref(),
+        Some("new.example")
+      );
+    }
     Ok(())
   }
 }
