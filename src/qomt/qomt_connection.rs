@@ -37,6 +37,7 @@ pub const MAX_PENDING_QOMT_HANDSHAKES: usize = 64;
 const QOMT_UDP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 const QOMT_UDP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const QOMT_MAIN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 const QOMT_UDP_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const QOMT_UDP_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 const RTT_INFLATION_MINIMUM: Duration = Duration::from_millis(10);
@@ -157,12 +158,13 @@ pub enum QomtUdpState {
 impl QomtConnection {
   pub fn new(inner: QuicConnection) -> Self {
     let datagram_router = QomtDatagramRouter::new();
+    let join_set = main_keepalive_tasks(&inner, QOMT_MAIN_KEEPALIVE_INTERVAL);
 
     Self {
       inner,
       udp: Arc::new(Mutex::new(QomtUdpConnection::Disabled)),
       datagram_router,
-      _join_set: JoinSet::new(),
+      _join_set: join_set,
     }
   }
 
@@ -177,7 +179,7 @@ impl QomtConnection {
   {
     let udp = Arc::new(Mutex::new(QomtUdpConnection::Connecting));
     let datagram_router = QomtDatagramRouter::new();
-    let mut join_set = JoinSet::new();
+    let mut join_set = main_keepalive_tasks(&inner, QOMT_MAIN_KEEPALIVE_INTERVAL);
     let main_closed = inner.closed_future();
     let supervisor_udp = udp.clone();
     let supervisor_datagram_router = datagram_router.clone();
@@ -713,6 +715,101 @@ pub async fn qomt_accept(
   .context("timed out establishing QUIC connection")??;
 
   Ok(qomt_connection)
+}
+
+fn main_keepalive_tasks(inner: &QuicConnection, period: Duration) -> JoinSet<()> {
+  let mut tasks = JoinSet::new();
+  tasks.spawn(inner.keepalive_future(period));
+  tasks
+}
+
+#[cfg(test)]
+mod main_keepalive_tests {
+  use super::*;
+  use crate::quic_connection::tests::get_quiche_configs;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  async fn idle_pair() -> anyhow::Result<(QuicConnection, QuicConnection, Arc<AtomicUsize>)> {
+    let [mut server_config, mut client_config] = get_quiche_configs().await?;
+    server_config.set_max_idle_timeout(400);
+    client_config.set_max_idle_timeout(400);
+    let (to_server, from_client) = flume::bounded::<QuicBytesPacket>(64);
+    let (to_client, from_server) = flume::bounded::<QuicBytesPacket>(64);
+    let packets = Arc::new(AtomicUsize::new(0));
+    let count = packets.clone();
+    let server_stream = from_client.into_stream().inspect(move |_| {
+      count.fetch_add(1, Ordering::Relaxed);
+    });
+    let id = QuicConnection::generate_connection_id();
+    let client = QuicConnection::connect_with_sink_and_stream(
+      &id,
+      &mut client_config,
+      to_server.into_sink(),
+      from_server.into_stream(),
+    );
+    let server = QuicConnection::accept_with_sink_and_stream(
+      client.id(),
+      &mut server_config,
+      to_client.into_sink(),
+      server_stream,
+    );
+    timeout(Duration::from_secs(3), async {
+      tokio::try_join!(client.established(), server.established())
+    })
+    .await??;
+    Ok((server, client, packets))
+  }
+
+  #[tokio::test]
+  async fn main_keepalive_control_expires_without_ping() -> anyhow::Result<()> {
+    let (server, client, _) = idle_pair().await?;
+    timeout(Duration::from_secs(3), async {
+      tokio::join!(server.wait_closed(), client.wait_closed());
+    })
+    .await?;
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn main_keepalive_preserves_idle_connection_and_stops_on_owner_drop() -> anyhow::Result<()>
+  {
+    let (server, client, packets) = idle_pair().await?;
+    let mut owner = QomtConnection::new(client);
+    owner._join_set.abort_all();
+    owner._join_set = main_keepalive_tasks(&owner.inner, Duration::from_millis(50));
+    let before = packets.load(Ordering::Relaxed);
+    sleep(Duration::from_millis(1300)).await;
+    assert_eq!(server.state(), State::Established);
+    assert_eq!(owner.state(), State::Established);
+    let sent = packets.load(Ordering::Relaxed) - before;
+    assert!(
+      (10..=60).contains(&sent),
+      "bounded keepalive packet count: {sent}"
+    );
+    let mut outgoing = owner.open_stream();
+    outgoing.write_all(b"after idle").await?;
+    outgoing.shutdown().await?;
+    let mut incoming = timeout(Duration::from_secs(2), server.accept_stream())
+      .await??
+      .unwrap();
+    let mut data = Vec::new();
+    timeout(Duration::from_secs(2), incoming.read_to_end(&mut data)).await??;
+    assert_eq!(data, b"after idle");
+    drop(incoming);
+    drop(outgoing);
+    let QomtConnection {
+      inner: client,
+      _join_set: tasks,
+      ..
+    } = owner;
+    drop(tasks);
+    // Raw handles remain alive. Stopping the owner's timer must restore expiry.
+    timeout(Duration::from_secs(3), async {
+      tokio::join!(server.wait_closed(), client.wait_closed());
+    })
+    .await?;
+    Ok(())
+  }
 }
 
 #[cfg(test)]

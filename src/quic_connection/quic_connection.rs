@@ -1492,6 +1492,51 @@ impl QuicConnection {
     Ok(())
   }
 
+  /// An owner-scoped keepalive without retaining the connection's task owner.
+  /// Main QomT needs its own PINGs: UDP bypass activity does not refresh its
+  /// independent QUIC idle timer. This does not change timeout/reset policy.
+  pub(crate) fn keepalive_future(
+    &self,
+    period: Duration,
+  ) -> impl Future<Output = ()> + Send + 'static {
+    let connection = self.connection.clone();
+    let signals = self.connection_signals.clone();
+    let state = self.state_updater.clone();
+    let closed = self.closed_future();
+    let id = self.diagnostic_id();
+    async move {
+      let mut ticks = interval_at(TokioInstant::now() + period, period);
+      ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+      tokio::pin!(closed);
+      log::debug!(
+        "QOMT main keepalive enabled: cid={id} period_ms={}",
+        period.as_millis()
+      );
+      loop {
+        tokio::select! {
+          _ = &mut closed => break,
+          _ = ticks.tick() => {
+            if state.state() != State::Established {
+              continue;
+            }
+            if signals.transport_closed() || signals.driver_failed() {
+              break;
+            }
+            match connection.lock().unwrap().send_ack_eliciting() {
+              Ok(()) => {
+                signals.connection_send.notify_one();
+                log::trace!("QOMT main keepalive scheduled: cid={id}");
+              }
+              Err(error) => {
+                log::trace!("QOMT main keepalive not scheduled: cid={id} error={error}");
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   /// Wait until quiche has fully classified the connection as closed.
   pub async fn wait_closed(&self) {
     self.state_updater.wait(State::Closed).await;
