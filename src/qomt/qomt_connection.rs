@@ -76,6 +76,23 @@ impl MtConnectionsUdpPacket for QuicBytesPacket {
 }
 
 impl MtConnectionsPacket for QuicBytesPacket {
+  fn bind_reliable_transport(&self, transport: quiche::ReliableTransport) -> bool {
+    if let Some(delivery) = &self.delivery {
+      assert!(delivery.bind(transport), "QUIC datagram assigned twice");
+      true
+    } else {
+      false
+    }
+  }
+
+  fn set_reliable_recv(&mut self, recv: quiche::ReliableRecv) {
+    self.recv_order = Some(recv);
+  }
+
+  async fn write_probe(stream: &mut (dyn AsyncWrite + Unpin + Send)) -> Result<(), std::io::Error> {
+    stream.write_all(&0u32.to_be_bytes()).await
+  }
+
   fn len(&self) -> usize {
     self.deref().len()
   }
@@ -638,6 +655,7 @@ pub(crate) async fn qomt_connect_with_udp_policy(
 
   mt_connections.send(connection_id.to_vec().into()).await?;
 
+  quiche_config.set_reliable_transport(cfg!(target_os = "linux"));
   let mut inner = QuicConnection::connect(&connection_id, quiche_config, mt_connections);
   inner.attach_reliable_underlay_metrics(underlay_metrics);
 
@@ -692,6 +710,7 @@ pub async fn qomt_accept(
   let udp_duplex_slot = mt_connections.udp_duplex_slot();
   let underlay_metrics = mt_connections.underlay_metrics();
 
+  quiche_config.set_reliable_transport(cfg!(target_os = "linux"));
   let mut inner = QuicConnection::accept(&connection_id, quiche_config, mt_connections);
   inner.attach_reliable_underlay_metrics(underlay_metrics);
 

@@ -32,81 +32,104 @@ static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
   random_data
 });
 
-#[test]
-fn tcp_info_loss_floor_tracks_current_ack_stall() {
-  let metrics = MtConnectionsUnderlayMetrics::default();
-  let path_id = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
-  let now = Instant::now();
-  let info = MtTcpInfo {
+fn tcp_info(bytes_acked: u64) -> MtTcpInfo {
+  MtTcpInfo {
     rtt: Duration::from_millis(100),
     rttvar: Duration::from_millis(20),
     rto: Duration::from_millis(250),
-    unacked: 1,
-    retrans: 1,
-    total_retrans: 3,
-    last_ack_recv: Duration::from_millis(300),
-  };
-
-  metrics.update_path(path_id, info, now - Duration::from_millis(300));
-  metrics.update_path(path_id, info, now);
-
-  let snapshot = metrics.snapshot();
-  assert_eq!(snapshot.paths, 1);
-  assert_eq!(snapshot.sampled_paths, 1);
-  assert_eq!(snapshot.loss_delay_floor, Duration::from_millis(550));
-  assert_eq!(snapshot.max_rtt, Duration::from_millis(100));
-  assert_eq!(snapshot.max_rttvar, Duration::from_millis(20));
-  assert_eq!(snapshot.max_rto, Duration::from_millis(250));
-  assert_eq!(snapshot.max_ack_stall, Duration::from_millis(300));
-  assert_eq!(snapshot.quorum_ack_stall, Duration::from_millis(300));
-  assert_eq!(snapshot.total_unacked, 1);
-  assert_eq!(snapshot.retransmitting_paths, 1);
-  assert_eq!(snapshot.total_retrans, 3);
-
-  metrics.remove_path(path_id);
-  assert_eq!(metrics.snapshot().paths, 0);
+    unacked: 0,
+    retrans: 0,
+    total_retrans: 0,
+    bytes_acked,
+  }
 }
 
 #[test]
-fn tcp_info_loss_floor_requires_a_path_quorum() {
+fn tcp_ack_progress_pauses_and_resumes_only_its_own_path() {
   let metrics = MtConnectionsUnderlayMetrics::default();
+  let path = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+  let other = metrics.register_path(None, "127.0.0.1:1123".parse().unwrap());
   let now = Instant::now();
-  let mut path_ids = Vec::new();
+  metrics.update_path(path, tcp_info(1), now);
+  metrics.update_path(other, tcp_info(1), now);
+  let mut packet: QuicBytesPacket = vec![1].into();
+  let delivery = quiche::ReliablePacket::default();
+  packet.delivery = Some(delivery.clone());
+  assert!(metrics.bind_packet(path, &packet));
+  assert!(!delivery.is_lost());
 
-  for stall in [
-    Duration::from_millis(900),
-    Duration::from_millis(400),
-    Duration::from_millis(20),
-    Duration::ZERO,
-  ] {
-    let path_id = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
-    let info = MtTcpInfo {
-      rtt: Duration::from_millis(100),
-      rttvar: Duration::from_millis(20),
-      rto: Duration::from_millis(250),
-      unacked: u32::from(!stall.is_zero()),
-      retrans: 0,
-      total_retrans: 0,
-      last_ack_recv: stall,
-    };
-    metrics.update_path(path_id, info, now - stall);
-    metrics.update_path(path_id, info, now);
-    path_ids.push(path_id);
+  // Reverse traffic, duplicate ACKs, an idle socket, and a growing RTO do not
+  // acknowledge any new bytes and must not extend this generation's lifetime.
+  let later = now + Duration::from_millis(1100);
+  let mut unchanged = tcp_info(1);
+  unchanged.rto = Duration::from_secs(30);
+  metrics.update_path(path, unchanged, later);
+  metrics.update_path(other, tcp_info(10), later);
+  assert_eq!(metrics.snapshot().active_paths, 1);
+  assert!(delivery.is_lost());
+
+  // An ACK of new bytes re-enables assignment but never revives old packets.
+  metrics.update_path(path, tcp_info(5), later + Duration::from_millis(50));
+  assert_eq!(metrics.snapshot().active_paths, 2);
+  assert!(delivery.is_lost());
+  let resumed = quiche::ReliablePacket::default();
+  packet.delivery = Some(resumed.clone());
+  assert!(metrics.bind_packet(path, &packet));
+  assert!(!resumed.is_lost());
+  metrics.remove_path(path);
+  assert!(resumed.is_lost());
+  assert_eq!(metrics.snapshot().active_paths, 1);
+}
+
+#[test]
+fn tcp_ack_updates_extend_the_activity_window() {
+  let metrics = MtConnectionsUnderlayMetrics::default();
+  let path = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+  let now = Instant::now();
+  metrics.update_path(path, tcp_info(1), now);
+  for step in 1..=20 {
+    metrics.update_path(
+      path,
+      tcp_info(step + 1),
+      now + Duration::from_millis(step * 900),
+    );
+    assert_eq!(metrics.snapshot().active_paths, 1);
   }
+  metrics.update_path(path, tcp_info(21), now + Duration::from_millis(19_100));
+  assert_eq!(metrics.snapshot().active_paths, 0);
+  let mut packet: QuicBytesPacket = vec![1].into();
+  let delivery = quiche::ReliablePacket::default();
+  packet.delivery = Some(delivery.clone());
+  // A packet claimed in the pause race is recovered, not written to this TCP.
+  assert!(!metrics.bind_packet(path, &packet));
+  assert!(delivery.is_lost());
+}
 
-  let snapshot = metrics.snapshot();
-  assert_eq!(snapshot.sampled_paths, 4);
-  assert_eq!(snapshot.loss_delay_floor, Duration::from_millis(650));
-  assert_eq!(snapshot.max_ack_stall, Duration::from_millis(900));
-  assert_eq!(snapshot.quorum_ack_stall, Duration::from_millis(400));
-
-  metrics.remove_path(path_ids[1]);
-  metrics.remove_path(path_ids[2]);
-  metrics.remove_path(path_ids[3]);
-  let snapshot = metrics.snapshot();
-  assert_eq!(snapshot.sampled_paths, 1);
-  assert_eq!(snapshot.loss_delay_floor, Duration::from_millis(1150));
-  assert_eq!(snapshot.quorum_ack_stall, Duration::from_millis(900));
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn idle_tcp_probes_preserve_activity_without_delivering_quic_packets() -> anyhow::Result<()> {
+  timeout(Duration::from_secs(8), async {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let (client, (server, _)) = tokio::try_join!(TcpStream::connect(address), listener.accept())?;
+    let id = MtConnectionsId::new();
+    let (mut left, _left_sender, _) =
+      MtConnections::<QuicBytesPacket>::new(client, crate::primitives::ConnectionSide::Client, id);
+    let (mut right, _right_sender, _) =
+      MtConnections::<QuicBytesPacket>::new(server, crate::primitives::ConnectionSide::Server, id);
+    sleep(Duration::from_millis(2300)).await;
+    assert_eq!(left.underlay_metrics().snapshot().active_paths, 1);
+    assert_eq!(right.underlay_metrics().snapshot().active_paths, 1);
+    assert!(
+      timeout(Duration::from_millis(100), left.next())
+        .await
+        .is_err()
+    );
+    left.send(vec![1, 2, 3].into()).await?;
+    assert_eq!(right.next().await.unwrap().as_slice(), &[1, 2, 3]);
+    anyhow::Ok(())
+  })
+  .await?
 }
 
 #[tokio::test]

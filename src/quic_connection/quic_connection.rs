@@ -36,19 +36,6 @@ const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 const STREAM_PIPE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const UNDERLAY_LOSS_DELAY_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
-const UNDERLAY_LOSS_DELAY_LOG_INTERVAL: Duration = Duration::from_secs(5);
-const UNDERLAY_LOSS_DELAY_QUANTUM: Duration = Duration::from_millis(10);
-const UNDERLAY_LOSS_DELAY_LOG_ACK_STALL: Duration = Duration::from_millis(250);
-// Packets on the main QomT connection are distributed across independent,
-// reliable TCP streams. A path with older queued bytes can be overtaken for
-// seconds even while every TCP socket reports a healthy RTT and no
-// retransmissions, so TCP_INFO cannot measure the resulting receive-side
-// merge delay. Keep time-threshold loss detection beyond the largest
-// reordering delay observed in production. PTO remains enabled, and a packet
-// lost when a TCP path closes is still recovered after this bounded delay.
-const RELIABLE_MULTIPATH_REORDER_DELAY_FLOOR: Duration = Duration::from_secs(5);
-
 // Upper bound for how long the send loop may park after quiche reports
 // Done. quiche's own timer can legitimately be far in the future (the
 // one-hour idle timeout) or unset, so a missed wakeup would otherwise
@@ -122,7 +109,6 @@ struct ConnectionSignals {
   underlying_send_pending: AtomicBool,
   last_underlying_send_progress_millis: AtomicU64,
   last_underlying_recv_progress_millis: AtomicU64,
-  underlay_loss_delay_floor_micros: AtomicU64,
   state_updater: Arc<StateUpdater>,
 }
 
@@ -137,7 +123,6 @@ impl ConnectionSignals {
       underlying_send_pending: AtomicBool::new(false),
       last_underlying_send_progress_millis: AtomicU64::new(0),
       last_underlying_recv_progress_millis: AtomicU64::new(0),
-      underlay_loss_delay_floor_micros: AtomicU64::new(0),
       state_updater,
     }
   }
@@ -467,7 +452,6 @@ fn format_connection_diagnostics(
      streams={active_streams} uncreated_streams={uncreated_streams} \
      externally_dropped_streams={externally_dropped_streams} \
      underlying_send_pending={} underlying_send_idle_ms={} underlying_recv_idle_ms={} \
-     underlay_loss_floor_ms={} \
      quic_sent_packets={} quic_recv_packets={} quic_sent_bytes={} quic_recv_bytes={} \
      quic_acked_bytes={} quic_lost_packets={} quic_spurious_lost_packets={} \
      quic_lost_bytes={} quic_retrans_packets={} quic_stream_retrans_bytes={} \
@@ -481,10 +465,6 @@ fn format_connection_diagnostics(
       .load(atomic::Ordering::Acquire),
     connection_age_millis.saturating_sub(last_send_progress_millis),
     connection_age_millis.saturating_sub(last_recv_progress_millis),
-    signals
-      .underlay_loss_delay_floor_micros
-      .load(atomic::Ordering::Acquire)
-      / 1000,
     stats.sent,
     stats.recv,
     stats.sent_bytes,
@@ -531,68 +511,16 @@ impl QuicConnection {
   ) {
     let connection = self.connection.clone();
     let connection_signals = self.connection_signals.clone();
-    let diagnostic_id = self.diagnostic_id();
-    let side = self.side;
-
+    let state_updater = self.state_updater.clone();
     self._join_set.spawn(async move {
-      let mut interval = interval_at(TokioInstant::now(), UNDERLAY_LOSS_DELAY_UPDATE_INTERVAL);
-      interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-      let quantum_micros = UNDERLAY_LOSS_DELAY_QUANTUM.as_micros() as u64;
-      let mut applied_floor = Duration::ZERO;
-      let mut last_log = Instant::now()
-        .checked_sub(UNDERLAY_LOSS_DELAY_LOG_INTERVAL)
-        .unwrap_or_else(Instant::now);
-
       loop {
-        interval.tick().await;
-        let snapshot = metrics.snapshot();
-        let loss_delay_floor = if snapshot.paths > 1 {
-          snapshot
-            .loss_delay_floor
-            .max(RELIABLE_MULTIPATH_REORDER_DELAY_FLOOR)
-        } else {
-          snapshot.loss_delay_floor
-        };
-        let floor_micros = loss_delay_floor.as_micros().min(u64::MAX as u128) as u64;
-        let quantized_micros = floor_micros.saturating_add(quantum_micros.saturating_sub(1))
-          / quantum_micros
-          * quantum_micros;
-        let floor = Duration::from_micros(quantized_micros);
-
-        let (quic_rtt, floor_changed) = {
+        metrics.loss_notify.notified().await;
+        {
           let mut connection = connection.lock().unwrap();
-          let floor_changed = floor != applied_floor;
-          if floor_changed {
-            connection.set_loss_detection_delay_floor(floor);
-            applied_floor = floor;
-          }
-          (
-            connection
-              .path_stats()
-              .find(|path| path.active)
-              .map(|path| path.rtt),
-            floor_changed,
-          )
-        };
-
-        connection_signals
-          .underlay_loss_delay_floor_micros
-          .store(quantized_micros, atomic::Ordering::Release);
-
-        if floor_changed {
-          connection_signals.connection_send.notify_one();
+          connection.on_reliable_transport_update();
+          state_updater.update(&connection);
         }
-
-        let now_guard_active = snapshot.quorum_ack_stall >= UNDERLAY_LOSS_DELAY_LOG_ACK_STALL
-          && quic_rtt.is_some_and(|rtt| floor > rtt.saturating_mul(2));
-        if now_guard_active && last_log.elapsed() >= UNDERLAY_LOSS_DELAY_LOG_INTERVAL {
-          log::info!(
-            "QomT TCP loss guard active: cid={diagnostic_id} side={side} \
-             quic_rtt_ms={} tcp_info=[{snapshot}]",
-            quic_rtt.unwrap_or_default().as_millis(),
-          );
-          last_log = Instant::now();
-        }
+        connection_signals.connection_send.notify_one();
       }
     });
   }
@@ -1093,7 +1021,9 @@ impl QuicConnection {
               let send_result = {
                 let mut connection = connection.lock().unwrap();
 
-                let result = connection.send(&mut buffer);
+                let result = connection
+                  .send(&mut buffer)
+                  .map(|(length, info)| (length, info, connection.take_reliable_packet()));
 
                 state_updater.update(&connection);
 
@@ -1101,7 +1031,7 @@ impl QuicConnection {
               };
 
               match send_result {
-                Ok((length, send_info)) => {
+                Ok((length, send_info, delivery)) => {
                   packet_count += 1;
                   byte_count += length;
 
@@ -1116,8 +1046,10 @@ impl QuicConnection {
                     .underlying_send_pending
                     .store(true, atomic::Ordering::Release);
 
+                  let mut packet: QuicBytesPacket = buffer[..length].to_vec().into();
+                  packet.delivery = delivery;
                   let send_result = tokio::select! {
-                    result = underlying_sink.send(buffer[..length].to_vec().into()) => Some(result),
+                    result = underlying_sink.send(packet) => Some(result),
                     _ = state_updater.wait(State::Closed) => None,
                   };
 
@@ -1226,7 +1158,12 @@ impl QuicConnection {
 
                 let mut connection = connection.lock().unwrap();
 
-                let result = connection.recv(&mut packet, receive_info);
+                let result = match packet.recv_order.take() {
+                  Some(order) if cfg!(target_os = "linux") => {
+                    connection.recv_on_reliable_transport(&mut packet, receive_info, &order)
+                  }
+                  _ => connection.recv(&mut packet, receive_info),
+                };
 
                 state_updater.update(&connection);
                 drain_received_datagrams(&mut connection, &datagram_sender, side);

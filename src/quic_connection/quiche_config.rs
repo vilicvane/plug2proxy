@@ -80,15 +80,6 @@ pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche
   // 由 QUIC 层维护；发送节奏仍交由底层内核 TCP BBR 控制（见下方
   // enable_pacing(false)），BBRv2 的 pacing rate 只参与 cwnd/发送量计算。
   config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Bbr2Gcongestion);
-  // QUIC packets are striped across multiple reliable TCP connections. A
-  // temporarily slower TCP path can therefore be overtaken by many later
-  // packets without any packet actually being lost. In our quiche fork this
-  // mode adapts BBRv2 (gcongestion) loss detection to that reordering: the
-  // first spurious loss disables packet-gap detection, and subsequent
-  // spurious losses double the time threshold up to 2x RTT, so truly
-  // stalled/failed paths are still caught by the time threshold plus PTO
-  // recovery.
-  config.set_enable_relaxed_loss_threshold(true);
   // QomT is carried by TCP, whose kernel congestion control already paces
   // writes. QUIC pacing here would throttle the same bytes a second time and
   // prevent the main QomT connection from filling mTCP's parallel underlying

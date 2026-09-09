@@ -21,7 +21,7 @@ use socket2::{SockRef, TcpKeepalive};
 use tokio::{
   io::{AsyncRead, AsyncWrite},
   net::TcpStream,
-  sync::{Notify, mpsc},
+  sync::{Notify, mpsc, watch},
   task::JoinSet,
   time::{Instant as TokioInstant, MissedTickBehavior, interval_at, timeout},
 };
@@ -45,7 +45,11 @@ pub const MT_CONNECTIONS_TCP_NOTSENT_LOWAT: u32 = 1;
 const MT_CONNECTIONS_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MT_CONNECTIONS_TCP_INFO_INTERVAL: Duration = Duration::from_millis(50);
 const MT_CONNECTIONS_TCP_INFO_STALE_AFTER: Duration = Duration::from_millis(250);
-const MT_CONNECTIONS_LOSS_DELAY_FLOOR_MAX: Duration = Duration::from_secs(5);
+// Allow delayed ACKs and a TCP retransmission before suspending a path. The
+// window is refreshed only by new acknowledged bytes, never by an increasing
+// retransmission timeout or duplicate ACKs.
+const MT_CONNECTIONS_ACK_ACTIVITY_MIN: Duration = Duration::from_secs(1);
+const MT_CONNECTIONS_ACK_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MtTcpInfo {
@@ -55,21 +59,23 @@ pub(crate) struct MtTcpInfo {
   pub(crate) unacked: u32,
   pub(crate) retrans: u32,
   pub(crate) total_retrans: u32,
-  pub(crate) last_ack_recv: Duration,
+  pub(crate) bytes_acked: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct MtTcpPathSample {
   info: MtTcpInfo,
   sampled_at: Instant,
-  ack_stall: Duration,
 }
 
 #[derive(Debug)]
 struct MtTcpPathState {
   local_address: Option<SocketAddr>,
   peer_address: SocketAddr,
-  outstanding_since: Option<Instant>,
+  last_ack_progress: Instant,
+  activity_window: Duration,
+  transport: quiche::ReliableTransport,
+  active: watch::Sender<bool>,
   sample: Option<MtTcpPathSample>,
 }
 
@@ -77,12 +83,11 @@ struct MtTcpPathState {
 pub(crate) struct MtConnectionsUnderlaySnapshot {
   pub paths: usize,
   pub sampled_paths: usize,
-  pub loss_delay_floor: Duration,
+  pub active_paths: usize,
   pub max_rtt: Duration,
   pub max_rttvar: Duration,
   pub max_rto: Duration,
   pub max_ack_stall: Duration,
-  pub quorum_ack_stall: Duration,
   pub total_unacked: u64,
   pub retransmitting_paths: usize,
   pub total_retrans: u64,
@@ -92,18 +97,17 @@ impl fmt::Display for MtConnectionsUnderlaySnapshot {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       formatter,
-      "paths={} sampled_paths={} loss_floor_ms={} max_rtt_ms={} max_rttvar_ms={} \
-       max_rto_ms={} max_ack_stall_ms={} quorum_ack_stall_ms={} total_unacked={} \
+      "paths={} sampled_paths={} active_paths={} max_rtt_ms={} max_rttvar_ms={} \
+       max_rto_ms={} max_ack_stall_ms={} total_unacked={} \
        retransmitting_paths={} \
        total_retrans={}",
       self.paths,
       self.sampled_paths,
-      self.loss_delay_floor.as_millis(),
+      self.active_paths,
       self.max_rtt.as_millis(),
       self.max_rttvar.as_millis(),
       self.max_rto.as_millis(),
       self.max_ack_stall.as_millis(),
-      self.quorum_ack_stall.as_millis(),
       self.total_unacked,
       self.retransmitting_paths,
       self.total_retrans,
@@ -115,6 +119,7 @@ impl fmt::Display for MtConnectionsUnderlaySnapshot {
 pub(crate) struct MtConnectionsUnderlayMetrics {
   next_path_id: AtomicU64,
   paths: Mutex<HashMap<u64, MtTcpPathState>>,
+  pub(crate) loss_notify: Notify,
 }
 
 impl MtConnectionsUnderlayMetrics {
@@ -129,7 +134,10 @@ impl MtConnectionsUnderlayMetrics {
       MtTcpPathState {
         local_address,
         peer_address,
-        outstanding_since: None,
+        last_ack_progress: Instant::now(),
+        activity_window: MT_CONNECTIONS_ACK_ACTIVITY_MIN,
+        transport: quiche::ReliableTransport::default(),
+        active: watch::channel(true).0,
         sample: None,
       },
     );
@@ -137,7 +145,18 @@ impl MtConnectionsUnderlayMetrics {
   }
 
   pub(crate) fn remove_path(&self, path_id: u64) {
-    self.paths.lock().unwrap().remove(&path_id);
+    if let Some(path) = self.paths.lock().unwrap().remove(&path_id) {
+      path.transport.fail();
+      self.loss_notify.notify_one();
+    }
+  }
+
+  fn pause_path(&self, path: &mut MtTcpPathState) {
+    if *path.active.borrow() {
+      path.transport.fail();
+      path.active.send_replace(false);
+      self.loss_notify.notify_one();
+    }
   }
 
   pub(crate) fn update_path(&self, path_id: u64, info: MtTcpInfo, now: Instant) {
@@ -145,23 +164,65 @@ impl MtConnectionsUnderlayMetrics {
     let Some(path) = paths.get_mut(&path_id) else {
       return;
     };
-
-    if info.unacked == 0 {
-      path.outstanding_since = None;
-    } else if path.sample.is_none_or(|sample| sample.info.unacked == 0) {
-      path.outstanding_since = Some(now);
+    if path
+      .sample
+      .is_some_and(|sample| info.bytes_acked > sample.info.bytes_acked)
+    {
+      path.last_ack_progress = now;
+      path.activity_window =
+        MT_CONNECTIONS_ACK_ACTIVITY_MIN.max(info.rtt.saturating_add(info.rttvar).saturating_mul(4));
+      if !*path.active.borrow() {
+        path.transport = quiche::ReliableTransport::default();
+        path.active.send_replace(true);
+      }
     }
-
-    let ack_stall = path
-      .outstanding_since
-      .map(|since| now.saturating_duration_since(since).min(info.last_ack_recv))
-      .unwrap_or_default();
-
     path.sample = Some(MtTcpPathSample {
       info,
       sampled_at: now,
-      ack_stall,
     });
+    if now.saturating_duration_since(path.last_ack_progress) >= path.activity_window {
+      self.pause_path(path);
+    }
+  }
+
+  fn sample_failed(&self, path_id: u64, now: Instant) {
+    let mut paths = self.paths.lock().unwrap();
+    if let Some(path) = paths.get_mut(&path_id) {
+      let last_sample = path
+        .sample
+        .map_or(path.last_ack_progress, |sample| sample.sampled_at);
+      if now.saturating_duration_since(last_sample) >= MT_CONNECTIONS_TCP_INFO_STALE_AFTER {
+        self.pause_path(path);
+      }
+    }
+  }
+
+  fn subscribe_path(&self, path_id: u64) -> watch::Receiver<bool> {
+    self.paths.lock().unwrap()[&path_id].active.subscribe()
+  }
+
+  // Assignment and inactivity transitions share this lock. If a receiver
+  // claimed a packet just as the path paused, bind it to the failed generation
+  // and notify recovery again (the first notification may predate the bind).
+  pub(crate) fn bind_packet<TPacket: MtConnectionsPacket>(
+    &self,
+    path_id: u64,
+    packet: &TPacket,
+  ) -> bool {
+    let paths = self.paths.lock().unwrap();
+    let path = &paths[&path_id];
+    let bound = packet.bind_reliable_transport(path.transport.clone());
+    if path.transport.is_failed() && bound {
+      self.loss_notify.notify_one();
+      return false;
+    }
+    true
+  }
+
+  fn needs_probe(&self, path_id: u64, now: Instant) -> bool {
+    let paths = self.paths.lock().unwrap();
+    let path = &paths[&path_id];
+    now.saturating_duration_since(path.last_ack_progress) >= MT_CONNECTIONS_ACK_PROBE_INTERVAL
   }
 
   pub(crate) fn snapshot(&self) -> MtConnectionsUnderlaySnapshot {
@@ -171,49 +232,24 @@ impl MtConnectionsUnderlayMetrics {
       paths: paths.len(),
       ..Default::default()
     };
-    let mut path_floors = Vec::with_capacity(paths.len());
-    let mut ack_stalls = Vec::with_capacity(paths.len());
-
     for path in paths.values() {
+      snapshot.active_paths += usize::from(*path.active.borrow());
+      snapshot.max_ack_stall = snapshot
+        .max_ack_stall
+        .max(now.saturating_duration_since(path.last_ack_progress));
       let Some(sample) = path.sample.filter(|sample| {
         now.saturating_duration_since(sample.sampled_at) <= MT_CONNECTIONS_TCP_INFO_STALE_AFTER
       }) else {
         continue;
       };
-
       snapshot.sampled_paths += 1;
       snapshot.max_rtt = snapshot.max_rtt.max(sample.info.rtt);
       snapshot.max_rttvar = snapshot.max_rttvar.max(sample.info.rttvar);
       snapshot.max_rto = snapshot.max_rto.max(sample.info.rto);
-      snapshot.max_ack_stall = snapshot.max_ack_stall.max(sample.ack_stall);
       snapshot.total_unacked += u64::from(sample.info.unacked);
       snapshot.total_retrans += u64::from(sample.info.total_retrans);
       snapshot.retransmitting_paths += usize::from(sample.info.retrans > 0);
-
-      let delay_estimate = sample
-        .info
-        .rtt
-        .saturating_add(sample.info.rttvar.saturating_mul(4))
-        .max(sample.info.rto);
-      let path_floor = delay_estimate
-        .saturating_add(sample.ack_stall)
-        .min(MT_CONNECTIONS_LOSS_DELAY_FLOOR_MAX);
-      path_floors.push(path_floor);
-      ack_stalls.push(sample.ack_stall);
     }
-
-    if !path_floors.is_empty() {
-      // mTCP can route around one slow subpath. Calibrate QUIC from the
-      // second-worst of four paths (and the equivalent half-path quorum for
-      // other pool sizes), so a single stalled socket does not delay loss
-      // detection for the whole QomT connection.
-      path_floors.sort_unstable_by(|left, right| right.cmp(left));
-      ack_stalls.sort_unstable_by(|left, right| right.cmp(left));
-      let quorum_index = path_floors.len().div_ceil(2) - 1;
-      snapshot.loss_delay_floor = path_floors[quorum_index];
-      snapshot.quorum_ack_stall = ack_stalls[quorum_index];
-    }
-
     snapshot
   }
 
@@ -230,8 +266,11 @@ impl MtConnectionsUnderlayMetrics {
 
 #[cfg(target_os = "linux")]
 fn read_mt_tcp_info(raw_fd: std::os::fd::RawFd) -> std::io::Result<MtTcpInfo> {
-  let mut info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
-  let mut length = size_of::<libc::tcp_info>() as libc::socklen_t;
+  // Linux UAPI struct tcp_info through tcpi_bytes_acked (offset 120).
+  // libc exposes only the original 104-byte prefix on some targets. Fixed
+  // UAPI offsets and native-endian reads work on both x86_64 and aarch64.
+  let mut info = [0u8; 128];
+  let mut length = info.len() as libc::socklen_t;
   let result = unsafe {
     libc::getsockopt(
       raw_fd,
@@ -244,16 +283,21 @@ fn read_mt_tcp_info(raw_fd: std::os::fd::RawFd) -> std::io::Result<MtTcpInfo> {
   if result != 0 {
     return Err(std::io::Error::last_os_error());
   }
-
-  let info = unsafe { info.assume_init() };
+  if length < info.len() as libc::socklen_t {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::Unsupported,
+      "TCP_INFO lacks tcpi_bytes_acked",
+    ));
+  }
+  let u32_at = |offset| u32::from_ne_bytes(info[offset..offset + 4].try_into().unwrap());
   Ok(MtTcpInfo {
-    rtt: Duration::from_micros(u64::from(info.tcpi_rtt)),
-    rttvar: Duration::from_micros(u64::from(info.tcpi_rttvar)),
-    rto: Duration::from_micros(u64::from(info.tcpi_rto)),
-    unacked: info.tcpi_unacked,
-    retrans: info.tcpi_retrans,
-    total_retrans: info.tcpi_total_retrans,
-    last_ack_recv: Duration::from_millis(u64::from(info.tcpi_last_ack_recv)),
+    rtt: Duration::from_micros(u64::from(u32_at(68))),
+    rttvar: Duration::from_micros(u64::from(u32_at(72))),
+    rto: Duration::from_micros(u64::from(u32_at(8))),
+    unacked: u32_at(24),
+    retrans: u32_at(36),
+    total_retrans: u32_at(100),
+    bytes_acked: u64::from_ne_bytes(info[120..128].try_into().unwrap()),
   })
 }
 
@@ -262,7 +306,7 @@ async fn monitor_mt_tcp_info(
   raw_fd: std::os::fd::RawFd,
   path_id: u64,
   metrics: Arc<MtConnectionsUnderlayMetrics>,
-) {
+) -> std::io::Result<()> {
   let mut interval = interval_at(TokioInstant::now(), MT_CONNECTIONS_TCP_INFO_INTERVAL);
   interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -271,6 +315,10 @@ async fn monitor_mt_tcp_info(
     match read_mt_tcp_info(raw_fd) {
       Ok(info) => metrics.update_path(path_id, info, Instant::now()),
       Err(error) => {
+        if error.kind() == std::io::ErrorKind::Unsupported {
+          return Err(error);
+        }
+        metrics.sample_failed(path_id, Instant::now());
         log::debug!(
           "failed to sample mTCP TCP_INFO for {}: {error}",
           metrics.describe_path(path_id),
@@ -285,7 +333,7 @@ async fn monitor_mt_tcp_info(
   _raw_fd: i32,
   _path_id: u64,
   _metrics: Arc<MtConnectionsUnderlayMetrics>,
-) {
+) -> std::io::Result<()> {
   std::future::pending().await
 }
 
@@ -518,6 +566,13 @@ where
           let local_address = tcp_stream.local_addr().ok();
           let peer_address = tcp_stream.peer_addr().unwrap_or(peer_address);
           let path_id = underlay_metrics.register_path(local_address, peer_address);
+          let path_registration = DropCallback::new({
+            let metrics = underlay_metrics.clone();
+            move || metrics.remove_path(path_id)
+          });
+          let mut path_active = underlay_metrics.subscribe_path(path_id);
+          let write_metrics = underlay_metrics.clone();
+          let recv_order = quiche::ReliableRecv::default();
 
           #[cfg(target_os = "linux")]
           let raw_fd = tcp_stream.as_raw_fd();
@@ -531,28 +586,46 @@ where
           let read_diagnostics = diagnostics.clone();
 
           let copy_result = tokio::select! {
-              result = async move {
+            result = async move {
+              let mut probe_interval = interval_at(
+                TokioInstant::now() + MT_CONNECTIONS_ACK_PROBE_INTERVAL,
+                MT_CONNECTIONS_ACK_PROBE_INTERVAL,
+              );
+              probe_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
               loop {
-                match packet_receiver.recv_async().await {
-                  Ok(packet) => {
-                    let packet_length = packet.len();
-                      write_diagnostics
-                        .pending_tcp_writes
-                        .fetch_add(1, atomic::Ordering::AcqRel);
-                    let write_result = timeout(
-                      MT_CONNECTIONS_PACKET_WRITE_TIMEOUT,
-                      TPacket::write_packet(&mut tcp_write, packet),
-                    )
-                    .await;
-                      write_diagnostics
-                        .pending_tcp_writes
-                        .fetch_sub(1, atomic::Ordering::AcqRel);
-                    write_result
-                      .map_err(|_| anyhow::anyhow!("timed out writing packet to TCP stream"))??;
-                      write_diagnostics.record_tcp_write(packet_length);
+                let active = *path_active.borrow_and_update();
+                let packet = tokio::select! {
+                  biased;
+                  changed = path_active.changed() => {
+                    changed?;
+                    continue;
                   }
-                  Err(flume::RecvError::Disconnected) => break,
+                  _ = probe_interval.tick() => {
+                    if write_metrics.needs_probe(path_id, Instant::now()) {
+                      timeout(MT_CONNECTIONS_PACKET_WRITE_TIMEOUT, TPacket::write_probe(&mut tcp_write))
+                        .await.map_err(|_| anyhow::anyhow!("timed out writing TCP activity probe"))??;
+                    }
+                    continue;
+                  }
+                  packet = packet_receiver.recv_async(), if active => {
+                    match packet {
+                      Ok(packet) => packet,
+                      Err(flume::RecvError::Disconnected) => break,
+                    }
+                  }
+                };
+                if !write_metrics.bind_packet(path_id, &packet) {
+                  continue;
                 }
+                let packet_length = packet.len();
+                write_diagnostics.pending_tcp_writes.fetch_add(1, atomic::Ordering::AcqRel);
+                let write_result = timeout(
+                  MT_CONNECTIONS_PACKET_WRITE_TIMEOUT,
+                  TPacket::write_packet(&mut tcp_write, packet),
+                ).await;
+                write_diagnostics.pending_tcp_writes.fetch_sub(1, atomic::Ordering::AcqRel);
+                write_result.map_err(|_| anyhow::anyhow!("timed out writing packet to TCP stream"))??;
+                write_diagnostics.record_tcp_write(packet_length);
               }
 
               log::debug!("{side} write tcp stream loop ended");
@@ -561,16 +634,20 @@ where
             } => result,
             result = async move {
               loop {
-                let Some(packet) = TPacket::read_next_packet(&mut tcp_read).await? else {
+                let Some(mut packet) = TPacket::read_next_packet(&mut tcp_read).await? else {
                   break;
                 };
-                  read_diagnostics.record_tcp_read(packet.len());
-                  read_diagnostics
-                    .pending_packet_deliveries
-                    .fetch_add(1, atomic::Ordering::AcqRel);
-                  let send_result = packet_sender.send_async(packet).await;
-                  read_diagnostics
-                    .pending_packet_deliveries
+                if packet.is_empty() {
+                  continue;
+                }
+                packet.set_reliable_recv(recv_order.clone());
+                read_diagnostics.record_tcp_read(packet.len());
+                read_diagnostics
+                  .pending_packet_deliveries
+                  .fetch_add(1, atomic::Ordering::AcqRel);
+                let send_result = packet_sender.send_async(packet).await;
+                read_diagnostics
+                  .pending_packet_deliveries
                   .fetch_sub(1, atomic::Ordering::AcqRel);
                 send_result?;
               }
@@ -579,12 +656,12 @@ where
 
               anyhow::Ok(())
             } => result,
-            _ = monitor_mt_tcp_info(raw_fd, path_id, underlay_metrics.clone()) => {
-              unreachable!("mTCP TCP_INFO monitor unexpectedly ended")
+            result = monitor_mt_tcp_info(raw_fd, path_id, underlay_metrics.clone()) => {
+              result.map_err(Into::into)
             },
           };
 
-          underlay_metrics.remove_path(path_id);
+          drop(path_registration);
 
           copy_result
             .inspect_err(|error| {
@@ -751,6 +828,17 @@ impl<TPacket> Sink<TPacket> for MtConnections<TPacket> {
 }
 
 pub trait MtConnectionsPacket: Sized + Send + Sync + 'static {
+  /// Binds sender-local delivery metadata, returning whether metadata exists.
+  fn bind_reliable_transport(&self, transport: quiche::ReliableTransport) -> bool;
+
+  /// Associates a received frame with its TCP ordering domain.
+  fn set_reliable_recv(&mut self, recv: quiche::ReliableRecv);
+
+  /// Writes an empty transport frame to solicit a cumulative TCP ACK.
+  fn write_probe(
+    stream: &mut (dyn AsyncWrite + Unpin + Send),
+  ) -> impl Future<Output = Result<(), std::io::Error>> + Send;
+
   fn len(&self) -> usize;
 
   fn is_empty(&self) -> bool {
@@ -859,6 +947,73 @@ pub enum MtConnectionsError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(target_os = "linux")]
+  #[tokio::test]
+  async fn paused_tcp_sends_only_a_probe_until_ack_progress_resumes() -> anyhow::Result<()> {
+    use crate::quic_connection::QuicBytesPacket;
+    use futures::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio::time::sleep;
+
+    timeout(Duration::from_secs(5), async {
+      let listener = TcpListener::bind("127.0.0.1:0").await?;
+      let (client, (mut peer, _)) = tokio::try_join!(
+        TcpStream::connect(listener.local_addr()?),
+        listener.accept(),
+      )?;
+      let (mut transport, _path_sender, _) = MtConnections::<QuicBytesPacket>::new(
+        client,
+        ConnectionSide::Client,
+        MtConnectionsId::new(),
+      );
+      let metrics = transport.underlay_metrics();
+      loop {
+        if metrics.snapshot().sampled_paths == 1 {
+          break;
+        }
+        sleep(Duration::from_millis(5)).await;
+      }
+      let old_generation = {
+        let mut paths = metrics.paths.lock().unwrap();
+        let path = paths.values_mut().next().unwrap();
+        path.last_ack_progress = Instant::now() - Duration::from_secs(2);
+        metrics.pause_path(path);
+        path.transport.clone()
+      };
+      assert!(old_generation.is_failed());
+      let mut packet: QuicBytesPacket = vec![7, 8, 9].into();
+      let delivery = quiche::ReliablePacket::default();
+      packet.delivery = Some(delivery.clone());
+      let send = transport.send(packet);
+      tokio::pin!(send);
+      // A receiver from the previous active iteration can wake the sender
+      // before processing the pause. flume retains that queued packet when
+      // the receive future is cancelled, so queue completion is not a write.
+      let queued = match timeout(Duration::from_millis(100), &mut send).await {
+        Ok(result) => {
+          result?;
+          true
+        }
+        Err(_) => false,
+      };
+      let probe = QuicBytesPacket::read_next_packet(&mut peer).await?.unwrap();
+      assert!(probe.is_empty(), "paused TCP sent QUIC data before probing");
+      // The kernel ACKs the four probe bytes; the sampler creates a new
+      // generation and lets the parked data send finish on this same socket.
+      if !queued {
+        send.await?;
+      }
+      let data = QuicBytesPacket::read_next_packet(&mut peer).await?.unwrap();
+      assert_eq!(data.as_slice(), &[7, 8, 9]);
+      assert_eq!(metrics.snapshot().active_paths, 1);
+      assert!(!delivery.is_lost());
+      assert!(!delivery.bind(quiche::ReliableTransport::default()));
+      assert!(old_generation.is_failed());
+      anyhow::Ok(())
+    })
+    .await?
+  }
 
   #[test]
   fn test_postcard_serialization() {

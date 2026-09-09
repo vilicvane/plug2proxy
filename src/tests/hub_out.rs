@@ -86,6 +86,19 @@ async fn test_hub_out() -> anyhow::Result<()> {
     },
     async {
       let router = Router::new(&in_dir);
+      // Require the advertised OUT from the first request. Otherwise the
+      // pre-snapshot DIRECT fallback can make HTTP appear ready before OUT
+      // registration, and the subsequent one-shot UDP packet has no provider.
+      router.register_local_rules(vec![
+        AddressRule {
+          match_ips: None,
+          match_ports: Some(vec![http_address.port()]),
+          priority: 0,
+          negate: false,
+          exits: vec![OutExit::from("system")],
+        }
+        .into(),
+      ]);
       let in_node = In::new(
         vec![socks5_inbound.into()],
         router,

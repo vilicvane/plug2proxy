@@ -1947,7 +1947,7 @@ dependencies = [
 [[package]]
 name = "octets"
 version = "0.3.6"
-source = "git+https://github.com/vilicvane/quiche?rev=b64b8fb9d2a00a1a7f63423d105b315ff7f35e6b#b64b8fb9d2a00a1a7f63423d105b315ff7f35e6b"
+source = "git+https://github.com/vilicvane/quiche?rev=64d237cc8e00863c0ef0c76fd5bc8bbb900b6b27#64d237cc8e00863c0ef0c76fd5bc8bbb900b6b27"
 
 [[package]]
 name = "oid-registry"
@@ -2215,7 +2215,7 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.29.3"
-source = "git+https://github.com/vilicvane/quiche?rev=b64b8fb9d2a00a1a7f63423d105b315ff7f35e6b#b64b8fb9d2a00a1a7f63423d105b315ff7f35e6b"
+source = "git+https://github.com/vilicvane/quiche?rev=64d237cc8e00863c0ef0c76fd5bc8bbb900b6b27#64d237cc8e00863c0ef0c76fd5bc8bbb900b6b27"
 dependencies = [
  "boring",
  "bytes",

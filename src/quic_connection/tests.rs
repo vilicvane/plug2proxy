@@ -1066,6 +1066,9 @@ async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::R
   timeout(duration!("20s"), async {
     let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
 
+    hub_quiche_config.set_reliable_transport(true);
+    out_quiche_config.set_reliable_transport(true);
+
     let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
       flume::bounded::<QuicBytesPacket>(0);
     let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
@@ -1079,13 +1082,21 @@ async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::R
         let reorder_enabled = reorder_enabled.clone();
         let packet_delayed = packet_delayed.clone();
 
-        move |packet| {
+        let transport = quiche::ReliableTransport::default();
+        let fast_order = quiche::ReliableRecv::default();
+        move |mut packet| {
+          assert!(packet.delivery.as_ref().unwrap().bind(transport.clone()));
           let delay = reorder_enabled.load(atomic::Ordering::Acquire)
             && !packet_delayed.swap(true, atomic::Ordering::AcqRel);
 
+          packet.recv_order = Some(if delay {
+            quiche::ReliableRecv::default()
+          } else {
+            fast_order.clone()
+          });
           async move {
             if delay {
-              sleep(duration!("750ms")).await;
+              sleep(duration!("1500ms")).await;
             }
 
             packet
@@ -1099,7 +1110,15 @@ async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::R
       &connection_id,
       &mut out_quiche_config,
       out_to_hub_packet_sender.into_sink(),
-      hub_to_out_packet_receiver.into_stream(),
+      hub_to_out_packet_receiver.into_stream().map({
+        let transport = quiche::ReliableTransport::default();
+        let order = quiche::ReliableRecv::default();
+        move |mut packet| {
+          assert!(packet.delivery.as_ref().unwrap().bind(transport.clone()));
+          packet.recv_order = Some(order.clone());
+          packet
+        }
+      }),
     );
     let underlay_metrics = Arc::new(MtConnectionsUnderlayMetrics::default());
     underlay_metrics.register_path(None, "127.0.0.1:1122".parse()?);
@@ -1150,6 +1169,75 @@ async fn reliable_multipath_does_not_retransmit_reordered_packets() -> anyhow::R
       "reliable reordering retransmitted QUIC data: {diagnostics}",
     );
 
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reliable_transport_failure_wakes_recovery_for_a_lost_tail_packet() -> anyhow::Result<()> {
+  timeout(duration!("8s"), async {
+    let [mut hub_config, mut out_config] = get_quiche_configs().await?;
+    hub_config.set_reliable_transport(true);
+    out_config.set_reliable_transport(true);
+    let (out_sender, out_receiver) = flume::bounded::<QuicBytesPacket>(0);
+    let (hub_sender, hub_receiver) = flume::bounded::<QuicBytesPacket>(0);
+    let fail_next = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let metrics = Arc::new(MtConnectionsUnderlayMetrics::default());
+    let transport_stream = |receiver: flume::Receiver<QuicBytesPacket>, can_fail: bool| {
+      let fail_next = fail_next.clone();
+      let dropped = dropped.clone();
+      let metrics = metrics.clone();
+      let healthy = quiche::ReliableTransport::default();
+      let order = quiche::ReliableRecv::default();
+      Box::pin(receiver.into_stream().filter_map(move |mut packet| {
+        let fail = can_fail && fail_next.swap(false, atomic::Ordering::AcqRel);
+        if fail {
+          let failed = quiche::ReliableTransport::default();
+          assert!(packet.delivery.as_ref().unwrap().bind(failed.clone()));
+          failed.fail();
+          dropped.store(true, atomic::Ordering::Release);
+          metrics.loss_notify.notify_one();
+        } else {
+          assert!(packet.delivery.as_ref().unwrap().bind(healthy.clone()));
+          packet.recv_order = Some(order.clone());
+        }
+        std::future::ready((!fail).then_some(packet))
+      }))
+    };
+    let mut out = QuicConnection::connect_with_sink_and_stream(
+      &QuicConnection::generate_connection_id(),
+      &mut out_config,
+      out_sender.into_sink(),
+      transport_stream(hub_receiver, false),
+    );
+    out.attach_reliable_underlay_metrics(metrics.clone());
+    let hub = QuicConnection::accept_with_sink_and_stream(
+      out.id(),
+      &mut hub_config,
+      hub_sender.into_sink(),
+      transport_stream(out_receiver, true),
+    );
+    tokio::try_join!(out.established(), hub.established())?;
+    fail_next.store(true, atomic::Ordering::Release);
+    tokio::try_join!(
+      async {
+        let mut stream = out.open_stream();
+        stream.write_all(b"tail").await?;
+        stream.shutdown().await?;
+        anyhow::Ok(())
+      },
+      async {
+        let mut stream = hub.accept_stream().await?.unwrap();
+        let mut data = Vec::new();
+        stream.read_to_end(&mut data).await?;
+        assert_eq!(data, b"tail");
+        anyhow::Ok(())
+      }
+    )?;
+    assert!(dropped.load(atomic::Ordering::Acquire));
+    assert!(!out.diagnostics().contains("quic_stream_retrans_bytes=0 "));
     anyhow::Ok(())
   })
   .await?
