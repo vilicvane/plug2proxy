@@ -1,11 +1,13 @@
+use std::{net::SocketAddr, path::Path, sync::Arc};
+
 use crate::{
   cert::{generate_ca_pem_file, generate_node_pem_file},
   hub::{Hub, HubOptions},
   r#in::{In, InHubOptions, InOptions},
   inbound::{Socks5Inbound, Socks5InboundOptions},
-  node::{DefaultLocalExit, LocalOutDispatcher},
+  node::{DefaultLocalExit, LocalOutDispatcher, Node, OutDispatcher},
   out::{Out, OutHubOptions, OutOptions},
-  primitives::OutExit,
+  primitives::{BidiStream, OutExit, SocketDestination, SocketDestinationHost},
   route::{AddressRule, Router},
   test::{get_free_local_tcp_address, test_dir},
 };
@@ -17,7 +19,8 @@ use socks5_server::{
 };
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
-  net::{TcpListener, TcpStream, UdpSocket},
+  net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
+  task::JoinSet,
   time::{sleep, timeout},
 };
 
@@ -129,10 +132,10 @@ async fn test_hub_out() -> anyhow::Result<()> {
         listen: None,
         advertise: None,
         context_dir: out_dir,
-        hub: OutHubOptions {
+        hubs: vec![OutHubOptions {
           address: hub_address,
           connections: 2,
-        },
+        }],
       });
 
       out.run().await?;
@@ -304,10 +307,10 @@ async fn test_hub_out_resolve() -> anyhow::Result<()> {
         listen: None,
         advertise: None,
         context_dir: out_dir,
-        hub: OutHubOptions {
+        hubs: vec![OutHubOptions {
           address: hub_address,
           connections: 2,
-        },
+        }],
       });
 
       out.run().await
@@ -369,4 +372,221 @@ async fn test_hub_out_resolve() -> anyhow::Result<()> {
   .user_interrupt_ok()?;
 
   Ok(())
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn out_serves_multiple_hubs_and_recovers_one_independently() -> anyhow::Result<()> {
+  timeout(duration!("30s"), async {
+    let test_dir = test_dir().join(format!("multiple_hubs_{}", uuid::Uuid::new_v4()));
+    generate_ca_pem_file(&test_dir).await?;
+    for name in ["hub_a", "hub_b", "out"] {
+      generate_node_pem_file(&test_dir, name, true).await?;
+    }
+
+    let first_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let first_address = first_listener.local_addr()?;
+    // Reserve the second address without listening: its initial connections
+    // fail while the first HUB must remain usable.
+    let second_socket = TcpSocket::new_v4()?;
+    second_socket.set_reuseaddr(true)?;
+    second_socket.bind("127.0.0.1:0".parse()?)?;
+    let second_address = second_socket.local_addr()?;
+    let first_hub = multi_hub_test_node(first_listener, &test_dir.join("hub_a"));
+    let mut tasks = JoinSet::new();
+    tasks.spawn(first_hub.clone().run_shared());
+    tasks.spawn(
+      Out::new(OutOptions {
+        local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+          DefaultLocalExit::Advertised {
+            tags: vec!["system".into()],
+          },
+        )],
+        listen: None,
+        advertise: None,
+        hubs: vec![
+          OutHubOptions {
+            address: second_address,
+            connections: 2,
+          },
+          OutHubOptions {
+            address: first_address,
+            connections: 2,
+          },
+        ],
+        context_dir: test_dir.join("out"),
+      })
+      .run(),
+    );
+
+    let first_dispatcher = wait_for_hub_provider(&first_hub).await?;
+    assert_hub_tcp_udp_dns(&first_hub).await?;
+
+    // Keep a first-HUB TCP flow open across the other HUB's full lifecycle.
+    let target_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut stable_stream = first_dispatcher
+      .connect(
+        OutExit::from("system"),
+        test_destination(target_listener.local_addr()?),
+      )
+      .await?;
+    let (mut target_stream, _) = target_listener.accept().await?;
+    assert_tcp_echo(&mut *stable_stream, &mut target_stream).await?;
+
+    let second_hub = multi_hub_test_node(second_socket.listen(128)?, &test_dir.join("hub_b"));
+    let second_task = tasks.spawn(second_hub.clone().run_shared());
+    wait_for_hub_provider(&second_hub).await?;
+    tokio::try_join!(
+      assert_hub_tcp_udp_dns(&first_hub),
+      assert_hub_tcp_udp_dns(&second_hub),
+    )?;
+
+    second_task.abort();
+    let stopped = tasks.join_next().await.expect("second HUB task missing");
+    assert!(stopped.is_err_and(|error| error.is_cancelled()));
+    drop(second_hub);
+    assert_tcp_echo(&mut *stable_stream, &mut target_stream).await?;
+    assert_hub_tcp_udp_dns(&first_hub).await?;
+
+    // Session cleanup releases its listener asynchronously.
+    let restarted_listener = loop {
+      match TcpListener::bind(second_address).await {
+        Ok(listener) => break listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+          sleep(duration!("20ms")).await;
+        }
+        Err(error) => return Err(error.into()),
+      }
+    };
+    let restarted_hub = multi_hub_test_node(restarted_listener, &test_dir.join("hub_b"));
+    tasks.spawn(restarted_hub.clone().run_shared());
+    wait_for_hub_provider(&restarted_hub).await?;
+    tokio::try_join!(
+      assert_hub_tcp_udp_dns(&first_hub),
+      assert_hub_tcp_udp_dns(&restarted_hub),
+    )?;
+    assert_tcp_echo(&mut *stable_stream, &mut target_stream).await?;
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+fn multi_hub_test_node(listener: TcpListener, context_dir: &Path) -> Arc<Hub> {
+  Hub::new(
+    listener,
+    None,
+    vec![],
+    Router::new(context_dir),
+    HubOptions {
+      local_out_dispatchers: vec![LocalOutDispatcher::new_default(DefaultLocalExit::Private)],
+      context_dir: context_dir.to_owned(),
+    },
+  )
+  .arc()
+}
+
+async fn wait_for_hub_provider(hub: &Hub) -> anyhow::Result<Arc<dyn OutDispatcher>> {
+  timeout(duration!("10s"), async {
+    loop {
+      if let Some(dispatcher) = hub
+        .get_out_dispatchers()
+        .into_iter()
+        .find(|dispatcher| dispatcher.match_exit(&OutExit::from("system")).is_some())
+      {
+        return dispatcher;
+      }
+      sleep(duration!("20ms")).await;
+    }
+  })
+  .await
+  .map_err(|_| anyhow::anyhow!("timed out waiting for HUB provider"))
+}
+
+fn test_destination(address: SocketAddr) -> SocketDestination {
+  SocketDestination {
+    host: SocketDestinationHost::IpAddress(address.ip()),
+    port: address.port(),
+    routing_domain: None,
+    routing_protocol: None,
+  }
+}
+
+async fn assert_tcp_echo(
+  stream: &mut dyn BidiStream,
+  target: &mut TcpStream,
+) -> anyhow::Result<()> {
+  stream.write_all(b"ping").await?;
+  let mut request = [0; 4];
+  target.read_exact(&mut request).await?;
+  assert_eq!(&request, b"ping");
+  target.write_all(b"pong").await?;
+  let mut response = [0; 4];
+  stream.read_exact(&mut response).await?;
+  assert_eq!(&response, b"pong");
+  Ok(())
+}
+
+async fn assert_hub_tcp_udp_dns(hub: &Hub) -> anyhow::Result<()> {
+  use futures::{SinkExt, StreamExt};
+  use hickory_resolver::proto::{op::Message, rr::RData};
+  use std::net::Ipv4Addr;
+
+  use crate::{
+    node::{NodeResolveAnswers, ResolveQuery},
+    route::RouteMatch,
+    udp_forwarder::{OutgoingUdpPacket, UdpPacketSource},
+  };
+
+  timeout(duration!("5s"), async {
+    let dispatcher = wait_for_hub_provider(hub).await?;
+    let exit = OutExit::from("system");
+    let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = tcp_listener.local_addr()?;
+    let mut stream = dispatcher
+      .connect(exit.clone(), test_destination(address))
+      .await?;
+    let (mut target, _) = tcp_listener.accept().await?;
+    assert_tcp_echo(&mut *stream, &mut target).await?;
+
+    let udp_socket = UdpSocket::bind(address).await?;
+    let mut packets = dispatcher.associate(exit.clone()).await?;
+    let source = UdpPacketSource {
+      via: vec![hub.id()],
+      address: "127.0.0.1:12345".parse()?,
+    };
+    packets
+      .send(OutgoingUdpPacket {
+        source: source.clone(),
+        destination: test_destination(address),
+        response_destination: None,
+        payload: b"udp ping".to_vec(),
+      })
+      .await?;
+    let mut buffer = [0; 32];
+    let (length, sender) = udp_socket.recv_from(&mut buffer).await?;
+    assert_eq!(&buffer[..length], b"udp ping");
+    udp_socket.send_to(b"udp pong", sender).await?;
+    let response = packets.next().await.expect("UDP association closed");
+    assert_eq!(response.source, source);
+    assert_eq!(response.destination, address);
+    assert_eq!(response.payload, b"udp pong");
+
+    let query = ResolveQuery {
+      name: "localhost".to_owned(),
+      record_type: 1,
+    };
+    let NodeResolveAnswers::Success(bytes) = hub
+      .resolve_routes(vec![RouteMatch::fixed(exit)], &query)
+      .await?
+    else {
+      anyhow::bail!("expected remote DNS resolution to succeed");
+    };
+    assert!(Message::from_vec(&bytes)?.answers.iter().any(|record| {
+      matches!(&record.data, RData::A(address) if address.0 == Ipv4Addr::LOCALHOST)
+    }));
+
+    anyhow::Ok(())
+  })
+  .await?
 }

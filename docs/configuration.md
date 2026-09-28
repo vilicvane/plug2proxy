@@ -32,7 +32,8 @@ HUB 集中保存非 fallback 路由并下发给 IN。IN 只配置入口和 HUB �
 - HUB 的 TCP 和 UDP `1122` 可被 IN 和两个 OUT 访问；
 - US OUT 的 TCP 和 UDP `2233` 可被 IN 直接访问；
 - 将示例保留地址 `203.0.113.10` 替换为 HUB 的实际 IP。当前
-  `hub.address` 只接受 socket address，不接受域名；IPv6 必须写成
+  OUT 的 `hubs[].address` 和 IN 的 `hub.address` 只接受 socket address，
+  不接受域名；IPv6 必须写成
   `[address]:port`。
 - 将验证命令中的示例 IN 地址 `192.0.2.10` 替换为 IN 的实际地址。
 
@@ -238,10 +239,12 @@ chmod 0600 /etc/plug2proxy/node.pem
 ```jsonc
 {
   "type": "out",
-  "hub": {
-    "address": "203.0.113.10:1122",
-    "connections": 4
-  },
+  "hubs": [
+    {
+      "address": "203.0.113.10:1122",
+      "connections": 4
+    }
+  ],
 
   // OUT 声明可接受 IN 的 peer 连接。
   // 此 endpoint 同时监听 TCP 和 UDP。
@@ -285,9 +288,36 @@ RUST_LOG=info,plug2proxy=debug plug2proxy
 peer 连接成功后，IN 对 `us` 的请求会优先选择
 `qomt(priority=PeerProvider, ...)`。无需再配置一个数值 priority。
 
-这里 OUT 的 `hub.connections: 4` 表示到 HUB 的一个 QomT 主路径由 mTCP
+这里 OUT 的 `hubs[].connections: 4` 表示到该 HUB 的一个 QomT 主路径由 mTCP
 承载，mTCP 内部使用四条并行的底层 TCP connection。它与 IN 使用相同
 语义，不会建立四个独立 QomT。
+
+### 一个 OUT 连接多个 HUB
+
+在 OUT 的 `hubs` 中添加地址即可同时向多个 HUB 提供相同出口：
+
+```jsonc
+"hubs": [
+  {"address": "203.0.113.10:1122", "connections": 4},
+  {"address": "203.0.113.20:1122", "connections": 2}
+]
+```
+
+每个 HUB 独立连接和重连；一个 HUB 不可达时，其他 HUB 仍可使用这个
+OUT。`connections` 分别作用于各 HUB，省略时默认是 `4`。上述配置会
+建立两个 QomT 主路径，共使用六条底层 TCP connection。
+
+所有 HUB 连接共用这个 OUT 的 `node.pem`，参与通信的 HUB、IN 和 OUT
+须使用同一 CA 签发的证书。OUT 的节点身份、`exits`、`listen` 和
+`advertise` 对所有 HUB 相同，peer listener 只启动一次。省略或使用
+unspecified IP 的 `advertise` 时，各 HUB 分别用观察到的 OUT 来源 IP
+补全 endpoint；配置显式 IP 时，各 HUB 发布同一个 endpoint。
+
+推荐使用 `hubs` 数组。旧字段 `hub` 仍作为兼容别名，两者都接受单个
+对象或数组，但同一配置不能同时出现 `hub` 和 `hubs`。列表不能为空，
+地址不能重复，即使同一地址配置了不同的 `connections` 也会被拒绝。
+
+IN 仍通过 `hub` 连接单个 HUB，各 HUB 独立管理自己的路由和 IN。
 
 ## 4. 配置只使用 HUB relay 的 HK OUT
 
@@ -296,10 +326,12 @@ peer 连接成功后，IN 对 `us` 的请求会优先选择
 ```jsonc
 {
   "type": "out",
-  "hub": {
-    "address": "203.0.113.10:1122",
-    "connections": 4
-  },
+  "hubs": [
+    {
+      "address": "203.0.113.10:1122",
+      "connections": 4
+    }
+  ],
   "exits": [
     {
       "type": "local",
@@ -503,10 +535,12 @@ www.taobao.com:443 -> DIRECT via local(default)
 ```jsonc
 {
   "type": "out",
-  "hub": {
-    "address": "203.0.113.10:1122",
-    "connections": 4
-  },
+  "hubs": [
+    {
+      "address": "203.0.113.10:1122",
+      "connections": 4
+    }
+  ],
   "exits": [
     {
       "type": "local",

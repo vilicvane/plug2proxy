@@ -1,4 +1,5 @@
 use std::{
+  collections::HashSet,
   net::{Ipv4Addr, SocketAddr},
   path::{Path, PathBuf},
   sync::Arc,
@@ -43,7 +44,7 @@ pub struct Out {
   local_out_dispatchers: Vec<Arc<dyn OutDispatcher>>,
   listen: Option<SocketAddr>,
   advertise: Option<SocketAddr>,
-  hub_options: OutHubOptions,
+  hub_options: Vec<OutHubOptions>,
   context_dir: PathBuf,
 }
 
@@ -51,10 +52,11 @@ pub struct OutOptions {
   pub local_out_dispatchers: Vec<LocalOutDispatcher>,
   pub listen: Option<SocketAddr>,
   pub advertise: Option<SocketAddr>,
-  pub hub: OutHubOptions,
+  pub hubs: Vec<OutHubOptions>,
   pub context_dir: PathBuf,
 }
 
+#[derive(Clone, Copy)]
 pub struct OutHubOptions {
   pub address: SocketAddr,
   pub connections: usize,
@@ -66,10 +68,18 @@ impl Out {
       local_out_dispatchers,
       listen,
       advertise,
-      hub: hub_options,
+      hubs: hub_options,
       context_dir,
     }: OutOptions,
   ) -> Self {
+    assert!(!hub_options.is_empty(), "OUT requires at least one HUB");
+    let mut hub_addresses = HashSet::new();
+    assert!(
+      hub_options
+        .iter()
+        .all(|hub| hub_addresses.insert(hub.address)),
+      "OUT HUB addresses must be unique"
+    );
     assert!(
       listen.is_some() || advertise.is_none(),
       "OUT advertise requires listen"
@@ -126,7 +136,9 @@ impl Out {
       None
     };
 
-    join_set.spawn(this.clone().run_hub_connection(peer_endpoint));
+    for &hub in &this.hub_options {
+      join_set.spawn(this.clone().run_hub_connection(hub, peer_endpoint));
+    }
 
     while let Some(result) = join_set.join_next().await {
       result??;
@@ -137,6 +149,10 @@ impl Out {
 
   async fn run_hub_connection(
     self: Arc<Self>,
+    OutHubOptions {
+      address,
+      connections,
+    }: OutHubOptions,
     peer_endpoint: Option<SocketAddr>,
   ) -> anyhow::Result<()> {
     let pem_path = self.context_dir.join(NODE_PEM_FILE_NAME);
@@ -148,12 +164,12 @@ impl Out {
         let qomt_connection = qomt_connect(
           &mut quiche_config,
           udp_quiche_config,
-          self.hub_options.address,
-          self.hub_options.connections.max(1),
+          address,
+          connections.max(1),
         )
         .await?;
 
-        log::info!("connection to HUB established.");
+        log::info!("connection to HUB {address} established.");
 
         let hub_id = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
           let mut stream = qomt_connection.open_stream();
@@ -177,17 +193,17 @@ impl Out {
         .await
         .context("timed out waiting for HUB hello acknowledgement")??;
 
-        log::info!("connection registered with HUB {hub_id}.");
+        log::info!("connection registered with HUB {address} ({hub_id}).");
 
         self.clone().handle_node(qomt_connection).await?;
 
-        log::info!("connection to HUB closed.");
+        log::info!("connection to HUB {address} closed.");
 
         anyhow::Ok(())
       }
       .await
       .inspect_err(|error| {
-        log::error!("HUB connection error: {error}");
+        log::error!("HUB {address} connection error: {error}");
       })
       .ok();
 
@@ -369,7 +385,7 @@ pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow
   let context_dir = context_dir.as_ref();
   let peer_addresses = config.peer_addresses()?;
   let OutConfig {
-    hub,
+    hubs,
     exits,
     listen: _,
     advertise: _,
@@ -383,7 +399,7 @@ pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow
     local_out_dispatchers,
     listen,
     advertise,
-    hub: hub.into(),
+    hubs: hubs.into_iter().map(Into::into).collect(),
     context_dir: context_dir.to_owned(),
   });
 
@@ -425,10 +441,10 @@ mod tests {
       ],
       listen: None,
       advertise: None,
-      hub: OutHubOptions {
+      hubs: vec![OutHubOptions {
         address: "127.0.0.1:1122".parse().unwrap(),
         connections: 1,
-      },
+      }],
       context_dir: PathBuf::new(),
     });
 
@@ -450,9 +466,9 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn hub_connections_are_underlying_tcp_connections_in_one_qomt() -> anyhow::Result<()> {
+  async fn hubs_have_independent_mtcp_connections_and_shared_identity() -> anyhow::Result<()> {
     timeout(duration!("15s"), async {
-      const EXPECTED_PATHS: usize = 4;
+      const EXPECTED_PATHS: [usize; 2] = [2, 4];
 
       let test_dir =
         test_dir().join(format!("out_mtcp_tcp_connections_{}", uuid::Uuid::new_v4()));
@@ -463,10 +479,21 @@ mod tests {
       generate_node_pem_file(&test_dir, "hub", true).await?;
       generate_node_pem_file(&test_dir, "out", true).await?;
 
-      let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
-      let hub_address = tcp_listener.local_addr()?;
-      let mut mt_connections_listener =
-        MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener, None);
+      let hub_listeners = [
+        TcpListener::bind("127.0.0.1:0").await?,
+        TcpListener::bind("127.0.0.1:0").await?,
+      ];
+      let hubs = hub_listeners
+        .iter()
+        .zip(EXPECTED_PATHS)
+        .map(|(listener, connections)| {
+          Ok(OutHubOptions {
+            address: listener.local_addr()?,
+            connections,
+          })
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+      let peer_endpoint = "203.0.113.10:2233".parse()?;
 
       let out = Out::new(OutOptions {
         local_out_dispatchers: vec![LocalOutDispatcher::new_default(
@@ -474,67 +501,83 @@ mod tests {
             tags: vec![OutExitTag::from("system")],
           },
         )],
-        listen: None,
-        advertise: None,
-        hub: OutHubOptions {
-          address: hub_address,
-          connections: EXPECTED_PATHS,
-        },
+        listen: Some("127.0.0.1:0".parse()?),
+        advertise: Some(peer_endpoint),
+        hubs,
         context_dir: out_dir,
       });
       let out_id = out.id;
+      let out_exits = out.exits.clone();
 
       let mut tasks = JoinSet::new();
       tasks.spawn(out.run());
 
-      let mt_connections = mt_connections_listener.accept().await?;
-      let connection_count = mt_connections.connection_count_observer();
-      let mut hub_quiche_config = create_quiche_config(hub_dir.join(NODE_PEM_FILE_NAME))?;
-      let qomt_connection = qomt_accept(&mut hub_quiche_config, None, mt_connections).await?;
+      let mut hub_tasks = JoinSet::new();
+      for (tcp_listener, expected_paths) in hub_listeners.into_iter().zip(EXPECTED_PATHS) {
+        let hub_dir = hub_dir.clone();
+        let out_exits = out_exits.clone();
+        hub_tasks.spawn(async move {
+          let mut mt_connections_listener =
+            MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener, None);
+          let mt_connections = mt_connections_listener.accept().await?;
+          let connection_count = mt_connections.connection_count_observer();
+          let mut hub_quiche_config = create_quiche_config(hub_dir.join(NODE_PEM_FILE_NAME))?;
+          let qomt_connection = qomt_accept(&mut hub_quiche_config, None, mt_connections).await?;
 
-      // `accept()` consumes Extend requests internally and returns only for a
-      // new mTCP group. The configured paths must therefore join this group
-      // without producing a second QomT connection.
-      let mut next_group = Box::pin(mt_connections_listener.accept());
-      timeout(duration!("5s"), async {
-        loop {
-          if connection_count.load(Ordering::Acquire) == EXPECTED_PATHS {
-            break anyhow::Ok(());
-          }
+          // `accept()` consumes Extend requests internally and returns only for a
+          // new mTCP group. The configured paths must therefore join this group
+          // without producing a second QomT connection.
+          let mut next_group = Box::pin(mt_connections_listener.accept());
+          timeout(duration!("5s"), async {
+            loop {
+              if connection_count.load(Ordering::Acquire) == expected_paths {
+                break anyhow::Ok(());
+              }
 
-          tokio::select! {
-            result = &mut next_group => {
-              result?;
-              anyhow::bail!(
-                "OUT opened a second QomT connection instead of extending mTCP with another TCP connection"
-              );
+              tokio::select! {
+                result = &mut next_group => {
+                  result?;
+                  anyhow::bail!(
+                    "OUT opened a second QomT connection instead of extending mTCP with another TCP connection"
+                  );
+                }
+                _ = sleep(duration!("10ms")) => {}
+              }
             }
-            _ = sleep(duration!("10ms")) => {}
-          }
-        }
-      })
-      .await
-      .map_err(|_| {
-        anyhow::anyhow!(
-          "timed out waiting for {EXPECTED_PATHS} underlying TCP connections in mTCP"
-        )
-      })??;
+          })
+          .await
+          .map_err(|_| {
+            anyhow::anyhow!(
+              "timed out waiting for {expected_paths} underlying TCP connections in mTCP"
+            )
+          })??;
 
-      drop(next_group);
+          drop(next_group);
 
-      let mut hello_stream = qomt_connection
-        .accept_stream()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("missing OUT hello stream"))?;
-      let NodeHello::Out(hello) = postcard_read_stream_to_end(&mut hello_stream).await? else {
-        anyhow::bail!("expected OUT hello");
-      };
-      assert_eq!(hello.id, out_id);
+          let mut hello_stream = qomt_connection
+            .accept_stream()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing OUT hello stream"))?;
+          let NodeHello::Out(hello) = postcard_read_stream_to_end(&mut hello_stream).await? else {
+            anyhow::bail!("expected OUT hello");
+          };
+          assert_eq!(hello.id, out_id);
+          assert_eq!(hello.exits, out_exits);
+          assert_eq!(hello.peer_endpoint, Some(peer_endpoint));
 
-      hello_stream
-        .write_all(&postcard::to_allocvec(&NodeHelloAck(NodeId::new())).unwrap())
-        .await?;
-      hello_stream.shutdown().await?;
+          hello_stream
+            .write_all(&postcard::to_allocvec(&NodeHelloAck(NodeId::new())).unwrap())
+            .await?;
+          hello_stream.shutdown().await?;
+
+          anyhow::Ok(qomt_connection)
+        });
+      }
+
+      let mut hub_connections = Vec::new();
+      while let Some(result) = hub_tasks.join_next().await {
+        hub_connections.push(result??);
+      }
 
       drop(tasks);
 
@@ -570,10 +613,10 @@ mod tests {
         )],
         listen: None,
         advertise: None,
-        hub: OutHubOptions {
+        hubs: vec![OutHubOptions {
           address: "127.0.0.1:1".parse()?,
           connections: 1,
-        },
+        }],
         context_dir: out_dir,
       })
       .arc();

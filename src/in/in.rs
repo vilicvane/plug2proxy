@@ -810,10 +810,10 @@ mod tests {
         )],
         listen: None,
         advertise: None,
-        hub: OutHubOptions {
+        hubs: vec![OutHubOptions {
           address: "127.0.0.1:1".parse()?,
           connections: 1,
-        },
+        }],
         context_dir: out_dir,
       })
       .arc();

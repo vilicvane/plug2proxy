@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{collections::HashSet, net::SocketAddr};
 
 use anyhow::Context;
 use lowkit::{SelfWrapExt, SerdeSocketAddress};
@@ -13,7 +13,8 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct OutConfig {
-  pub hub: OutHubConfig,
+  #[serde(alias = "hub", deserialize_with = "deserialize_out_hubs")]
+  pub hubs: Vec<OutHubConfig>,
   #[serde(default)]
   pub exits: Vec<ExitConfig>,
   #[serde(
@@ -55,6 +56,41 @@ impl OutConfig {
 pub struct OutHubConfig {
   pub address: SerdeSocketAddress,
   pub connections: Option<usize>,
+}
+
+fn deserialize_out_hubs<'de, D>(deserializer: D) -> Result<Vec<OutHubConfig>, D::Error>
+where
+  D: Deserializer<'de>,
+{
+  #[derive(Deserialize)]
+  #[serde(untagged)]
+  enum Hubs {
+    One(OutHubConfig),
+    Many(Vec<OutHubConfig>),
+  }
+
+  let hubs = match Hubs::deserialize(deserializer)? {
+    Hubs::One(hub) => vec![hub],
+    Hubs::Many(hubs) => hubs,
+  };
+
+  if hubs.is_empty() {
+    return Err(serde::de::Error::custom("OUT requires at least one HUB"));
+  }
+
+  let mut addresses = HashSet::new();
+
+  for hub in &hubs {
+    let address = hub.address.into_inner();
+
+    if !addresses.insert(address) {
+      return Err(serde::de::Error::custom(format!(
+        "duplicate OUT HUB address {address}"
+      )));
+    }
+  }
+
+  Ok(hubs)
 }
 
 impl From<OutHubConfig> for OutHubOptions {
@@ -159,6 +195,92 @@ impl From<OutExitConfig> for OutExit {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn parses_single_hub_objects_and_lists_with_default_connections() {
+    for source in [
+      r#"{"hub":{"address":"127.0.0.1:1122"}}"#,
+      r#"{"hubs":{"address":"127.0.0.1:1122"}}"#,
+      r#"{"hub":[{"address":"127.0.0.1:1122"}]}"#,
+      r#"{"hubs":[{"address":"127.0.0.1:1122"}]}"#,
+    ] {
+      let config: OutConfig = serde_json::from_str(source).unwrap();
+      assert_eq!(config.hubs.len(), 1);
+
+      let hub: OutHubOptions = config.hubs.into_iter().next().unwrap().into();
+      assert_eq!(hub.address, "127.0.0.1:1122".parse().unwrap());
+      assert_eq!(hub.connections, 4);
+    }
+  }
+
+  #[test]
+  fn parses_multiple_hubs_with_independent_connection_counts() {
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hubs": [
+          {"address": "127.0.0.1:1122", "connections": 2},
+          {"address": "[::1]:2233", "connections": 6}
+        ]
+      }"#,
+    )
+    .unwrap();
+    let hubs: Vec<OutHubOptions> = config.hubs.into_iter().map(Into::into).collect();
+
+    assert_eq!(hubs.len(), 2);
+    assert_eq!(hubs[0].address, "127.0.0.1:1122".parse().unwrap());
+    assert_eq!(hubs[0].connections, 2);
+    assert_eq!(hubs[1].address, "[::1]:2233".parse().unwrap());
+    assert_eq!(hubs[1].connections, 6);
+  }
+
+  #[test]
+  fn rejects_empty_and_duplicate_hubs() {
+    for (source, expected_error) in [
+      (r#"{"hubs":[]}"#, "OUT requires at least one HUB"),
+      (r#"{"hub":[]}"#, "OUT requires at least one HUB"),
+      (
+        r#"{"hubs":[{"address":"127.0.0.1:1122"},{"address":"127.0.0.1:1122"}]}"#,
+        "duplicate OUT HUB address 127.0.0.1:1122",
+      ),
+      (
+        r#"{"hubs":[
+          {"address":"127.0.0.1:1122","connections":2},
+          {"address":"127.0.0.1:1122","connections":4}
+        ]}"#,
+        "duplicate OUT HUB address 127.0.0.1:1122",
+      ),
+    ] {
+      let error = serde_json::from_str::<OutConfig>(source).unwrap_err();
+      assert!(error.to_string().contains(expected_error), "{error}");
+    }
+  }
+
+  #[test]
+  fn rejects_missing_malformed_and_conflicting_hub_fields() {
+    for source in [
+      "{}",
+      r#"{"hubs":null}"#,
+      r#"{"hubs":"127.0.0.1:1122"}"#,
+      r#"{"hubs":[{}]}"#,
+      r#"{"hubs":[{"address":"hub.example:1122"}]}"#,
+    ] {
+      assert!(
+        serde_json::from_str::<OutConfig>(source).is_err(),
+        "{source}"
+      );
+    }
+
+    for source in [
+      r#"{"hub":{"address":"127.0.0.1:1122"},"hubs":[{"address":"127.0.0.1:2233"}]}"#,
+      r#"{"hubs":[{"address":"127.0.0.1:2233"}],"hub":{"address":"127.0.0.1:1122"}}"#,
+    ] {
+      let error = serde_json::from_str::<OutConfig>(source).unwrap_err();
+      assert!(
+        error.to_string().contains("duplicate field `hubs`"),
+        "{error}"
+      );
+    }
+  }
 
   #[test]
   fn builds_private_default_when_exits_are_omitted() {

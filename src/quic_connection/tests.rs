@@ -6,6 +6,7 @@ use std::{
   },
 };
 
+use anyhow::Context;
 use futures::{SinkExt, StreamExt};
 use lits::{bytes, duration};
 use lowkit::SelfWrapExt;
@@ -13,7 +14,7 @@ use rand::Rng;
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
   net::TcpListener,
-  sync::oneshot,
+  sync::{oneshot, watch},
   task::JoinSet,
   time::{sleep, timeout},
 };
@@ -735,7 +736,7 @@ async fn dropped_stream_tasks_are_reaped() -> anyhow::Result<()> {
 
     timeout(duration!("2s"), async {
       loop {
-        if out_quic_connection.diagnostics().contains("streams=0 ") {
+        if out_quic_connection.diagnostics().contains(" streams=0 ") {
           break;
         }
 
@@ -818,8 +819,8 @@ async fn dropped_request_response_stream_tasks_are_reaped() -> anyhow::Result<()
 
     timeout(duration!("2s"), async {
       loop {
-        if out_quic_connection.diagnostics().contains("streams=0 ")
-          && hub_quic_connection.diagnostics().contains("streams=0 ")
+        if out_quic_connection.diagnostics().contains(" streams=0 ")
+          && hub_quic_connection.diagnostics().contains(" streams=0 ")
         {
           break;
         }
@@ -835,6 +836,112 @@ async fn dropped_request_response_stream_tasks_are_reaped() -> anyhow::Result<()
         hub_quic_connection.diagnostics(),
       )
     })?;
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn late_stop_sending_releases_stream_credit() -> anyhow::Result<()> {
+  timeout(duration!("10s"), async {
+    let [mut hub_config, mut out_config] = get_quiche_configs().await?;
+    // Retaining even one completed stream must prevent the next request,
+    // rather than hiding the leak behind the production limit of 65536.
+    hub_config.set_initial_max_streams_bidi(1);
+
+    let (hub_sender, hub_receiver) = flume::bounded::<QuicBytesPacket>(64);
+    let (out_sender, out_receiver) = flume::bounded::<QuicBytesPacket>(64);
+    let (response_gate, gate_receiver) = watch::channel(true);
+    let gated_hub_packets = Box::pin(hub_receiver.into_stream().filter_map(move |packet| {
+      let mut gate = gate_receiver.clone();
+      async move {
+        if gate.wait_for(|open| *open).await.is_err() {
+          return None;
+        }
+        Some(packet)
+      }
+    }));
+
+    let id = QuicConnection::generate_connection_id();
+    let out = QuicConnection::connect_with_sink_and_stream(
+      &id,
+      &mut out_config,
+      out_sender.into_sink(),
+      gated_hub_packets,
+    );
+    let hub = QuicConnection::accept_with_sink_and_stream(
+      out.id(),
+      &mut hub_config,
+      hub_sender.into_sink(),
+      out_receiver.into_stream(),
+    );
+    tokio::try_join!(out.established(), hub.established())?;
+
+    // Let the server finish both wrapper tasks before the client can receive
+    // its response. A subsequent STOP_SENDING then has no send task left to
+    // consume StreamStopped and let quiche collect the stream.
+    response_gate.send(false)?;
+    let mut request = out.open_stream();
+    request.write_all(b"request").await?;
+    request.shutdown().await?;
+    let mut response = hub.accept_stream().await?.unwrap();
+    let mut bytes = Vec::new();
+    response.read_to_end(&mut bytes).await?;
+    assert_eq!(bytes, b"request");
+    response.write_all(b"response").await?;
+    response.shutdown().await?;
+    timeout(duration!("2s"), async {
+      while !hub.diagnostics().contains(" streams=0 ") {
+        sleep(duration!("5ms")).await;
+      }
+    })
+    .await
+    .context("server stream tasks did not finish before STOP_SENDING")?;
+
+    drop(request);
+    timeout(duration!("2s"), async {
+      while !hub.diagnostics().contains("stopped_remote=1 ") {
+        sleep(duration!("5ms")).await;
+      }
+    })
+    .await
+    .context("server did not receive the late STOP_SENDING")?;
+    drop(response);
+    response_gate.send(true)?;
+
+    // The reset must be acknowledged and the stream credit returned even
+    // though the wrapper already forgot the stopped stream.
+    tokio::try_join!(
+      async {
+        // Wait for the credit before opening another stream: open_stream()
+        // itself is local and does not wait for MAX_STREAMS.
+        timeout(duration!("2s"), async {
+          while out.peer_streams_left_bidi_for_test() == 0 {
+            sleep(duration!("5ms")).await;
+          }
+        })
+        .await
+        .context("completed stopped stream did not return its MAX_STREAMS credit")?;
+        let mut next = out.open_stream();
+        next.write_all(b"next").await?;
+        next.shutdown().await?;
+        let mut reply = Vec::new();
+        next.read_to_end(&mut reply).await?;
+        assert_eq!(reply, b"ok");
+        anyhow::Ok(())
+      },
+      async {
+        let mut next = hub.accept_stream().await?.unwrap();
+        let mut request = Vec::new();
+        next.read_to_end(&mut request).await?;
+        assert_eq!(request, b"next");
+        next.write_all(b"ok").await?;
+        next.shutdown().await?;
+        anyhow::Ok(())
+      },
+    )?;
 
     anyhow::Ok(())
   })
@@ -930,8 +1037,8 @@ async fn concurrent_dropped_request_response_stream_tasks_are_reaped() -> anyhow
 
     timeout(duration!("5s"), async {
       loop {
-        if out_quic_connection.diagnostics().contains("streams=0 ")
-          && hub_quic_connection.diagnostics().contains("streams=0 ")
+        if out_quic_connection.diagnostics().contains(" streams=0 ")
+          && hub_quic_connection.diagnostics().contains(" streams=0 ")
         {
           break;
         }
@@ -1422,8 +1529,8 @@ async fn concurrent_bulk_streams_survive_lossy_transport() -> anyhow::Result<()>
 
   let reap_result = timeout(duration!("10s"), async {
     loop {
-      if out_quic_connection.diagnostics().contains("streams=0 ")
-        && hub_quic_connection.diagnostics().contains("streams=0 ")
+      if out_quic_connection.diagnostics().contains(" streams=0 ")
+        && hub_quic_connection.diagnostics().contains(" streams=0 ")
       {
         break;
       }

@@ -1213,12 +1213,24 @@ impl QuicConnection {
                   log::trace!("{side} recv ok");
 
                   let (readable, writable) = {
-                    let connection = connection.lock().unwrap();
+                    let mut connection = connection.lock().unwrap();
+                    let mut writable = Vec::new();
 
-                    (
-                      connection.readable().collect::<Vec<_>>(),
-                      connection.writable().collect::<Vec<_>>(),
-                    )
+                    // Consume readiness instead of copying the entire writable
+                    // set on every packet. stream_send() re-arms streams that
+                    // block on connection capacity; MAX_STREAM_DATA re-arms
+                    // streams blocked on their own flow-control window.
+                    while let Some(id) = connection.stream_writable_next() {
+                      // STOP_SENDING can arrive after the send task has ended.
+                      // Observe StreamStopped here too, so quiche can collect
+                      // completed streams even when no task will send again.
+                      // Live senders are still notified and observe the error
+                      // themselves (or InvalidStreamState if already collected).
+                      let _ = connection.stream_capacity(id);
+                      writable.push(id);
+                    }
+
+                    (connection.readable(), writable)
                   };
 
                   for id in writable {
@@ -1402,6 +1414,11 @@ impl QuicConnection {
       self.side,
       &self.diagnostic_id(),
     )
+  }
+
+  #[cfg(test)]
+  pub(super) fn peer_streams_left_bidi_for_test(&self) -> u64 {
+    self.connection.lock().unwrap().peer_streams_left_bidi()
   }
 
   pub fn datagram_socket(&self) -> QuicDatagramSocket {
