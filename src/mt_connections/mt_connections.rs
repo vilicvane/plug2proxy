@@ -1,5 +1,6 @@
 use std::{
-  collections::HashMap,
+  cmp::Reverse,
+  collections::{HashMap, VecDeque},
   fmt,
   net::SocketAddr,
   pin::Pin,
@@ -19,7 +20,7 @@ use lowkit::{DropCallback, SelfWrapExt, TurnArcWeak, tokio_join_set};
 use serde::{Deserialize, Serialize};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::{
-  io::{AsyncRead, AsyncWrite},
+  io::{AsyncRead, AsyncWrite, AsyncWriteExt},
   net::TcpStream,
   sync::{Notify, mpsc, watch},
   task::JoinSet,
@@ -43,6 +44,7 @@ pub const MT_CONNECTIONS_TCP_USER_TIMEOUT: Duration = Duration::from_secs(60);
 // socket becomes writable again only after its unsent queue drains to zero.
 pub const MT_CONNECTIONS_TCP_NOTSENT_LOWAT: u32 = 1;
 const MT_CONNECTIONS_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const MT_CONNECTIONS_ROTATION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MT_CONNECTIONS_TCP_INFO_INTERVAL: Duration = Duration::from_millis(50);
 const MT_CONNECTIONS_TCP_INFO_STALE_AFTER: Duration = Duration::from_millis(250);
 // Allow delayed ACKs and a TCP retransmission before suspending a path. The
@@ -76,7 +78,32 @@ struct MtTcpPathState {
   activity_window: Duration,
   transport: quiche::ReliableTransport,
   active: watch::Sender<bool>,
+  retiring: watch::Sender<bool>,
   sample: Option<MtTcpPathSample>,
+  rtt_minima: VecDeque<(Instant, Duration)>,
+}
+
+impl MtTcpPathState {
+  fn minimum_rtt(&mut self, now: Instant) -> Option<Duration> {
+    while self.rtt_minima.front().is_some_and(|(sampled_at, _)| {
+      now.saturating_duration_since(*sampled_at) >= MT_CONNECTIONS_ROTATION_INTERVAL
+    }) {
+      self.rtt_minima.pop_front();
+    }
+    self.rtt_minima.front().map(|(_, rtt)| *rtt)
+  }
+
+  fn record_rtt(&mut self, now: Instant, rtt: Duration) {
+    self.minimum_rtt(now);
+    while self
+      .rtt_minima
+      .back()
+      .is_some_and(|(_, previous)| *previous >= rtt)
+    {
+      self.rtt_minima.pop_back();
+    }
+    self.rtt_minima.push_back((now, rtt));
+  }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -138,7 +165,9 @@ impl MtConnectionsUnderlayMetrics {
         activity_window: MT_CONNECTIONS_ACK_ACTIVITY_MIN,
         transport: quiche::ReliableTransport::default(),
         active: watch::channel(true).0,
+        retiring: watch::channel(false).0,
         sample: None,
+        rtt_minima: VecDeque::new(),
       },
     );
     path_id
@@ -164,6 +193,15 @@ impl MtConnectionsUnderlayMetrics {
     let Some(path) = paths.get_mut(&path_id) else {
       return;
     };
+    // Repeated reads of TCP_INFO must not keep an old RTT observation alive.
+    // Idle connections obtain fresh samples from the existing ACK probes.
+    if !info.rtt.is_zero()
+      && path
+        .sample
+        .is_none_or(|sample| info.bytes_acked > sample.info.bytes_acked)
+    {
+      path.record_rtt(now, info.rtt);
+    }
     if path
       .sample
       .is_some_and(|sample| info.bytes_acked > sample.info.bytes_acked)
@@ -199,6 +237,52 @@ impl MtConnectionsUnderlayMetrics {
 
   fn subscribe_path(&self, path_id: u64) -> watch::Receiver<bool> {
     self.paths.lock().unwrap()[&path_id].active.subscribe()
+  }
+
+  fn subscribe_retirement(&self, path_id: u64) -> watch::Receiver<bool> {
+    self.paths.lock().unwrap()[&path_id].retiring.subscribe()
+  }
+
+  fn retire_path(&self, path_id: u64) {
+    if let Some(path) = self.paths.lock().unwrap().get(&path_id) {
+      path.retiring.send_replace(true);
+    }
+  }
+
+  pub(crate) fn available_path_count(&self) -> usize {
+    self
+      .paths
+      .lock()
+      .unwrap()
+      .values()
+      .filter(|path| !*path.retiring.borrow())
+      .count()
+  }
+
+  pub(crate) fn retire_worst_path(&self, target_connections: usize, now: Instant) -> Option<u64> {
+    let mut paths = self.paths.lock().unwrap();
+    if paths
+      .values()
+      .filter(|path| !*path.retiring.borrow())
+      .count()
+      <= target_connections.max(1)
+    {
+      return None;
+    }
+    let (path_id, minimum_rtt) = paths
+      .iter_mut()
+      .filter(|(_, path)| !*path.retiring.borrow())
+      .filter_map(|(&path_id, path)| path.minimum_rtt(now).map(|rtt| (path_id, rtt)))
+      .max_by_key(|(path_id, rtt)| (*rtt, Reverse(*path_id)))?;
+    let path = &paths[&path_id];
+    path.retiring.send_replace(true);
+    log::info!(
+      "retiring mTCP path {:?}->{}: minimum RTT over the last five minutes={:?}, target_connections={target_connections}",
+      path.local_address,
+      path.peer_address,
+      minimum_rtt,
+    );
+    Some(path_id)
   }
 
   // Assignment and inactivity transitions share this lock. If a receiver
@@ -571,7 +655,10 @@ where
             move || metrics.remove_path(path_id)
           });
           let mut path_active = underlay_metrics.subscribe_path(path_id);
+          let mut path_retiring = underlay_metrics.subscribe_retirement(path_id);
+          let mut retirement_deadline = path_retiring.clone();
           let write_metrics = underlay_metrics.clone();
+          let read_metrics = underlay_metrics.clone();
           let recv_order = quiche::ReliableRecv::default();
 
           #[cfg(target_os = "linux")]
@@ -585,80 +672,108 @@ where
           let write_diagnostics = diagnostics.clone();
           let read_diagnostics = diagnostics.clone();
 
+          let write = async move {
+            let mut probe_interval = interval_at(
+              TokioInstant::now() + MT_CONNECTIONS_ACK_PROBE_INTERVAL,
+              MT_CONNECTIONS_ACK_PROBE_INTERVAL,
+            );
+            probe_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+              if *path_retiring.borrow_and_update() {
+                break;
+              }
+              let active = *path_active.borrow_and_update();
+              let packet = tokio::select! {
+                biased;
+                changed = path_retiring.changed() => {
+                  changed?;
+                  continue;
+                }
+                changed = path_active.changed() => {
+                  changed?;
+                  continue;
+                }
+                _ = probe_interval.tick() => {
+                  if write_metrics.needs_probe(path_id, Instant::now()) {
+                    timeout(MT_CONNECTIONS_PACKET_WRITE_TIMEOUT, TPacket::write_probe(&mut tcp_write))
+                      .await.map_err(|_| anyhow::anyhow!("timed out writing TCP activity probe"))??;
+                  }
+                  continue;
+                }
+                packet = packet_receiver.recv_async(), if active => {
+                  match packet {
+                    Ok(packet) => packet,
+                    Err(flume::RecvError::Disconnected) => break,
+                  }
+                }
+              };
+              if !write_metrics.bind_packet(path_id, &packet) {
+                continue;
+              }
+              let packet_length = packet.len();
+              write_diagnostics
+                .pending_tcp_writes
+                .fetch_add(1, atomic::Ordering::AcqRel);
+              let write_result = timeout(
+                MT_CONNECTIONS_PACKET_WRITE_TIMEOUT,
+                TPacket::write_packet(&mut tcp_write, packet),
+              )
+              .await;
+              write_diagnostics
+                .pending_tcp_writes
+                .fetch_sub(1, atomic::Ordering::AcqRel);
+              write_result
+                .map_err(|_| anyhow::anyhow!("timed out writing packet to TCP stream"))??;
+              write_diagnostics.record_tcp_write(packet_length);
+            }
+
+            // Finish the current frame before sending FIN. Keep receiving
+            // until the peer has likewise drained its write half.
+            timeout(MT_CONNECTIONS_PACKET_WRITE_TIMEOUT, tcp_write.shutdown()).await??;
+            log::debug!("{side} write tcp stream loop ended");
+
+            anyhow::Ok(())
+          };
+          let read = async move {
+            loop {
+              let Some(mut packet) = TPacket::read_next_packet(&mut tcp_read).await? else {
+                read_metrics.retire_path(path_id);
+                break;
+              };
+              if packet.is_empty() {
+                continue;
+              }
+              packet.set_reliable_recv(recv_order.clone());
+              read_diagnostics.record_tcp_read(packet.len());
+              read_diagnostics
+                .pending_packet_deliveries
+                .fetch_add(1, atomic::Ordering::AcqRel);
+              let send_result = packet_sender.send_async(packet).await;
+              read_diagnostics
+                .pending_packet_deliveries
+                .fetch_sub(1, atomic::Ordering::AcqRel);
+              send_result?;
+            }
+
+            log::debug!("{side} read tcp stream loop ended");
+
+            anyhow::Ok(())
+          };
           let copy_result = tokio::select! {
-            result = async move {
-              let mut probe_interval = interval_at(
-                TokioInstant::now() + MT_CONNECTIONS_ACK_PROBE_INTERVAL,
-                MT_CONNECTIONS_ACK_PROBE_INTERVAL,
-              );
-              probe_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-              loop {
-                let active = *path_active.borrow_and_update();
-                let packet = tokio::select! {
-                  biased;
-                  changed = path_active.changed() => {
-                    changed?;
-                    continue;
-                  }
-                  _ = probe_interval.tick() => {
-                    if write_metrics.needs_probe(path_id, Instant::now()) {
-                      timeout(MT_CONNECTIONS_PACKET_WRITE_TIMEOUT, TPacket::write_probe(&mut tcp_write))
-                        .await.map_err(|_| anyhow::anyhow!("timed out writing TCP activity probe"))??;
-                    }
-                    continue;
-                  }
-                  packet = packet_receiver.recv_async(), if active => {
-                    match packet {
-                      Ok(packet) => packet,
-                      Err(flume::RecvError::Disconnected) => break,
-                    }
-                  }
-                };
-                if !write_metrics.bind_packet(path_id, &packet) {
-                  continue;
-                }
-                let packet_length = packet.len();
-                write_diagnostics.pending_tcp_writes.fetch_add(1, atomic::Ordering::AcqRel);
-                let write_result = timeout(
-                  MT_CONNECTIONS_PACKET_WRITE_TIMEOUT,
-                  TPacket::write_packet(&mut tcp_write, packet),
-                ).await;
-                write_diagnostics.pending_tcp_writes.fetch_sub(1, atomic::Ordering::AcqRel);
-                write_result.map_err(|_| anyhow::anyhow!("timed out writing packet to TCP stream"))??;
-                write_diagnostics.record_tcp_write(packet_length);
-              }
-
-              log::debug!("{side} write tcp stream loop ended");
-
-              anyhow::Ok(())
-            } => result,
-            result = async move {
-              loop {
-                let Some(mut packet) = TPacket::read_next_packet(&mut tcp_read).await? else {
-                  break;
-                };
-                if packet.is_empty() {
-                  continue;
-                }
-                packet.set_reliable_recv(recv_order.clone());
-                read_diagnostics.record_tcp_read(packet.len());
-                read_diagnostics
-                  .pending_packet_deliveries
-                  .fetch_add(1, atomic::Ordering::AcqRel);
-                let send_result = packet_sender.send_async(packet).await;
-                read_diagnostics
-                  .pending_packet_deliveries
-                  .fetch_sub(1, atomic::Ordering::AcqRel);
-                send_result?;
-              }
-
-              log::debug!("{side} read tcp stream loop ended");
-
+            result = async {
+              tokio::try_join!(write, read)?;
               anyhow::Ok(())
             } => result,
             result = monitor_mt_tcp_info(raw_fd, path_id, underlay_metrics.clone()) => {
               result.map_err(Into::into)
             },
+            result = async move {
+              while !*retirement_deadline.borrow_and_update() {
+                retirement_deadline.changed().await?;
+              }
+              tokio::time::sleep(MT_CONNECTIONS_TCP_USER_TIMEOUT).await;
+              anyhow::bail!("timed out draining retired mTCP path");
+            } => result,
           };
 
           drop(path_registration);
@@ -947,6 +1062,100 @@ pub enum MtConnectionsError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  struct DrainTestPacket {
+    bytes: Vec<u8>,
+    write_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+  }
+
+  impl MtConnectionsPacket for DrainTestPacket {
+    fn bind_reliable_transport(&self, _transport: quiche::ReliableTransport) -> bool {
+      false
+    }
+
+    fn set_reliable_recv(&mut self, _recv: quiche::ReliableRecv) {}
+
+    async fn write_probe(stream: &mut (dyn AsyncWrite + Unpin + Send)) -> std::io::Result<()> {
+      stream.write_all(&0u32.to_be_bytes()).await
+    }
+
+    fn len(&self) -> usize {
+      self.bytes.len()
+    }
+
+    async fn read_next_packet(
+      stream: &mut (dyn AsyncRead + Unpin + Send),
+    ) -> std::io::Result<Option<Self>> {
+      use crate::quic_connection::QuicBytesPacket;
+      Ok(
+        QuicBytesPacket::read_next_packet(stream)
+          .await?
+          .map(|packet| Self {
+            bytes: packet.as_slice().to_vec(),
+            write_gate: None,
+          }),
+      )
+    }
+
+    async fn write_packet(
+      stream: &mut (dyn AsyncWrite + Unpin + Send),
+      packet: Self,
+    ) -> std::io::Result<()> {
+      stream.write_u32(packet.bytes.len() as u32).await?;
+      if let Some((started, release)) = packet.write_gate {
+        started.notify_one();
+        release.notified().await;
+      }
+      stream.write_all(&packet.bytes).await
+    }
+  }
+
+  #[tokio::test]
+  async fn retiring_tcp_finishes_a_partial_frame_and_keeps_receiving_after_fin()
+  -> anyhow::Result<()> {
+    use crate::quic_connection::QuicBytesPacket;
+    use futures::{SinkExt, StreamExt};
+
+    timeout(Duration::from_secs(5), async {
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+      let (client, (mut peer, _)) = tokio::try_join!(
+        TcpStream::connect(listener.local_addr()?),
+        listener.accept(),
+      )?;
+      let (transport, _sender, _) = MtConnections::<DrainTestPacket>::new(
+        client,
+        ConnectionSide::Client,
+        MtConnectionsId::new(),
+      );
+      let metrics = transport.underlay_metrics();
+      let (mut outgoing, mut incoming) = transport.split();
+      let started = Arc::new(Notify::new());
+      let release = Arc::new(Notify::new());
+      let packet = DrainTestPacket {
+        bytes: b"complete frame".to_vec(),
+        write_gate: Some((started.clone(), release.clone())),
+      };
+      let send_task = tokio::spawn(async move { outgoing.send(packet).await });
+      started.notified().await;
+      metrics.retire_path(0);
+      release.notify_one();
+      let received = QuicBytesPacket::read_next_packet(&mut peer).await?.unwrap();
+      assert_eq!(received.as_slice(), b"complete frame");
+      assert!(
+        QuicBytesPacket::read_next_packet(&mut peer)
+          .await?
+          .is_none()
+      );
+
+      QuicBytesPacket::write_packet(&mut peer, b"reverse frame".to_vec().into()).await?;
+      peer.shutdown().await?;
+      assert_eq!(incoming.next().await.unwrap().bytes, b"reverse frame");
+      assert!(incoming.next().await.is_none());
+      send_task.await??;
+      anyhow::Ok(())
+    })
+    .await?
+  }
 
   #[cfg(target_os = "linux")]
   #[tokio::test]

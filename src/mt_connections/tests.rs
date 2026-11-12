@@ -45,6 +45,131 @@ fn tcp_info(bytes_acked: u64) -> MtTcpInfo {
 }
 
 #[test]
+fn rotation_uses_the_window_minimum_and_preserves_the_target_count() {
+  let metrics = MtConnectionsUnderlayMetrics::default();
+  let now = Instant::now();
+  let mut paths = Vec::new();
+  for milliseconds in [80, 90, 70] {
+    let path = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+    let mut info = tcp_info(1);
+    info.rtt = Duration::from_millis(milliseconds);
+    metrics.update_path(path, info, now);
+    paths.push(path);
+  }
+
+  // A high latest RTT does not change this path's better five-minute minimum.
+  let mut spike = tcp_info(2);
+  spike.rtt = Duration::from_millis(300);
+  metrics.update_path(paths[0], spike, now + Duration::from_secs(60));
+  assert_eq!(
+    metrics.retire_worst_path(2, now + Duration::from_secs(60)),
+    Some(paths[1])
+  );
+  assert_eq!(metrics.available_path_count(), 2);
+  assert_eq!(metrics.snapshot().paths, 3);
+  assert_eq!(
+    metrics.retire_worst_path(2, now + Duration::from_secs(60)),
+    None
+  );
+}
+
+#[test]
+fn rotation_expires_old_minima_and_ignores_stale_tcp_info() {
+  let metrics = MtConnectionsUnderlayMetrics::default();
+  let now = Instant::now();
+  let oldest = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+  let stale = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+  let other = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+  let mut initial = tcp_info(1);
+  initial.rtt = Duration::from_millis(10);
+  metrics.update_path(oldest, initial, now);
+  initial.rtt = Duration::from_millis(200);
+  metrics.update_path(stale, initial, now);
+  let later = now + Duration::from_secs(301);
+  let mut recent = tcp_info(2);
+  recent.rtt = Duration::from_millis(120);
+  metrics.update_path(oldest, recent, later);
+  recent.rtt = Duration::from_millis(80);
+  metrics.update_path(other, recent, later);
+  // Re-reading an unchanged counter cannot renew an expired RTT sample.
+  metrics.update_path(stale, initial, later);
+  assert_eq!(metrics.retire_worst_path(2, later), Some(oldest));
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_tcp_path_count(
+  client: &MtConnections<QuicBytesPacket>,
+  server: &MtConnections<QuicBytesPacket>,
+  expected: usize,
+) -> anyhow::Result<()> {
+  timeout(Duration::from_secs(2), async {
+    while client.connection_count() != expected || server.connection_count() != expected {
+      tokio::task::yield_now().await;
+    }
+  })
+  .await?;
+  Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rotation_adds_a_spare_then_replaces_one_path_after_it_drains() -> anyhow::Result<()> {
+  // The two explicit scheduler advances consume ten minutes of virtual time.
+  timeout(Duration::from_secs(610), async {
+    let socket = TcpListener::bind("127.0.0.1:0").await?;
+    let address = socket.local_addr()?;
+    let mut listener = MtConnectionsListener::<QuicBytesPacket>::new(socket, None);
+    let ((mut client, extend), mut server) = tokio::try_join!(
+      async {
+        mt_connections_connect::<QuicBytesPacket>(address, 4)
+          .await
+          .map_err(anyhow::Error::from)
+      },
+      async { listener.accept().await.map_err(anyhow::Error::from) },
+    )?;
+    let listener_task = tokio::spawn(async move { listener.accept().await });
+    let listener_guard = lowkit::DropCallback::new(move || listener_task.abort());
+    extend
+      .send(())
+      .map_err(|_| anyhow::anyhow!("extension task stopped"))?;
+    wait_for_tcp_path_count(&client, &server, 4).await?;
+    sleep(Duration::from_millis(100)).await;
+
+    // Advance only the scheduler clock. Real socket I/O runs with time resumed.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::resume();
+    wait_for_tcp_path_count(&client, &server, 5).await?;
+    sleep(Duration::from_millis(100)).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::resume();
+    wait_for_tcp_path_count(&client, &server, 4).await?;
+
+    client.send(b"during replacement".to_vec().into()).await?;
+    assert_eq!(
+      server.next().await.unwrap().as_slice(),
+      b"during replacement"
+    );
+    wait_for_tcp_path_count(&client, &server, 5).await?;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+      client.connection_count(),
+      5,
+      "retirement caused a duplicate replacement"
+    );
+    server.send(b"after replacement".to_vec().into()).await?;
+    assert_eq!(
+      client.next().await.unwrap().as_slice(),
+      b"after replacement"
+    );
+    drop(listener_guard);
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[test]
 fn tcp_ack_progress_pauses_and_resumes_only_its_own_path() {
   let metrics = MtConnectionsUnderlayMetrics::default();
   let path = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
