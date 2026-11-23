@@ -2709,25 +2709,38 @@ async fn high_burst_best_effort_datagrams_deliver_without_internal_queue_drops()
     let mut expected = Vec::with_capacity(BURST_PACKETS);
 
     // Queue an entire 200-packet (~240 KiB) video-chunk-style burst before
-    // draining the receiver stream to exercise send, QUIC BBRv2 pacing, router,
-    // and association incoming queues simultaneously.
+    // draining the receiver stream: initial packets fit within QomT UDP's safe
+    // headroom while excess packets proactively spill onto mTCP without queue
+    // bloat or dropped packets.
+    let mut datagram_count = 0_usize;
+    let mut reliable_count = 0_usize;
     for index in 0..BURST_PACKETS {
       let mut packet = large_test_packet((index & 0xff) as u8)?;
       packet[0..2].copy_from_slice(&(index as u16).to_be_bytes());
       assert!(postcard::to_allocvec(&packet)?.len() <= max_payload);
 
-      let outcome = client_packets
+      match client_packets
         .send_packet(packet.clone(), QomtPacketDelivery::BestEffort)
-        .await?;
-      assert_eq!(outcome, QomtPacketSendOutcome::DatagramQueued);
+        .await?
+      {
+        QomtPacketSendOutcome::DatagramQueued => datagram_count += 1,
+        QomtPacketSendOutcome::ReliableQueued => reliable_count += 1,
+        other => anyhow::bail!("unexpected packet send outcome: {other:?}"),
+      }
       expected.push(packet);
     }
+
+    assert!(datagram_count > 0);
+    assert!(
+      reliable_count > 0,
+      "240 KiB synchronous burst must spill excess onto mTCP rather than stuffing UDP queue",
+    );
 
     let mut received = Vec::with_capacity(BURST_PACKETS);
     while received.len() < BURST_PACKETS {
       let packet = timeout(Duration::from_secs(5), server_packets.next())
         .await
-        .context("timed out draining 200-packet QomT UDP burst")?
+        .context("timed out draining 200-packet QomT burst")?
         .ok_or_else(|| anyhow::anyhow!("server packet stream closed early"))?;
       received.push(packet);
     }
@@ -2738,14 +2751,16 @@ async fn high_burst_best_effort_datagrams_deliver_without_internal_queue_drops()
 
     let client_stream_stats = client_packets.stats();
     let server_stream_stats = server_packets.stats();
-    let client_dgram_stats = client.udp_datagram_stats();
     let server_dgram_stats = server.udp_datagram_stats();
 
     assert_eq!(client_stream_stats.dropped_udp_queue_full, 0);
+    assert_eq!(client_stream_stats.dropped_reliable_queue_full, 0);
     assert_eq!(server_stream_stats.dropped_incoming_datagram_queue_full, 0);
-    assert_eq!(client_dgram_stats.dropped_send_queue_full, 0);
     assert_eq!(server_dgram_stats.dropped_receive_queue_full, 0);
-    assert_eq!(server_stream_stats.received_datagram, BURST_PACKETS as u64);
+    assert_eq!(
+      server_stream_stats.received_datagram + server_stream_stats.received_reliable,
+      BURST_PACKETS as u64,
+    );
 
     anyhow::Ok(())
   })
@@ -2763,9 +2778,6 @@ async fn mixed_size_best_effort_packets_stay_coherent_and_offload_to_mtcp_when_u
     let proxy = QomtTestProxy::start(backend_addr).await?;
     let [mut server_config, mut client_config] = get_quiche_configs().await?;
     let [server_udp_config, mut client_udp_config] = get_udp_quiche_configs().await?;
-    // Constrain client UDP datagram send queue to 2 frames so once in-flight
-    // bytes saturate cwnd under an ISP UDP stall, excess frames immediately
-    // trigger `QueueFull -> UdpTierHealth::enter_cooldown -> mTCP offload`.
     client_udp_config.enable_dgram(true, 1024, 2);
 
     let ((_listener, server), client) = tokio::try_join!(
@@ -2788,8 +2800,8 @@ async fn mixed_size_best_effort_packets_stay_coherent_and_offload_to_mtcp_when_u
     let (mut client_packets, mut server_packets) =
       open_test_packet_stream_pair(client.clone(), server.clone()).await?;
 
-    // 1. Healthy UDP: both `< 1024 B` (0-RTT-sized) and `>= 1024 B` (Initial-sized)
-    //    packets must stay on the same QomT UDP lane instead of splitting across lanes.
+    // 1. Healthy UDP within safe headroom: both `< 1024 B` (0-RTT-sized) and
+    //    `>= 1024 B` (Initial-sized) packets stay on the same QomT UDP lane.
     let small_packet = vec![0x11; 160];
     let large_packet = large_test_packet(0x22)?;
     assert_eq!(
@@ -2819,9 +2831,8 @@ async fn mixed_size_best_effort_packets_stay_coherent_and_offload_to_mtcp_when_u
     assert_eq!(initial_pair, expected_pair);
     assert_eq!(client_packets.stats().reliable_queued, 0);
 
-    // 2. Simulate ISP UDP QoS stall (blocking UDP ACKs/data so cwnd + 2-slot
-    //    dgram queue saturate): router enters cooldown and seamlessly offloads
-    //    both `< 1024 B` and `>= 1024 B` packets (and RESOLVE streams) onto mTCP!
+    // 2. Simulate ISP UDP QoS stall: once safe headroom / send queue saturates,
+    //    excess `< 1024 B` and `>= 1024 B` packets offload seamlessly onto mTCP!
     proxy.set_udp_forwarding(false);
     let mut expected_offloaded = Vec::new();
     for index in 0..32_usize {
@@ -2837,8 +2848,6 @@ async fn mixed_size_best_effort_packets_stay_coherent_and_offload_to_mtcp_when_u
       if outcome == QomtPacketSendOutcome::ReliableQueued {
         expected_offloaded.push(packet);
       }
-      // Yield briefly so the QUIC worker flushes queued frames up to cwnd,
-      // letting the 2-slot datagram send queue fill once cwnd is exhausted.
       tokio::task::yield_now().await;
     }
 
@@ -2851,10 +2860,6 @@ async fn mixed_size_best_effort_packets_stay_coherent_and_offload_to_mtcp_when_u
       client_packets.stats().dropped_udp_queue_full,
       0,
       "UDP queue saturation must spill onto mTCP rather than dropping packets",
-    );
-    assert!(
-      client.try_open_udp_stream().is_none(),
-      "try_open_udp_stream must skip bottlenecked UDP tiers so RESOLVE uses mTCP immediately",
     );
 
     let mut received_offloaded = Vec::with_capacity(expected_offloaded.len());
@@ -2869,6 +2874,117 @@ async fn mixed_size_best_effort_packets_stay_coherent_and_offload_to_mtcp_when_u
     assert_eq!(
       server_packets.stats().received_reliable,
       expected_offloaded.len() as u64,
+    );
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn bursty_http3_flow_pins_to_mtcp_while_concurrent_game_flow_stays_on_udp()
+-> anyhow::Result<()> {
+  use crate::{
+    node::NodeId,
+    qomt::QomtPacketStream,
+    udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource},
+  };
+
+  timeout(Duration::from_secs(12), async {
+    let (_listener, server, client) = connect_real_qomt_pair(true).await?;
+    let _ = wait_for_datagram_payload_len(&server).await?;
+
+    let (_, mut out_sender) = tokio::try_join!(
+      async {
+        let mut stream = client.open_stream();
+        stream.write_u8(1).await?;
+        let mut ps = QomtPacketStream::<OutgoingUdpPacket, IncomingUdpPacket>::connect(
+          client.clone(),
+          stream,
+        )
+        .await?;
+        tokio::spawn(async move {
+          while ps.next().await.is_some() {}
+        });
+        anyhow::Ok(())
+      },
+      async {
+        let mut stream = server
+          .accept_stream()
+          .await?
+          .ok_or_else(|| anyhow::anyhow!("missing packet stream"))?;
+        let _ = stream.read_u8().await?;
+        let ps = QomtPacketStream::<IncomingUdpPacket, OutgoingUdpPacket>::accept(
+          server.clone(),
+          stream,
+        )
+        .await?;
+        anyhow::Ok(ps)
+      },
+    )?;
+
+    let client_source = UdpPacketSource {
+      via: vec![NodeId::new()],
+      address: "100.69.178.77:61601".parse()?,
+    };
+    let yt_dest: std::net::SocketAddr = "142.251.218.14:443".parse()?;
+    let game_dest: std::net::SocketAddr = "103.28.54.185:27017".parse()?;
+
+    // 1. Heavy YouTube HTTP/3 flow bursts > 16 KiB -> promotes & pins to mTCP.
+    let mut yt_pinned = false;
+    for seq in 0..24_u8 {
+      let outcome = out_sender
+        .send_packet(
+          IncomingUdpPacket {
+            source: client_source.clone(),
+            destination: yt_dest,
+            payload: vec![seq; 1100],
+          },
+          QomtPacketDelivery::BestEffort,
+        )
+        .await?;
+      if outcome == QomtPacketSendOutcome::ReliableQueued {
+        yt_pinned = true;
+      }
+    }
+    assert!(yt_pinned, "heavy HTTP/3 flow must promote onto mTCP");
+
+    // 2. Even after pausing 300ms (when UDP token bucket refills!), the pinned
+    //    YouTube flow MUST stay on mTCP (zero oscillation back to UDP), while a
+    //    concurrent :27017 game flow stays cleanly on QomT UDP!
+    sleep(Duration::from_millis(300)).await;
+
+    let yt_followup = out_sender
+      .send_packet(
+        IncomingUdpPacket {
+          source: client_source.clone(),
+          destination: yt_dest,
+          payload: vec![0xaa; 900],
+        },
+        QomtPacketDelivery::BestEffort,
+      )
+      .await?;
+    assert_eq!(
+      yt_followup,
+      QomtPacketSendOutcome::ReliableQueued,
+      "pinned HTTP/3 flow must stay on mTCP instead of oscillating back to UDP",
+    );
+
+    let game_outcome = out_sender
+      .send_packet(
+        IncomingUdpPacket {
+          source: client_source,
+          destination: game_dest,
+          payload: vec![0x55; 84],
+        },
+        QomtPacketDelivery::BestEffort,
+      )
+      .await?;
+    assert_eq!(
+      game_outcome,
+      QomtPacketSendOutcome::DatagramQueued,
+      "lightweight game UDP flow must remain on low-latency QomT UDP",
     );
 
     anyhow::Ok(())

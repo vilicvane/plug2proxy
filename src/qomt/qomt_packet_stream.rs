@@ -7,9 +7,11 @@ use std::{
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
   task::{Context, Poll},
+  time::{Duration, Instant},
 };
 
 use futures::{Sink, Stream};
+use moka::sync::Cache;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
@@ -33,6 +35,27 @@ const QOMT_RELIABLE_WRITE_BATCH_BYTES: usize = 16 * 1024;
 // QoS bottlenecks fall back cleanly to the reliable mTCP lane.
 const MAX_QOMT_PACKET_FRAME_SIZE: usize = MAX_DATAGRAM_SIZE;
 const MAX_MALFORMED_DATAGRAMS_PER_POLL: usize = 16;
+const FLOW_LANE_CACHE_CAPACITY: u64 = 4096;
+const FLOW_MTCP_PIN_IDLE_TTL: Duration = Duration::from_secs(30);
+const FLOW_UDP_BURST_WINDOW: Duration = Duration::from_millis(100);
+const FLOW_UDP_BURST_LIMIT_BYTES: usize = 16 * 1024;
+
+pub trait QomtPacketFlow {
+  fn flow_key_hash(&self) -> Option<u64> {
+    None
+  }
+}
+
+impl QomtPacketFlow for Vec<u8> {}
+
+#[derive(Clone, Copy)]
+enum FlowLaneState {
+  Udp {
+    window_start: Instant,
+    window_bytes: usize,
+  },
+  PinnedMtcp,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QomtPacketDelivery {
@@ -141,6 +164,7 @@ pub struct QomtPacketStream<TSend: 'static, TReceive: 'static> {
   incoming_receiver: mpsc::Receiver<IncomingPacket>,
   close_sender: watch::Sender<bool>,
   datagram_registration: Arc<Mutex<Option<QomtDatagramRegistration>>>,
+  flow_lanes: Cache<u64, FlowLaneState>,
   stats: Arc<AtomicPacketStreamStats>,
   read_closed: bool,
   _join_set: JoinSet<()>,
@@ -149,7 +173,7 @@ pub struct QomtPacketStream<TSend: 'static, TReceive: 'static> {
 
 impl<TSend, TReceive> QomtPacketStream<TSend, TReceive>
 where
-  TSend: Serialize + Send + 'static,
+  TSend: QomtPacketFlow + Serialize + Send + 'static,
   TReceive: DeserializeOwned + Send + 'static,
 {
   pub async fn connect(
@@ -467,6 +491,11 @@ where
     join_set.spawn(reliable_reader);
     join_set.spawn(datagram_reader);
 
+    let flow_lanes = Cache::builder()
+      .max_capacity(FLOW_LANE_CACHE_CAPACITY)
+      .time_to_idle(FLOW_MTCP_PIN_IDLE_TTL)
+      .build();
+
     Self {
       connection,
       association_id,
@@ -476,6 +505,7 @@ where
       incoming_receiver,
       close_sender,
       datagram_registration,
+      flow_lanes,
       stats,
       read_closed: false,
       _join_set: join_set,
@@ -500,6 +530,7 @@ where
       return Err(UdpPacketStreamError::Closed);
     }
 
+    let flow_hash = packet.flow_key_hash();
     let encoded = Self::encode(packet)?;
 
     match delivery {
@@ -523,7 +554,7 @@ where
           .map_err(|_| UdpPacketStreamError::Closed)??;
         Ok(QomtPacketSendOutcome::ReliableQueued)
       }
-      QomtPacketDelivery::BestEffort => self.send_best_effort(encoded),
+      QomtPacketDelivery::BestEffort => self.send_best_effort(flow_hash, encoded),
     }
   }
 
@@ -539,31 +570,87 @@ where
 
   fn send_best_effort(
     &mut self,
+    flow_hash: Option<u64>,
     encoded: Vec<u8>,
   ) -> Result<QomtPacketSendOutcome, UdpPacketStreamError> {
     if self.is_send_closed() {
       return Err(UdpPacketStreamError::Closed);
     }
 
-    match self
-      .connection
-      .try_send_association_datagram(self.association_id, &encoded)
-    {
-      QomtDatagramSendOutcome::Queued => {
-        self.stats.datagram_queued.fetch_add(1, Ordering::Relaxed);
-        return Ok(QomtPacketSendOutcome::DatagramQueued);
+    let mut try_udp = true;
+    let mut flow_window = None;
+
+    if let Some(hash) = flow_hash {
+      match self.flow_lanes.get(&hash) {
+        Some(FlowLaneState::PinnedMtcp) => {
+          try_udp = false;
+        }
+        Some(FlowLaneState::Udp {
+          window_start,
+          window_bytes,
+        }) => {
+          let now = Instant::now();
+          let (start, used) = if now.saturating_duration_since(window_start) >= FLOW_UDP_BURST_WINDOW
+          {
+            (now, 0)
+          } else {
+            (window_start, window_bytes)
+          };
+
+          if used.saturating_add(encoded.len()) > FLOW_UDP_BURST_LIMIT_BYTES {
+            self.flow_lanes.insert(hash, FlowLaneState::PinnedMtcp);
+            try_udp = false;
+          } else {
+            flow_window = Some((hash, start, used));
+          }
+        }
+        None => {
+          if encoded.len() > FLOW_UDP_BURST_LIMIT_BYTES {
+            self.flow_lanes.insert(hash, FlowLaneState::PinnedMtcp);
+            try_udp = false;
+          } else {
+            flow_window = Some((hash, Instant::now(), 0));
+          }
+        }
       }
-      QomtDatagramSendOutcome::Unavailable
-      | QomtDatagramSendOutcome::TooLarge
-      | QomtDatagramSendOutcome::Bottlenecked => {}
-      QomtDatagramSendOutcome::QueueFull => {
-        self
-          .stats
-          .dropped_udp_queue_full
-          .fetch_add(1, Ordering::Relaxed);
-      }
-      QomtDatagramSendOutcome::Failed(error) => {
-        log::debug!("QomT UDP DATAGRAM send failed, falling back to reliable lane: {error}");
+    }
+
+    if try_udp {
+      match self
+        .connection
+        .try_send_association_datagram(self.association_id, &encoded)
+      {
+        QomtDatagramSendOutcome::Queued => {
+          if let Some((hash, window_start, used)) = flow_window {
+            self.flow_lanes.insert(
+              hash,
+              FlowLaneState::Udp {
+                window_start,
+                window_bytes: used.saturating_add(encoded.len()),
+              },
+            );
+          }
+          self.stats.datagram_queued.fetch_add(1, Ordering::Relaxed);
+          return Ok(QomtPacketSendOutcome::DatagramQueued);
+        }
+        QomtDatagramSendOutcome::Bottlenecked | QomtDatagramSendOutcome::TooLarge => {
+          if let Some((hash, _, _)) = flow_window {
+            self.flow_lanes.insert(hash, FlowLaneState::PinnedMtcp);
+          }
+        }
+        QomtDatagramSendOutcome::QueueFull => {
+          if let Some((hash, _, _)) = flow_window {
+            self.flow_lanes.insert(hash, FlowLaneState::PinnedMtcp);
+          }
+          self
+            .stats
+            .dropped_udp_queue_full
+            .fetch_add(1, Ordering::Relaxed);
+        }
+        QomtDatagramSendOutcome::Unavailable => {}
+        QomtDatagramSendOutcome::Failed(error) => {
+          log::debug!("QomT UDP DATAGRAM send failed, falling back to reliable lane: {error}");
+        }
       }
     }
 
@@ -604,7 +691,7 @@ where
 
 impl<TSend, TReceive> Sink<TSend> for QomtPacketStream<TSend, TReceive>
 where
-  TSend: Serialize + Send + 'static,
+  TSend: QomtPacketFlow + Serialize + Send + 'static,
   TReceive: DeserializeOwned + Send + 'static,
 {
   type Error = UdpPacketStreamError;
@@ -620,8 +707,9 @@ where
 
   fn start_send(self: Pin<&mut Self>, packet: TSend) -> Result<(), Self::Error> {
     let this = self.get_mut();
+    let flow_hash = packet.flow_key_hash();
     let encoded = Self::encode(packet)?;
-    this.send_best_effort(encoded)?;
+    this.send_best_effort(flow_hash, encoded)?;
     Ok(())
   }
 

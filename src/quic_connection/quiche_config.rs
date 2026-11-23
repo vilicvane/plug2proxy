@@ -17,11 +17,14 @@ pub const MAX_DATAGRAM_SIZE: usize = bytes!("16 KiB") as usize - 1;
 // 预算还要扣掉 MtConnectionsId 路由头；真正传给 quiche 的是 1436。
 pub const MAX_UDP_DATAGRAM_SIZE: usize = MAX_UDP_PACKET_FRAME_SIZE;
 
-/// quiche's DATAGRAM queues and the wrapper receive queue use the same
-/// bounded capacity. DATAGRAM delivery is intentionally lossy: once either
-/// queue is full, new application datagrams are rejected or dropped instead
-/// of applying stream-style backpressure to the QUIC driver.
+/// Receive capacity for incoming QUIC DATAGRAM frames. Kept generous so bursts
+/// already delivered over the network are not dropped awaiting poll drain.
 pub const QUIC_DATAGRAM_QUEUE_CAPACITY: usize = 1024;
+
+/// Outbound QUIC DATAGRAM queue capacity on the QomT UDP bypass. Kept tight so
+/// throttled UDP paths cannot accumulate megabytes of FIFO bufferbloat; any
+/// excess packets spill onto the reliable mTCP lane instead of queueing here.
+pub const QUIC_DATAGRAM_SEND_QUEUE_CAPACITY: usize = 32;
 
 /// The UDP bypass is actively kept alive by QUIC PING frames. If no packet is
 /// received for this long, quiche closes the path and the QomT supervisor can
@@ -103,7 +106,7 @@ pub fn create_udp_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<qu
   config.enable_dgram(
     true,
     QUIC_DATAGRAM_QUEUE_CAPACITY,
-    QUIC_DATAGRAM_QUEUE_CAPACITY,
+    QUIC_DATAGRAM_SEND_QUEUE_CAPACITY,
   );
   config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Bbr2Gcongestion);
   config.enable_pacing(true);

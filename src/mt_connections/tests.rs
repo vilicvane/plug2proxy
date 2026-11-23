@@ -45,6 +45,7 @@ fn tcp_info(bytes_acked: u64) -> MtTcpInfo {
     notsent_bytes: 0,
     retrans: 0,
     total_retrans: 0,
+    data_segs_out: 0,
     bytes_acked,
     delivered: bytes_acked as u32,
   }
@@ -794,4 +795,110 @@ async fn rejects_invalid_extend_token_and_wrong_binding() -> anyhow::Result<()> 
     Ok(())
   })
   .await?
+}
+
+#[test]
+fn bbr_capability_and_policer_loss_detector_only_trigger_on_sustained_bbrv1_loss() {
+  use super::mt_connections::{
+    PolicerLossDetector, PolicerLossTrigger, congestion_control_needs_policer_guard,
+    is_bbr_module_version_loss_aware,
+  };
+
+  assert!(!is_bbr_module_version_loss_aware(None));
+  assert!(!is_bbr_module_version_loss_aware(Some("")));
+  assert!(!is_bbr_module_version_loss_aware(Some("1\n")));
+  assert!(!is_bbr_module_version_loss_aware(Some("1.0")));
+  assert!(is_bbr_module_version_loss_aware(Some("2\n")));
+  assert!(is_bbr_module_version_loss_aware(Some("3")));
+  assert!(is_bbr_module_version_loss_aware(Some("3.1-custom\n")));
+
+  assert!(congestion_control_needs_policer_guard("bbr", false));
+  assert!(!congestion_control_needs_policer_guard("bbr", true));
+  assert!(!congestion_control_needs_policer_guard("bbr2", false));
+  assert!(!congestion_control_needs_policer_guard("cubic", false));
+
+  let mut detector = PolicerLossDetector::default();
+  // Baseline sample (even with non-zero pre-established counters) never evaluates a window.
+  assert_eq!(detector.observe(10, 5), None);
+
+  // Sub-window traffic (< 250 data segments) waits without triggering.
+  assert_eq!(detector.observe(259, 60), None);
+
+  // Two high-loss windows (16% and 12%) followed by a normal WAN window (3.2%) reset cleanly.
+  assert_eq!(detector.observe(260, 45), None); // delta = (250, 40) -> 16% (1/3)
+  assert_eq!(detector.observe(510, 75), None); // delta = (250, 30) -> 12% (2/3)
+  assert_eq!(detector.observe(760, 83), None); // delta = (250, 8)  -> 3.2% -> reset to 0/3!
+
+  // Continuous 4% WAN loss across many windows never triggers.
+  for step in 1..=6 {
+    assert_eq!(detector.observe(760 + step * 300, 83 + step * 12), None);
+  }
+
+  // Three consecutive >= 250-segment windows with >= 10% retransmission rate (including u32 wrap)
+  // trigger once and never re-trigger afterwards.
+  let mut wrap_detector = PolicerLossDetector::default();
+  let start_segs = u32::MAX - 100;
+  let start_retrans = u32::MAX - 20;
+  assert_eq!(wrap_detector.observe(start_segs, start_retrans), None);
+  assert_eq!(
+    wrap_detector.observe(start_segs.wrapping_add(250), start_retrans.wrapping_add(25)),
+    None,
+  );
+  assert_eq!(
+    wrap_detector.observe(start_segs.wrapping_add(550), start_retrans.wrapping_add(85)),
+    None,
+  );
+  assert_eq!(
+    wrap_detector.observe(start_segs.wrapping_add(850), start_retrans.wrapping_add(130)),
+    Some(PolicerLossTrigger {
+      window_data_segs: 300,
+      window_retrans: 45,
+    }),
+  );
+  assert_eq!(
+    wrap_detector.observe(
+      start_segs.wrapping_add(1_200),
+      start_retrans.wrapping_add(250)
+    ),
+    None,
+  );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn live_socket_switches_congestion_control_to_cubic_and_tracks_data_segs_out()
+-> anyhow::Result<()> {
+  use std::os::fd::AsRawFd;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  use super::mt_connections::{
+    read_mt_tcp_congestion, read_mt_tcp_info, set_mt_tcp_congestion,
+  };
+
+  let listener = TcpListener::bind("127.0.0.1:0").await?;
+  let addr = listener.local_addr()?;
+  let (mut client, (mut server, _)) = tokio::try_join!(TcpStream::connect(addr), listener.accept())?;
+
+  configure_mt_tcp_stream(&client)?;
+  let client_fd = client.as_raw_fd();
+  let initial_cc = read_mt_tcp_congestion(client_fd)?;
+  assert!(!initial_cc.is_empty());
+
+  set_mt_tcp_congestion(client_fd, b"cubic")?;
+  assert_eq!(read_mt_tcp_congestion(client_fd)?, "cubic");
+
+  let before = read_mt_tcp_info(client_fd)?;
+  client.write_all(&[0x5au8; 8_192]).await?;
+  let mut sink = [0u8; 8_192];
+  server.read_exact(&mut sink).await?;
+
+  let after = read_mt_tcp_info(client_fd)?;
+  assert!(
+    after.data_segs_out > before.data_segs_out,
+    "TCP_INFO data_segs_out must advance after sending payload (before={}, after={})",
+    before.data_segs_out,
+    after.data_segs_out,
+  );
+
+  Ok(())
 }

@@ -23,18 +23,28 @@ const QOMT_DATAGRAM_ASSOCIATION_QUEUE_CAPACITY: usize = 512;
 const QOMT_MAX_DATAGRAM_ASSOCIATIONS: usize = 4096;
 const QOMT_DATAGRAM_WIRE_OVERHEAD_BYTES: usize = 64;
 
-const HEALTH_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
-const UDP_BASE_COOLDOWN: Duration = Duration::from_secs(5);
-const UDP_MAX_COOLDOWN: Duration = Duration::from_secs(30);
-const UDP_RECOVERY_CLEAN_WINDOW: Duration = Duration::from_secs(2);
-const UDP_MIN_CWND_FLOOR_BYTES: usize = 10 * 1436;
-const UDP_QUEUE_PRESSURE_MIN_BYTES: usize = 32 * 1024;
-const UDP_QUEUE_PRESSURE_DELAY: Duration = Duration::from_millis(120);
-const UDP_PRESSURE_SUSTAIN: Duration = Duration::from_millis(400);
-const UDP_RTT_INFLATION_MIN: Duration = Duration::from_millis(50);
-const UDP_LOSS_MIN_SENT_DELTA: usize = 16;
-const UDP_LOSS_MIN_LOST_DELTA: usize = 2;
-const UDP_LOSS_RATIO_DENOMINATOR: usize = 20;
+const BUDGET_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+const UDP_HEADROOM_FACTOR: f64 = 0.70;
+const UDP_STEP_UP_HEADROOM_CAP: f64 = 0.75;
+const UDP_INITIAL_SAFE_CEILING_BPS: f64 = 1024.0 * 1024.0;
+const UDP_MIN_SAFE_CEILING_BPS: f64 = 32.0 * 1024.0;
+const UDP_MAX_SAFE_CEILING_BPS: f64 = 32.0 * 1024.0 * 1024.0;
+const UDP_BURST_WINDOW_SECS: f64 = 0.030;
+const UDP_MIN_BURST_BYTES: f64 = 12.0 * 1024.0;
+const UDP_MAX_BURST_BYTES: f64 = 24.0 * 1024.0;
+const UDP_MAX_SEND_QUEUE_BYTES: usize = 24 * 1024;
+const UDP_RTT_INFLATION_MIN: Duration = Duration::from_millis(40);
+const UDP_PAUSE_BASE_COOLDOWN: Duration = Duration::from_secs(10);
+const UDP_PAUSE_MAX_COOLDOWN: Duration = Duration::from_secs(120);
+const UDP_UTILIZED_CLEAN_STEP_UP_WINDOW: Duration = Duration::from_secs(10);
+const UDP_IDLE_RELAX_GRACE: Duration = Duration::from_secs(180);
+const UDP_IDLE_RELAX_INTERVAL: Duration = Duration::from_secs(60);
+const UDP_LOG_MIN_INTERVAL: Duration = Duration::from_secs(10);
+const UDP_SEVERE_LOSS_MIN_SENT: usize = 12;
+const UDP_SEVERE_LOSS_MIN_LOST: usize = 3;
+const UDP_SEVERE_LOSS_DENOMINATOR: usize = 10;
+const UDP_MODERATE_LOSS_MIN_SENT: usize = 16;
+const UDP_MODERATE_LOSS_DENOMINATOR: usize = 50;
 
 struct DatagramRoute {
   sender: mpsc::Sender<Vec<u8>>,
@@ -76,117 +86,296 @@ impl QomtDatagramAtomicStats {
   }
 }
 
-#[derive(Default)]
-struct UdpTierHealth {
-  cooldown_until: Option<Instant>,
-  backoff_shift: u32,
-  resumed_at: Option<Instant>,
-  pressure_since: Option<Instant>,
-  last_sample: Option<(Instant, usize, usize, bool)>,
+struct SampleSnapshot {
+  sampled_at: Instant,
+  dgram_sent: usize,
+  dgram_lost: usize,
+  bbr_bps: f64,
+  queue_congested: bool,
 }
 
-impl UdpTierHealth {
-  fn is_cooling_down(&self, now: Instant) -> bool {
-    self.cooldown_until.is_some_and(|until| now < until)
+struct AdaptiveUdpBudget {
+  safe_ceiling_bps: f64,
+  effective_bps: f64,
+  tokens: f64,
+  last_refill: Option<Instant>,
+  window_sent_bytes: u64,
+  clean_utilized_duration: Duration,
+  last_decrease_at: Option<Instant>,
+  last_idle_relax_at: Option<Instant>,
+  last_logged_at: Option<Instant>,
+  last_logged_ceiling_bps: f64,
+  paused_until: Option<Instant>,
+  backoff_shift: u32,
+  last_sample: Option<SampleSnapshot>,
+}
+
+impl Default for AdaptiveUdpBudget {
+  fn default() -> Self {
+    let initial_effective = UDP_INITIAL_SAFE_CEILING_BPS;
+    let initial_burst = Self::burst_capacity_for(initial_effective);
+
+    Self {
+      safe_ceiling_bps: UDP_INITIAL_SAFE_CEILING_BPS,
+      effective_bps: initial_effective,
+      tokens: initial_burst,
+      last_refill: None,
+      window_sent_bytes: 0,
+      clean_utilized_duration: Duration::ZERO,
+      last_decrease_at: None,
+      last_idle_relax_at: None,
+      last_logged_at: None,
+      last_logged_ceiling_bps: UDP_INITIAL_SAFE_CEILING_BPS,
+      paused_until: None,
+      backoff_shift: 0,
+      last_sample: None,
+    }
+  }
+}
+
+impl AdaptiveUdpBudget {
+  fn burst_capacity_for(effective_bps: f64) -> f64 {
+    (effective_bps * UDP_BURST_WINDOW_SECS).clamp(UDP_MIN_BURST_BYTES, UDP_MAX_BURST_BYTES)
   }
 
-  fn enter_cooldown(&mut self, pair_id: u16, reason: &str, now: Instant) {
-    let shift = self.backoff_shift.min(3);
-    let cooldown = (UDP_BASE_COOLDOWN * (1_u32 << shift)).min(UDP_MAX_COOLDOWN);
-    self.cooldown_until = Some(now + cooldown);
-    self.backoff_shift = (self.backoff_shift + 1).min(3);
-    self.resumed_at = None;
-    self.pressure_since = None;
+  fn bbr_reference_bps(metrics: &QuicPathMetrics) -> f64 {
+    let rtt_secs = metrics.rtt.as_secs_f64().max(0.001);
+    let cwnd_bps = (metrics.cwnd as f64) / rtt_secs;
+
+    (metrics.delivery_rate as f64).max(cwnd_bps)
+  }
+
+  fn is_paused(&self, now: Instant) -> bool {
+    self.paused_until.is_some_and(|until| now < until)
+  }
+
+  fn enter_severe_loss_pause(&mut self, pair_id: u16, reason: &str, now: Instant) {
+    let shift = self.backoff_shift.min(4);
+    let pause = (UDP_PAUSE_BASE_COOLDOWN * (1_u32 << shift)).min(UDP_PAUSE_MAX_COOLDOWN);
+    self.safe_ceiling_bps = (self.safe_ceiling_bps * 0.50).max(UDP_MIN_SAFE_CEILING_BPS);
+    self.effective_bps = self.effective_bps.min(self.safe_ceiling_bps);
+    self.tokens = 0.0;
+    self.last_refill = Some(now);
+    self.window_sent_bytes = 0;
+    self.clean_utilized_duration = Duration::ZERO;
+    self.last_decrease_at = Some(now);
+    self.last_idle_relax_at = Some(now);
+    self.paused_until = Some(now + pause);
+    self.backoff_shift = (self.backoff_shift + 1).min(4);
     self.last_sample = None;
 
     log::info!(
-      "QomT UDP pair {pair_id} bottlenecked ({reason}), offloading packet traffic to mTCP for {cooldown:?}"
+      "QomT UDP pair {pair_id} paused for {pause:?} ({reason}), safe_ceiling_kbps={:.0}",
+      self.safe_ceiling_bps * 8.0 / 1000.0,
     );
   }
 
-  fn allow_udp(
+  fn tighten_ceiling(&mut self, pair_id: u16, reference_bps: f64, reason: &str, now: Instant) {
+    if self
+      .last_decrease_at
+      .is_some_and(|last| now.saturating_duration_since(last) < BUDGET_SAMPLE_INTERVAL)
+    {
+      self.tokens = 0.0;
+      self.last_refill = Some(now);
+      return;
+    }
+
+    let candidate = (self.safe_ceiling_bps.min(reference_bps) * 0.65)
+      .clamp(UDP_MIN_SAFE_CEILING_BPS, UDP_MAX_SAFE_CEILING_BPS);
+    self.safe_ceiling_bps = candidate;
+    self.effective_bps = self.effective_bps.min(candidate);
+    self.tokens = 0.0;
+    self.last_refill = Some(now);
+    self.clean_utilized_duration = Duration::ZERO;
+    self.last_decrease_at = Some(now);
+    self.last_idle_relax_at = Some(now);
+
+    let significant_change = (self.last_logged_ceiling_bps - candidate).abs()
+      >= self.last_logged_ceiling_bps * 0.25;
+    let log_ready = self
+      .last_logged_at
+      .is_none_or(|last| now.saturating_duration_since(last) >= UDP_LOG_MIN_INTERVAL);
+    if significant_change && log_ready {
+      self.last_logged_at = Some(now);
+      self.last_logged_ceiling_bps = candidate;
+      log::info!(
+        "QomT UDP pair {pair_id} lowered safe headroom to {:.0} KB/s ({reason})",
+        candidate / 1024.0,
+      );
+    } else {
+      log::debug!(
+        "QomT UDP pair {pair_id} lowered safe headroom to {:.0} KB/s ({reason})",
+        candidate / 1024.0,
+      );
+    }
+  }
+
+  fn refresh_sample(
     &mut self,
     pair_id: u16,
     now: Instant,
     sample: impl FnOnce() -> Option<QuicPathMetrics>,
   ) -> bool {
-    if let Some(until) = self.cooldown_until {
+    if let Some(until) = self.paused_until {
       if now < until {
         return false;
       }
 
-      self.cooldown_until = None;
-      self.resumed_at = Some(now);
-      self.pressure_since = None;
+      self.paused_until = None;
+      self.last_refill = Some(now);
+      self.tokens = UDP_MIN_BURST_BYTES;
+      self.window_sent_bytes = 0;
       self.last_sample = None;
-      log::debug!("QomT UDP pair {pair_id} cooldown elapsed, probing UDP datagram path");
+      log::debug!(
+        "QomT UDP pair {pair_id} pause elapsed, resuming capped UDP headroom ({:.0} KB/s)",
+        self.safe_ceiling_bps / 1024.0,
+      );
     }
 
-    if let Some((sampled_at, _, _, cached_allow)) = self.last_sample
-      && now.saturating_duration_since(sampled_at) < HEALTH_SAMPLE_INTERVAL
-    {
-      return cached_allow;
+    let should_sample = self.last_sample.as_ref().is_none_or(|prev| {
+      now.saturating_duration_since(prev.sampled_at) >= BUDGET_SAMPLE_INTERVAL
+    });
+    if !should_sample {
+      return !self
+        .last_sample
+        .as_ref()
+        .is_some_and(|prev| prev.queue_congested);
     }
 
     let Some(metrics) = sample() else {
       return false;
     };
 
-    if let Some((_, prev_sent, prev_lost, _)) = self.last_sample {
-      let delta_sent = metrics.dgram_sent.saturating_sub(prev_sent);
-      let delta_lost = metrics.dgram_lost.saturating_sub(prev_lost);
-      if delta_sent >= UDP_LOSS_MIN_SENT_DELTA
-        && delta_lost >= UDP_LOSS_MIN_LOST_DELTA
-        && delta_lost.saturating_mul(UDP_LOSS_RATIO_DENOMINATOR) >= delta_sent
-      {
-        self.enter_cooldown(
-          pair_id,
-          &format!("datagram loss {delta_lost}/{delta_sent}"),
-          now,
-        );
-        return false;
-      }
-    }
-
-    let cwnd_floor = metrics.cwnd.max(UDP_MIN_CWND_FLOOR_BYTES) as u128;
-    let queue_pressure = metrics.dgram_send_queue_bytes >= UDP_QUEUE_PRESSURE_MIN_BYTES
-      && (metrics.dgram_send_queue_bytes as u128) * metrics.rtt.as_micros()
-        >= cwnd_floor * UDP_QUEUE_PRESSURE_DELAY.as_micros();
-
-    let rtt_pressure = metrics.dgram_send_queue_len > 0
+    let bbr_bps = Self::bbr_reference_bps(&metrics);
+    let queue_congested = metrics.dgram_send_queue_bytes >= UDP_MAX_SEND_QUEUE_BYTES;
+    let rtt_inflated = metrics.dgram_send_queue_len > 0
       && metrics.min_rtt.is_some_and(|min_rtt| {
-        metrics.rtt.saturating_sub(min_rtt) >= UDP_RTT_INFLATION_MIN.max(min_rtt / 2)
+        metrics.rtt.saturating_sub(min_rtt) >= UDP_RTT_INFLATION_MIN.max(min_rtt / 3)
       });
 
-    if queue_pressure || rtt_pressure {
-      let since = *self.pressure_since.get_or_insert(now);
-      if now.saturating_duration_since(since) >= UDP_PRESSURE_SUSTAIN {
-        self.enter_cooldown(
+    if let Some(prev) = &self.last_sample {
+      let elapsed = now.saturating_duration_since(prev.sampled_at);
+      let elapsed_secs = elapsed.as_secs_f64().max(0.001);
+      let recent_sent_bps = (self.window_sent_bytes as f64) / elapsed_secs;
+      self.window_sent_bytes = 0;
+
+      let delta_sent = metrics.dgram_sent.saturating_sub(prev.dgram_sent);
+      let delta_lost = metrics.dgram_lost.saturating_sub(prev.dgram_lost);
+
+      if delta_sent >= UDP_SEVERE_LOSS_MIN_SENT
+        && delta_lost >= UDP_SEVERE_LOSS_MIN_LOST
+        && delta_lost.saturating_mul(UDP_SEVERE_LOSS_DENOMINATOR) >= delta_sent
+      {
+        self.enter_severe_loss_pause(
           pair_id,
-          &format!(
-            "sustained queue/rtt pressure: queue_bytes={} cwnd={} rtt_ms={}",
-            metrics.dgram_send_queue_bytes,
-            metrics.cwnd,
-            metrics.rtt.as_millis()
-          ),
+          &format!("severe datagram loss {delta_lost}/{delta_sent}"),
           now,
         );
         return false;
       }
-    } else {
-      self.pressure_since = None;
-      if let Some(resumed_at) = self.resumed_at
-        && metrics.dgram_sent > 0
-        && now.saturating_duration_since(resumed_at) >= UDP_RECOVERY_CLEAN_WINDOW
-      {
-        self.backoff_shift = 0;
-        self.resumed_at = None;
-        log::info!("QomT UDP pair {pair_id} recovered, staying on UDP datagram path");
+
+      let moderate_loss = delta_sent >= UDP_MODERATE_LOSS_MIN_SENT
+        && delta_lost >= 1
+        && delta_lost.saturating_mul(UDP_MODERATE_LOSS_DENOMINATOR) >= delta_sent;
+
+      if moderate_loss || rtt_inflated || queue_congested {
+        let reference_bps = if recent_sent_bps > 0.0 {
+          recent_sent_bps.min(bbr_bps)
+        } else {
+          bbr_bps * UDP_HEADROOM_FACTOR
+        };
+        let reason = if moderate_loss {
+          format!("loss {delta_lost}/{delta_sent}")
+        } else if queue_congested {
+          format!("queue_bytes={}", metrics.dgram_send_queue_bytes)
+        } else {
+          format!("rtt_ms={}", metrics.rtt.as_millis())
+        };
+        self.tighten_ceiling(pair_id, reference_bps, &reason, now);
+      } else if metrics.dgram_send_queue_bytes < UDP_MAX_SEND_QUEUE_BYTES / 2 {
+        if recent_sent_bps >= self.effective_bps * 0.40 {
+          self.clean_utilized_duration += elapsed;
+          if self.clean_utilized_duration >= UDP_UTILIZED_CLEAN_STEP_UP_WINDOW {
+            self.clean_utilized_duration = Duration::ZERO;
+            self.backoff_shift = 0;
+            let bbr_cap = (bbr_bps * UDP_STEP_UP_HEADROOM_CAP)
+              .clamp(UDP_INITIAL_SAFE_CEILING_BPS, UDP_MAX_SAFE_CEILING_BPS);
+            self.safe_ceiling_bps = (self.safe_ceiling_bps * 1.10).min(bbr_cap);
+          }
+        } else if self.safe_ceiling_bps < UDP_INITIAL_SAFE_CEILING_BPS
+          && self
+            .last_decrease_at
+            .is_some_and(|last| now.saturating_duration_since(last) >= UDP_IDLE_RELAX_GRACE)
+          && self
+            .last_idle_relax_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= UDP_IDLE_RELAX_INTERVAL)
+        {
+          self.last_idle_relax_at = Some(now);
+          self.safe_ceiling_bps =
+            (self.safe_ceiling_bps * 1.15).min(UDP_INITIAL_SAFE_CEILING_BPS);
+        }
       }
     }
 
-    self.last_sample = Some((now, metrics.dgram_sent, metrics.dgram_lost, true));
+    self.effective_bps = (bbr_bps * UDP_HEADROOM_FACTOR)
+      .min(self.safe_ceiling_bps)
+      .clamp(UDP_MIN_SAFE_CEILING_BPS, UDP_MAX_SAFE_CEILING_BPS);
+    let burst = Self::burst_capacity_for(self.effective_bps);
+    self.tokens = self.tokens.min(burst);
+    self.last_sample = Some(SampleSnapshot {
+      sampled_at: now,
+      dgram_sent: metrics.dgram_sent,
+      dgram_lost: metrics.dgram_lost,
+      bbr_bps,
+      queue_congested,
+    });
+
+    !queue_congested
+  }
+
+  fn try_acquire(
+    &mut self,
+    pair_id: u16,
+    wire_bytes: u64,
+    now: Instant,
+    sample: impl FnOnce() -> Option<QuicPathMetrics>,
+  ) -> bool {
+    if !self.refresh_sample(pair_id, now, sample) {
+      return false;
+    }
+
+    let burst = Self::burst_capacity_for(self.effective_bps);
+    if let Some(last_refill) = self.last_refill {
+      let elapsed_secs = now.saturating_duration_since(last_refill).as_secs_f64();
+      self.tokens = (self.tokens + elapsed_secs * self.effective_bps).min(burst);
+    } else {
+      self.tokens = burst;
+    }
+    self.last_refill = Some(now);
+
+    let cost = wire_bytes as f64;
+    if self.tokens < cost {
+      return false;
+    }
+
+    self.tokens -= cost;
+    self.window_sent_bytes = self.window_sent_bytes.saturating_add(wire_bytes);
     true
+  }
+
+  fn refund(&mut self, wire_bytes: u64) {
+    let burst = Self::burst_capacity_for(self.effective_bps);
+    self.tokens = (self.tokens + wire_bytes as f64).min(burst);
+    self.window_sent_bytes = self.window_sent_bytes.saturating_sub(wire_bytes);
+  }
+
+  fn on_send_queue_full(&mut self, pair_id: u16, wire_bytes: u64, now: Instant) {
+    self.window_sent_bytes = self.window_sent_bytes.saturating_sub(wire_bytes);
+    let bbr_bps = self
+      .last_sample
+      .as_ref()
+      .map_or(self.safe_ceiling_bps, |sample| sample.bbr_bps * UDP_HEADROOM_FACTOR);
+    self.tighten_ceiling(pair_id, bbr_bps, "send queue full", now);
   }
 }
 
@@ -200,7 +389,7 @@ pub(crate) struct DatagramTierConfig {
 struct ActiveDatagramSocket {
   generation: u64,
   socket: QuicDatagramSocket,
-  health: Arc<Mutex<UdpTierHealth>>,
+  budget: Arc<Mutex<AdaptiveUdpBudget>>,
 }
 
 struct DatagramTierSlot {
@@ -301,7 +490,7 @@ impl QomtDatagramRouter {
         tier.active = Some(ActiveDatagramSocket {
           generation,
           socket: socket.clone(),
-          health: Arc::new(Mutex::new(UdpTierHealth::default())),
+          budget: Arc::new(Mutex::new(AdaptiveUdpBudget::default())),
         });
       } else {
         return;
@@ -345,15 +534,15 @@ impl QomtDatagramRouter {
   }
 
   pub(crate) fn is_tier_bottlenecked(&self, pair_id: u16, now: Instant) -> bool {
-    let health = self
+    let budget = self
       .tiers
       .lock()
       .unwrap()
       .iter()
       .find(|tier| tier.pair_id == pair_id)
-      .and_then(|tier| tier.active.as_ref().map(|active| active.health.clone()));
+      .and_then(|tier| tier.active.as_ref().map(|active| active.budget.clone()));
 
-    health.is_some_and(|health| health.lock().unwrap().is_cooling_down(now))
+    budget.is_some_and(|budget| budget.lock().unwrap().is_paused(now))
   }
 
   pub(crate) fn deactivate(&self) {
@@ -374,7 +563,7 @@ impl QomtDatagramRouter {
             (
               tier.pair_id,
               active.socket.clone(),
-              active.health.clone(),
+              active.budget.clone(),
               tier.local_out.clone(),
               tier.peer_in.clone(),
               tier.precharged_bytes.clone(),
@@ -397,7 +586,7 @@ impl QomtDatagramRouter {
     let mut saw_too_large = false;
     let mut first_failure = None;
 
-    for (pair_id, socket, health, local_out, peer_in, precharged_bytes) in candidates {
+    for (pair_id, socket, budget, local_out, peer_in, precharged_bytes) in candidates {
       let Some(max_payload_len) = socket
         .max_writable_len()
         .and_then(|length| length.checked_sub(QOMT_DATAGRAM_ENVELOPE_SIZE))
@@ -410,16 +599,17 @@ impl QomtDatagramRouter {
         continue;
       }
 
-      let allow_udp = health
-        .lock()
-        .unwrap()
-        .allow_udp(pair_id, now, || socket.path_metrics());
-      if !allow_udp {
-        saw_bottlenecked = true;
+      if try_take_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes, now).is_err() {
         continue;
       }
 
-      if try_take_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes, now).is_err() {
+      let acquired_headroom = budget
+        .lock()
+        .unwrap()
+        .try_acquire(pair_id, wire_bytes, now, || socket.path_metrics());
+      if !acquired_headroom {
+        refund_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes);
+        saw_bottlenecked = true;
         continue;
       }
 
@@ -440,25 +630,28 @@ impl QomtDatagramRouter {
         Err(QuicDatagramSendError::QueueFull) => {
           revert_precharged_bytes(&precharged_bytes, added_precharge);
           refund_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes);
-          health
+          budget
             .lock()
             .unwrap()
-            .enter_cooldown(pair_id, "send queue full", now);
+            .on_send_queue_full(pair_id, wire_bytes, now);
           saw_bottlenecked = true;
           saw_queue_full = true;
         }
         Err(QuicDatagramSendError::Unavailable) => {
           revert_precharged_bytes(&precharged_bytes, added_precharge);
           refund_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes);
+          budget.lock().unwrap().refund(wire_bytes);
         }
         Err(QuicDatagramSendError::TooLarge { .. }) => {
           revert_precharged_bytes(&precharged_bytes, added_precharge);
           refund_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes);
+          budget.lock().unwrap().refund(wire_bytes);
           saw_too_large = true;
         }
         Err(error) => {
           revert_precharged_bytes(&precharged_bytes, added_precharge);
           refund_pair(local_out.as_deref(), peer_in.as_deref(), wire_bytes);
+          budget.lock().unwrap().refund(wire_bytes);
           if first_failure.is_none() {
             first_failure = Some(error);
           }
@@ -656,67 +849,72 @@ mod tests {
   }
 
   #[test]
-  fn udp_tier_health_tolerates_transient_burst_and_cools_down_on_sustained_pressure_or_loss() {
+  fn adaptive_udp_budget_caps_headroom_remembers_ceiling_across_idle_and_steps_up_slowly() {
     let base = Instant::now();
-    let healthy_metrics = |sent: usize, lost: usize| QuicPathMetrics {
+    // Simulate LA evening QoS: cwnd = 156 KiB @ 180ms (~887 KB/s -> 70% = ~621 KB/s).
+    let evening_metrics = |sent: usize, lost: usize, queue_bytes: usize| QuicPathMetrics {
       rtt: Duration::from_millis(180),
       min_rtt: Some(Duration::from_millis(175)),
       rttvar: Duration::from_millis(8),
-      cwnd: 64 * 1024,
-      delivery_rate: 512 * 1024,
+      cwnd: 156 * 1024,
+      delivery_rate: 880 * 1024,
       dgram_sent: sent,
       dgram_recv: sent,
       dgram_lost: lost,
-      dgram_send_queue_len: 0,
-      dgram_send_queue_bytes: 0,
+      dgram_send_queue_len: usize::from(queue_bytes > 0),
+      dgram_send_queue_bytes: queue_bytes,
     };
 
-    let mut health = UdpTierHealth::default();
-    assert!(health.allow_udp(0, base, || Some(healthy_metrics(10, 0))));
+    let mut budget = AdaptiveUdpBudget::default();
+    assert!(budget.try_acquire(0, 1200, base, || Some(evening_metrics(10, 0, 0))));
+    assert!(budget.effective_bps <= 887.0 * 1024.0 * 0.71);
 
-    // Transient cold-start queue buildup (< 400ms) must keep UDP open so BBRv2
-    // can probe bandwidth over 1-2 WAN RTTs, then clear cleanly once drained.
-    let pressured = QuicPathMetrics {
-      cwnd: 32 * 1024,
-      dgram_send_queue_len: 40,
-      dgram_send_queue_bytes: 48 * 1024,
-      ..healthy_metrics(50, 0)
-    };
-    assert!(health.allow_udp(0, base + Duration::from_millis(150), || Some(pressured)));
-    assert!(health.allow_udp(0, base + Duration::from_millis(450), || Some(pressured)));
-    assert!(health.allow_udp(
+    // Burst beyond the <= 24 KiB bucket must immediately decline without queueing bloat.
+    let mut accepted = 1200_u64;
+    while budget.try_acquire(0, 1200, base, || Some(evening_metrics(25, 0, 0))) {
+      accepted += 1200;
+    }
+    assert!(accepted <= 24 * 1024);
+
+    // Moderate loss (>= 2%) tightens safe_ceiling_bps (at most once per 200ms)
+    // and MUST NOT reset after 2-10s of idle traffic.
+    let t1 = base + Duration::from_millis(250);
+    assert!(!budget.try_acquire(0, 1200, t1, || Some(evening_metrics(50, 1, 0))));
+    let tightened_ceiling = budget.safe_ceiling_bps;
+    assert!(tightened_ceiling < UDP_INITIAL_SAFE_CEILING_BPS);
+
+    for step in 1..=25_u64 {
+      let now = t1 + Duration::from_millis(step * 250);
+      let _ = budget.try_acquire(0, 120, now, || Some(evening_metrics(50 + step as usize, 1, 0)));
+    }
+    assert_eq!(
+      budget.safe_ceiling_bps, tightened_ceiling,
+      "light/idle traffic must never reset or inflate safe_ceiling_bps",
+    );
+
+    // Sustained clean utilization (>= 40% of effective_bps for >= 10s) gently nudges ceiling up.
+    let mut t = t1 + Duration::from_secs(10);
+    let mut sent = 100_usize;
+    for _ in 0..55 {
+      t += Duration::from_millis(250);
+      let quota = (budget.effective_bps * 0.25 * 0.60) as u64;
+      let mut pushed = 0_u64;
+      while pushed < quota && budget.try_acquire(0, 1200, t, || Some(evening_metrics(sent, 1, 0))) {
+        pushed += 1200;
+        sent += 1;
+      }
+    }
+    assert!(budget.safe_ceiling_bps > tightened_ceiling);
+
+    // Severe loss (>= 10%) enters a pause cooldown (10s base) so ISP policers can clear.
+    let t_severe = t + Duration::from_millis(300);
+    assert!(!budget.try_acquire(
       0,
-      base + Duration::from_millis(600),
-      || Some(healthy_metrics(90, 0)),
+      1200,
+      t_severe,
+      || Some(evening_metrics(sent + 20, 5, 0)),
     ));
-    assert!(!health.is_cooling_down(base + Duration::from_millis(600)));
-
-    // Sustained (>= 400ms) queue pressure triggers the initial 5s cooldown.
-    let t1 = base + Duration::from_secs(1);
-    assert!(health.allow_udp(0, t1, || Some(pressured)));
-    assert!(!health.allow_udp(0, t1 + Duration::from_millis(450), || Some(pressured)));
-    assert!(health.is_cooling_down(t1 + Duration::from_millis(5_449)));
-    assert!(!health.is_cooling_down(t1 + Duration::from_millis(5_450)));
-
-    // After the 5s cooldown elapses, immediate >= 5% packet loss escalates to 10s.
-    let t2 = t1 + Duration::from_millis(5_500);
-    assert!(health.allow_udp(0, t2, || Some(healthy_metrics(100, 0))));
-    assert!(!health.allow_udp(
-      0,
-      t2 + Duration::from_millis(150),
-      || Some(healthy_metrics(120, 2)),
-    ));
-    assert!(health.is_cooling_down(t2 + Duration::from_millis(10_149)));
-    assert!(!health.is_cooling_down(t2 + Duration::from_millis(10_150)));
-
-    // Once cooldown expires and UDP stays clean for >= 2s, backoff resets to 5s.
-    let t3 = t2 + Duration::from_millis(10_200);
-    assert!(health.allow_udp(0, t3, || Some(healthy_metrics(150, 2))));
-    assert!(health.allow_udp(
-      0,
-      t3 + Duration::from_millis(2_100),
-      || Some(healthy_metrics(200, 2)),
-    ));
-    assert_eq!(health.backoff_shift, 0);
+    assert!(budget.is_paused(t_severe + Duration::from_secs(9)));
+    assert!(!budget.is_paused(t_severe + Duration::from_secs(10)));
   }
 }
