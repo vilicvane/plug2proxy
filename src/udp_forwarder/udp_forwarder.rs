@@ -13,15 +13,13 @@ use std::{
 use futures::{Sink, Stream};
 use lowkit::{SelfWrapExt, tokio_join_set};
 use moka::sync::Cache;
-#[cfg(target_os = "linux")]
-use socket2::SockRef;
 use tokio::{net::UdpSocket, task::JoinSet};
 
 use crate::{
   primitives::SocketDestinationHost,
   sniff::quic_initial_client_connection_id,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource, UdpPacketStreamError},
-  utils::net::SocketAddressExt,
+  utils::net::{SocketAddressExt, bind_socket_to_interface, configure_udp_socket_buffers},
 };
 
 const UDP_FORWARDER_QUEUE_CAPACITY: usize = 4096;
@@ -62,13 +60,13 @@ impl UdpForwarder {
           let Ok(packet) = packet_receiver.recv_async().await else {
             break;
           };
-          let quic_flow_id = quic_flows.identify(&packet);
+          let identified = quic_flows.identify(&packet);
 
           Self::send_outgoing_packet(
             sockets.clone(),
             packet_sender.clone(),
             interface.as_deref(),
-            quic_flow_id,
+            identified,
             packet,
           )
           .await
@@ -85,7 +83,7 @@ impl UdpForwarder {
     sockets: Cache<UdpSocketKey, SocketTuple>,
     packet_sender: flume::Sender<IncomingUdpPacket>,
     interface: Option<&str>,
-    quic_flow_id: Option<u64>,
+    identified: IdentifiedQuicFlow,
     OutgoingUdpPacket {
       source,
       destination,
@@ -93,13 +91,27 @@ impl UdpForwarder {
       payload,
     }: OutgoingUdpPacket,
   ) -> Result<(), std::io::Error> {
+    let quic_flow_id = identified.flow_id;
     let socket_key = UdpSocketKey {
       source: source.clone(),
       response_destination,
       quic_flow_id,
     };
+    let existing_socket = sockets.get(&socket_key).or_else(|| {
+      if !identified.adopt_unclassified {
+        return None;
+      }
+      let unclassified_key = UdpSocketKey {
+        source: source.clone(),
+        response_destination,
+        quic_flow_id: None,
+      };
+      let adopted = sockets.remove(&unclassified_key)?;
+      sockets.insert(socket_key.clone(), adopted.clone());
+      Some(adopted)
+    });
     let (socket, destination_address, metrics) = {
-      if let Some((socket, destination_map, _, metrics)) = sockets.get(&socket_key) {
+      if let Some((socket, destination_map, _, metrics)) = existing_socket {
         if let Some(destination_ip) = destination_map.lock().unwrap().get(&destination.host) {
           (
             socket.clone(),
@@ -132,7 +144,10 @@ impl UdpForwarder {
           })?;
 
         let socket = UdpSocket::bind(source.address.unspecified()).await?;
-        bind_socket_to_interface(&socket, interface)?;
+        configure_udp_socket_buffers(&socket);
+        if let Some(interface) = interface {
+          bind_socket_to_interface(&socket, interface)?;
+        }
         let socket = socket.arc();
         let metrics = UdpSocketMetrics::new(socket.local_addr()?, quic_flow_id);
 
@@ -222,6 +237,12 @@ impl UdpForwarder {
   }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct IdentifiedQuicFlow {
+  flow_id: Option<u64>,
+  adopt_unclassified: bool,
+}
+
 #[derive(Default)]
 struct UdpQuicFlowTracker {
   flows: HashMap<UdpQuicFlowKey, UdpQuicFlowState>,
@@ -230,7 +251,7 @@ struct UdpQuicFlowTracker {
 }
 
 impl UdpQuicFlowTracker {
-  fn identify(&mut self, packet: &OutgoingUdpPacket) -> Option<u64> {
+  fn identify(&mut self, packet: &OutgoingUdpPacket) -> IdentifiedQuicFlow {
     self.received_packets = self.received_packets.wrapping_add(1);
     if self.received_packets.is_multiple_of(256) {
       self.expire();
@@ -244,7 +265,7 @@ impl UdpQuicFlowTracker {
     };
     let client_connection_id = quic_initial_client_connection_id(&packet.payload);
     if !self.flows.contains_key(&key) && client_connection_id.is_none() {
-      return None;
+      return IdentifiedQuicFlow::default();
     }
     let mut replaced_flow_id = None;
     if client_connection_id.as_ref().is_some_and(|connection_id| {
@@ -264,6 +285,7 @@ impl UdpQuicFlowTracker {
         .client_connection_id
         .clone()
     });
+    let mut adopt_unclassified = false;
     if !self.flows.contains_key(&key) {
       let flow_id = self.next_flow_id;
       self.next_flow_id = self.next_flow_id.wrapping_add(1);
@@ -275,6 +297,7 @@ impl UdpQuicFlowTracker {
           last_seen: Instant::now(),
         },
       );
+      adopt_unclassified = replaced_flow_id.is_none();
     }
     let state = self
       .flows
@@ -293,7 +316,10 @@ impl UdpQuicFlowTracker {
         state.flow_id,
       );
     }
-    Some(state.flow_id)
+    IdentifiedQuicFlow {
+      flow_id: Some(state.flow_id),
+      adopt_unclassified,
+    }
   }
 
   fn expire(&mut self) {
@@ -497,27 +523,6 @@ impl Default for UdpForwarder {
   fn default() -> Self {
     Self::new()
   }
-}
-
-#[cfg(target_os = "linux")]
-fn bind_socket_to_interface(socket: &UdpSocket, interface: Option<&str>) -> std::io::Result<()> {
-  if let Some(interface) = interface {
-    SockRef::from(socket).bind_device(Some(interface.as_bytes()))?;
-  }
-
-  Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn bind_socket_to_interface(_: &UdpSocket, interface: Option<&str>) -> std::io::Result<()> {
-  if interface.is_some() {
-    return Err(std::io::Error::new(
-      std::io::ErrorKind::Unsupported,
-      "bind.interface is only supported on Linux",
-    ));
-  }
-
-  Ok(())
 }
 
 #[cfg(test)]
@@ -813,6 +818,70 @@ mod tests {
     let source_ports = server_handle.await.unwrap();
     assert_eq!(source_ports[0], source_ports[1]);
     assert_ne!(source_ports[0], source_ports[2]);
+  }
+
+  #[tokio::test]
+  async fn reordered_zero_rtt_and_unclassified_packets_share_first_quic_flow_socket() {
+    let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_address = server_socket.local_addr().unwrap();
+    let server_handle = tokio::spawn(async move {
+      let mut buffer = [0; 1500];
+      let mut source_ports = Vec::new();
+      for _ in 0..5 {
+        let (_, source) = server_socket.recv_from(&mut buffer).await.unwrap();
+        source_ports.push(source.port());
+      }
+      source_ports
+    });
+
+    let mut forwarder = UdpForwarder::new();
+    let source_address: SocketAddr = "127.0.0.1:20013".parse().unwrap();
+
+    // 1. Pre-Initial short/unclassified packet opens a `None` socket; first QUIC
+    //    `0-RTT` (arriving before `Initial`) + `Initial` + QUICv2 `Initial` with
+    //    the same SCID (`[7; 16]`) must adopt and share that single socket!
+    // 2. A subsequent QUIC connection (`[8; 16]`) reusing the same source port
+    //    must still rotate to a fresh socket.
+    let pre_initial_short = vec![0x40; 48];
+    let mut zero_rtt_v1 = vec![0xd0, 0x00, 0x00, 0x00, 0x01, 16];
+    zero_rtt_v1.extend_from_slice(&[0xaa; 16]);
+    zero_rtt_v1.push(16);
+    zero_rtt_v1.extend_from_slice(&[7; 16]);
+    zero_rtt_v1.extend_from_slice(&[0; 32]);
+
+    let initial_v1 = quic_initial(source_address, server_address, 7);
+
+    let mut initial_v2 = vec![0xd0, 0x6b, 0x33, 0x43, 0xcf, 16];
+    initial_v2.extend_from_slice(&[0xbb; 16]);
+    initial_v2.push(16);
+    initial_v2.extend_from_slice(&[7; 16]);
+    initial_v2.extend_from_slice(&[0; 32]);
+
+    let next_flow_initial = quic_initial(source_address, server_address, 8);
+
+    for payload in [
+      pre_initial_short,
+      zero_rtt_v1,
+      initial_v1,
+      initial_v2,
+      next_flow_initial,
+    ] {
+      forwarder
+        .send(OutgoingUdpPacket {
+          source: create_source(source_address),
+          destination: create_destination(server_address),
+          response_destination: None,
+          payload,
+        })
+        .await
+        .unwrap();
+    }
+
+    let source_ports = server_handle.await.unwrap();
+    assert_eq!(source_ports[0], source_ports[1]);
+    assert_eq!(source_ports[0], source_ports[2]);
+    assert_eq!(source_ports[0], source_ports[3]);
+    assert_ne!(source_ports[0], source_ports[4]);
   }
 
   fn quic_initial(source: SocketAddr, destination: SocketAddr, connection_id_byte: u8) -> Vec<u8> {

@@ -2,8 +2,6 @@ use std::io;
 
 use async_trait::async_trait;
 use lowkit::SelfWrapExt;
-#[cfg(target_os = "linux")]
-use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream};
 
 use crate::{
@@ -13,9 +11,8 @@ use crate::{
     SocketDestinationHost,
   },
   udp_forwarder::{OutboundUdpPacketStream, UdpForwarder},
+  utils::net::{bind_socket_to_interface, validate_interface_name},
 };
-
-const MAX_LINUX_INTERFACE_NAME_LENGTH: usize = 15;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefaultLocalExit {
@@ -131,31 +128,6 @@ impl OutDispatcher for LocalOutDispatcher {
   }
 }
 
-fn validate_interface_name(interface: &str) -> io::Result<()> {
-  if interface.is_empty() {
-    return Err(io::Error::new(
-      io::ErrorKind::InvalidInput,
-      "interface name must not be empty",
-    ));
-  }
-
-  if interface.as_bytes().contains(&0) {
-    return Err(io::Error::new(
-      io::ErrorKind::InvalidInput,
-      "interface name must not contain NUL",
-    ));
-  }
-
-  if interface.len() > MAX_LINUX_INTERFACE_NAME_LENGTH {
-    return Err(io::Error::new(
-      io::ErrorKind::InvalidInput,
-      format!("interface name must be at most {MAX_LINUX_INTERFACE_NAME_LENGTH} bytes on Linux"),
-    ));
-  }
-
-  Ok(())
-}
-
 async fn connect_bound(destination: &SocketDestination, interface: &str) -> io::Result<TcpStream> {
   let addresses = destination.resolve().await?;
   let mut last_error = None;
@@ -181,19 +153,6 @@ async fn connect_bound(destination: &SocketDestination, interface: &str) -> io::
       format!("destination {destination} resolved to no addresses"),
     )
   }))
-}
-
-#[cfg(target_os = "linux")]
-fn bind_socket_to_interface(socket: &TcpSocket, interface: &str) -> io::Result<()> {
-  SockRef::from(socket).bind_device(Some(interface.as_bytes()))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn bind_socket_to_interface(_: &TcpSocket, _: &str) -> io::Result<()> {
-  Err(io::Error::new(
-    io::ErrorKind::Unsupported,
-    "bind.interface is only supported on Linux",
-  ))
 }
 
 #[cfg(test)]
@@ -285,7 +244,7 @@ mod tests {
     bind_socket_to_interface(&socket, "lo")?;
 
     assert_eq!(
-      SockRef::from(&socket).device()?.as_deref(),
+      socket2::SockRef::from(&socket).device()?.as_deref(),
       Some(b"lo".as_slice())
     );
 

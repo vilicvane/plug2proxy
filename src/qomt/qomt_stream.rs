@@ -7,22 +7,36 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::quic_connection::QuicStream;
 
-/// QomT 层的流，包装底层 QUIC 流。
+/// QomT 层的可靠字节流，包装底层 QUIC 流。
 ///
-/// 该类型始终表示 reliable byte stream，并固定走 QUIC stream over mTCP。
-/// unreliable 由平级的 `QomtPacketStream` packet API 承载：
-/// `AsyncWrite` 允许 partial write 且不保留包边界，不能安全表达丢包语义。
+/// 常规流走主连接（QUIC over mTCP）；短控制 RPC（如 `RESOLVE`）在双方协商
+/// `p2p-s` 后可直接走 `QomT UDP` 的 QUIC 连接以消除 TCP 队头阻塞。
 pub struct QomtStream {
   inner: QuicStream,
+  udp_bypass: bool,
 }
 
 impl QomtStream {
   pub fn new(inner: QuicStream) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      udp_bypass: false,
+    }
+  }
+
+  pub(crate) fn new_udp_bypass(inner: QuicStream) -> Self {
+    Self {
+      inner,
+      udp_bypass: true,
+    }
   }
 
   pub fn id(&self) -> u64 {
     self.inner.id()
+  }
+
+  pub fn is_udp_bypass(&self) -> bool {
+    self.udp_bypass
   }
 }
 

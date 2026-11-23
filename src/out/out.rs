@@ -19,7 +19,10 @@ use tokio::{
 
 use crate::{
   cert::NODE_PEM_FILE_NAME,
-  mt_connections::{MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener},
+  mt_connections::{
+    LocalInterface, MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener, MtListenerBinding,
+    build_local_interfaces,
+  },
   node::{
     LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToOut,
     NodeResolveAnswers, OutDispatcher,
@@ -27,12 +30,14 @@ use crate::{
   out::{OutConfig, build_local_out_dispatchers},
   primitives::OutExits,
   qomt::{
-    MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, QomtPacketStream, qomt_accept, qomt_connect,
+    MAX_PENDING_QOMT_HANDSHAKES, QomtConnection, QomtPacketStream, QomtUdpReconnectPolicy,
+    qomt_accept, qomt_connect_with_options,
   },
   quic_connection::{QuicBytesPacket, create_quiche_config, create_udp_quiche_config},
   route::RouteMatch,
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket},
   utils::{
+    net::{bind_tcp_listener, bind_udp_socket},
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
     task::reap_finished_tasks,
   },
@@ -42,6 +47,7 @@ pub struct Out {
   id: NodeId,
   exits: OutExits,
   local_out_dispatchers: Vec<Arc<dyn OutDispatcher>>,
+  local_interfaces: Vec<Arc<LocalInterface>>,
   listen: Option<SocketAddr>,
   advertise: Option<SocketAddr>,
   hub_options: Vec<OutHubOptions>,
@@ -50,15 +56,16 @@ pub struct Out {
 
 pub struct OutOptions {
   pub local_out_dispatchers: Vec<LocalOutDispatcher>,
+  pub local_interfaces: Vec<Arc<LocalInterface>>,
   pub listen: Option<SocketAddr>,
   pub advertise: Option<SocketAddr>,
   pub hubs: Vec<OutHubOptions>,
   pub context_dir: PathBuf,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct OutHubOptions {
-  pub address: SocketAddr,
+  pub addresses: Vec<SocketAddr>,
   pub connections: usize,
 }
 
@@ -66,6 +73,7 @@ impl Out {
   pub fn new(
     OutOptions {
       local_out_dispatchers,
+      local_interfaces,
       listen,
       advertise,
       hubs: hub_options,
@@ -75,10 +83,12 @@ impl Out {
     assert!(!hub_options.is_empty(), "OUT requires at least one HUB");
     let mut hub_addresses = HashSet::new();
     assert!(
-      hub_options
-        .iter()
-        .all(|hub| hub_addresses.insert(hub.address)),
-      "OUT HUB addresses must be unique"
+      hub_options.iter().all(|hub| !hub.addresses.is_empty()
+        && hub
+          .addresses
+          .iter()
+          .all(|address| hub_addresses.insert(*address))),
+      "OUT HUB addresses must be non-empty and unique"
     );
     assert!(
       listen.is_some() || advertise.is_none(),
@@ -88,6 +98,12 @@ impl Out {
       advertise.is_none_or(|address| address.port() != 0),
       "OUT advertise port must not be zero"
     );
+
+    let local_interfaces = if local_interfaces.is_empty() {
+      vec![LocalInterface::default_implicit()]
+    } else {
+      local_interfaces
+    };
 
     let exits = local_out_dispatchers
       .iter()
@@ -103,6 +119,7 @@ impl Out {
       id: NodeId::new(),
       exits,
       local_out_dispatchers,
+      local_interfaces,
       listen,
       advertise,
       hub_options,
@@ -114,30 +131,88 @@ impl Out {
     let this = self.arc();
     let mut join_set = JoinSet::new();
 
-    let peer_endpoint = if let Some(listen) = this.listen {
-      let tcp_listener = TcpListener::bind(listen).await?;
-      let listen_address = tcp_listener.local_addr()?;
-      let advertise = advertised_peer_endpoint(listen_address, this.advertise);
+    let peer_endpoints = if let Some(listen) = this.listen {
+      if this
+        .local_interfaces
+        .iter()
+        .any(|iface| iface.listen_address.is_some())
+      {
+        let multi_interface = this.local_interfaces.len() > 1;
+        let mut bindings = Vec::with_capacity(this.local_interfaces.len());
+        let mut advertised = Vec::with_capacity(this.local_interfaces.len());
 
-      log::info!("OUT peer listener is listening on {listen_address} (advertised as {advertise}).");
+        for local_interface in &this.local_interfaces {
+          let bind_address = local_interface
+            .listen_address
+            .expect("listening OUT interfaces must resolve a listen address");
+          let tcp_listener = bind_tcp_listener(bind_address, local_interface.interface.as_deref())?;
+          let listen_address = tcp_listener.local_addr()?;
+          let local_interface = local_interface.with_resolved_port(listen_address.port());
+          let udp_socket = if local_interface.udp {
+            bind_udp_socket(listen_address, local_interface.interface.as_deref())
+              .inspect_err(|error| {
+                log::warn!("error binding UDP listener at {listen_address}: {error}");
+              })
+              .ok()
+          } else {
+            None
+          };
+          let advertise = if multi_interface {
+            crate::mt_connections::warn_missing_vpc_advertise(
+              "OUT",
+              &local_interface,
+              listen_address,
+            );
+            local_interface.advertise.unwrap_or(listen_address)
+          } else {
+            advertised_peer_endpoint(listen_address, local_interface.advertise)
+          };
 
-      // 使用 TCP 实际绑定地址，保持 TCP/UDP 地址和端口一致。
-      let udp_socket = UdpSocket::bind(listen_address)
-        .await
-        .inspect_err(|error| {
-          log::warn!("error binding UDP listener at {listen_address}: {error}");
-        })
-        .ok();
+          advertised.push(advertise);
+          bindings.push(MtListenerBinding {
+            interface_id: local_interface.id,
+            local_interface: local_interface.clone(),
+            tcp_listener,
+            udp_socket,
+          });
+        }
 
-      join_set.spawn(this.clone().run_out(tcp_listener, udp_socket));
+        log::info!(
+          "OUT peer listener is listening on {} endpoints ({:?}).",
+          bindings.len(),
+          advertised
+        );
 
-      Some(advertise)
+        let mt_connections_listener = MtConnectionsListener::from_bindings(bindings);
+        join_set.spawn(this.clone().run_out_with_listener(mt_connections_listener));
+
+        advertised
+      } else {
+        let tcp_listener = TcpListener::bind(listen).await?;
+        let listen_address = tcp_listener.local_addr()?;
+        let advertise = advertised_peer_endpoint(listen_address, this.advertise);
+
+        log::info!(
+          "OUT peer listener is listening on {listen_address} (advertised as {advertise})."
+        );
+
+        // 使用 TCP 实际绑定地址，保持 TCP/UDP 地址和端口一致。
+        let udp_socket = bind_udp_socket(listen_address, None)
+          .inspect_err(|error| {
+            log::warn!("error binding UDP listener at {listen_address}: {error}");
+          })
+          .ok();
+
+        join_set.spawn(this.clone().run_out(tcp_listener, udp_socket));
+
+        vec![advertise]
+      }
     } else {
-      None
+      Vec::new()
     };
 
-    for &hub in &this.hub_options {
-      join_set.spawn(this.clone().run_hub_connection(hub, peer_endpoint));
+    for hub in this.hub_options.clone() {
+      join_set.spawn(this.clone().run_hub_connection(hub, peer_endpoints.clone()));
     }
 
     while let Some(result) = join_set.join_next().await {
@@ -150,26 +225,33 @@ impl Out {
   async fn run_hub_connection(
     self: Arc<Self>,
     OutHubOptions {
-      address,
+      addresses,
       connections,
     }: OutHubOptions,
-    peer_endpoint: Option<SocketAddr>,
+    peer_endpoints: Vec<SocketAddr>,
   ) -> anyhow::Result<()> {
     let pem_path = self.context_dir.join(NODE_PEM_FILE_NAME);
     let mut quiche_config = create_quiche_config(&pem_path)?;
+    let hub_label = addresses
+      .iter()
+      .map(ToString::to_string)
+      .collect::<Vec<_>>()
+      .join(",");
 
     loop {
       async {
         let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
-        let qomt_connection = qomt_connect(
+        let qomt_connection = qomt_connect_with_options(
           &mut quiche_config,
           udp_quiche_config,
-          address,
+          &addresses,
+          &self.local_interfaces,
           connections.max(1),
+          QomtUdpReconnectPolicy::default(),
         )
         .await?;
 
-        log::info!("connection to HUB {address} established.");
+        log::info!("connection to HUB {hub_label} established.");
 
         let hub_id = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
           let mut stream = qomt_connection.open_stream();
@@ -177,7 +259,7 @@ impl Out {
           let hello = NodeHello::Out(NodeHelloOut {
             id: self.id,
             exits: self.exits.clone(),
-            peer_endpoint,
+            peer_endpoints: peer_endpoints.clone(),
           });
 
           stream
@@ -193,17 +275,17 @@ impl Out {
         .await
         .context("timed out waiting for HUB hello acknowledgement")??;
 
-        log::info!("connection registered with HUB {address} ({hub_id}).");
+        log::info!("connection registered with HUB {hub_label} ({hub_id}).");
 
         self.clone().handle_node(qomt_connection).await?;
 
-        log::info!("connection to HUB {address} closed.");
+        log::info!("connection to HUB {hub_label} closed.");
 
         anyhow::Ok(())
       }
       .await
       .inspect_err(|error| {
-        log::error!("HUB {address} connection error: {error}");
+        log::error!("HUB {hub_label} connection error: {error}");
       })
       .ok();
 
@@ -216,8 +298,15 @@ impl Out {
     tcp_listener: TcpListener,
     udp_socket: Option<UdpSocket>,
   ) -> anyhow::Result<()> {
-    let mut mt_connections_listener =
-      MtConnectionsListener::<QuicBytesPacket>::new(tcp_listener, udp_socket);
+    self
+      .run_out_with_listener(MtConnectionsListener::new(tcp_listener, udp_socket))
+      .await
+  }
+
+  pub async fn run_out_with_listener(
+    self: Arc<Self>,
+    mut mt_connections_listener: MtConnectionsListener<QuicBytesPacket>,
+  ) -> anyhow::Result<()> {
     let pending_handshakes = Arc::new(Semaphore::new(MAX_PENDING_QOMT_HANDSHAKES));
     let mut join_set = JoinSet::new();
 
@@ -324,8 +413,9 @@ impl Out {
               this.relay_udp(exit, Box::new(packet_stream)).await?;
             }
             NodeMessageToOut::Resolve(exit, query) => {
+              let lane = if stream.is_udp_bypass() { " (udp)" } else { "" };
               log::debug!(
-                "QOMT {qomt_connection_id} stream {stream_id} received RESOLVE: \
+                "QOMT {qomt_connection_id} stream {stream_id}{lane} received RESOLVE: \
                  name={}, record_type={}, exit={exit}.",
                 query.name,
                 query.record_type,
@@ -337,6 +427,7 @@ impl Out {
               stream
                 .write_all(&postcard::to_allocvec(&answers).unwrap())
                 .await?;
+              stream.shutdown().await?;
             }
           }
 
@@ -378,7 +469,7 @@ pub struct PeerOut {
   /// Expected in the peer listener's hello acknowledgement.
   pub provider_id: NodeId,
   pub exits: OutExits,
-  pub address: SocketAddr,
+  pub addresses: Vec<SocketAddr>,
 }
 
 pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow::Result<()> {
@@ -386,6 +477,7 @@ pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow
   let peer_addresses = config.peer_addresses()?;
   let OutConfig {
     hubs,
+    interfaces,
     exits,
     listen: _,
     advertise: _,
@@ -394,9 +486,11 @@ pub async fn run_out(context_dir: impl AsRef<Path>, config: OutConfig) -> anyhow
   let (listen, advertise) = peer_addresses
     .map(|(listen, advertise)| (Some(listen), advertise))
     .unwrap_or_default();
+  let local_interfaces = build_local_interfaces(interfaces, listen)?;
 
   let out = Out::new(OutOptions {
     local_out_dispatchers,
+    local_interfaces,
     listen,
     advertise,
     hubs: hubs.into_iter().map(Into::into).collect(),
@@ -424,6 +518,7 @@ mod tests {
     cert::{generate_ca_pem_file, generate_node_pem_file},
     node::DefaultLocalExit,
     primitives::{OutExit, OutExitTag, SocketDestination, SocketDestinationHost},
+    qomt::qomt_connect,
     test::test_dir,
     udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource},
   };
@@ -439,10 +534,11 @@ mod tests {
         )
         .unwrap(),
       ],
+      local_interfaces: vec![],
       listen: None,
       advertise: None,
       hubs: vec![OutHubOptions {
-        address: "127.0.0.1:1122".parse().unwrap(),
+        addresses: vec!["127.0.0.1:1122".parse().unwrap()],
         connections: 1,
       }],
       context_dir: PathBuf::new(),
@@ -488,7 +584,7 @@ mod tests {
         .zip(EXPECTED_PATHS)
         .map(|(listener, connections)| {
           Ok(OutHubOptions {
-            address: listener.local_addr()?,
+            addresses: vec![listener.local_addr()?],
             connections,
           })
         })
@@ -501,6 +597,7 @@ mod tests {
             tags: vec![OutExitTag::from("system")],
           },
         )],
+        local_interfaces: vec![],
         listen: Some("127.0.0.1:0".parse()?),
         advertise: Some(peer_endpoint),
         hubs,
@@ -563,7 +660,7 @@ mod tests {
           };
           assert_eq!(hello.id, out_id);
           assert_eq!(hello.exits, out_exits);
-          assert_eq!(hello.peer_endpoint, Some(peer_endpoint));
+          assert_eq!(hello.peer_endpoints, vec![peer_endpoint]);
 
           hello_stream
             .write_all(&postcard::to_allocvec(&NodeHelloAck(NodeId::new())).unwrap())
@@ -611,10 +708,11 @@ mod tests {
             tags: vec![OutExitTag::from("system")],
           },
         )],
+        local_interfaces: vec![],
         listen: None,
         advertise: None,
         hubs: vec![OutHubOptions {
-          address: "127.0.0.1:1".parse()?,
+          addresses: vec!["127.0.0.1:1".parse()?],
           connections: 1,
         }],
         context_dir: out_dir,

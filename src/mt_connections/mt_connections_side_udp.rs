@@ -1,22 +1,74 @@
 use std::{
-  net::SocketAddr,
+  net::{IpAddr, SocketAddr},
   pin::Pin,
-  sync::{Arc, Weak},
+  sync::{
+    Arc, Weak,
+    atomic::{AtomicU64, Ordering},
+  },
   task::{Context, Poll},
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use futures::{Sink, Stream};
 use lowkit::{SelfWrapExt, tokio_join_set};
 use tokio::{net::UdpSocket, task::JoinSet, time::timeout};
 
-use crate::{mt_connections::MtConnectionsId, utils::net::SocketAddressExt};
+use crate::{
+  mt_connections::{MtConnectionsId, TokenBucket, debit_pair},
+  utils::net::{SocketAddressExt, bind_udp_socket, configure_udp_socket_buffers},
+};
 
 /// UDP 帧头长度：MtConnectionsId 的 16 字节原始字节（compact UUID）。
 pub const MT_CONNECTIONS_UDP_FRAME_HEAD_SIZE: usize = 16;
 
+/// Estimated IP + UDP header overhead per datagram for bandwidth accounting.
+pub(crate) const UDP_WIRE_OVERHEAD_BYTES: u64 = 28;
+
 /// 1500-byte IPv6 路径上的 UDP payload 预算（1500 - IPv6 40B - UDP 8B）。
 pub const MAX_UDP_WIRE_DATAGRAM_SIZE: usize = 1452;
+
+/// 吸收驱动任务切换间隙与跨洋 BDP 突发，同时保持明确的每连接内存上限。
+const UDP_INCOMING_PACKET_QUEUE_CAPACITY: usize = 1024;
+
+pub(crate) const MAX_PRECHARGED_UDP_BYTES: u64 =
+  UDP_INCOMING_PACKET_QUEUE_CAPACITY as u64
+    * (MAX_UDP_WIRE_DATAGRAM_SIZE as u64 + UDP_WIRE_OVERHEAD_BYTES);
+
+pub(crate) fn add_precharged_bytes(counter: &AtomicU64, bytes: u64) -> u64 {
+  let mut current = counter.load(Ordering::Acquire);
+  loop {
+    let room = MAX_PRECHARGED_UDP_BYTES.saturating_sub(current);
+    let delta = bytes.min(room);
+    if delta == 0 {
+      return 0;
+    }
+
+    match counter.compare_exchange_weak(
+      current,
+      current + delta,
+      Ordering::AcqRel,
+      Ordering::Acquire,
+    ) {
+      Ok(_) => return delta,
+      Err(observed) => current = observed,
+    }
+  }
+}
+
+pub(crate) fn revert_precharged_bytes(counter: &AtomicU64, bytes: u64) {
+  if bytes == 0 {
+    return;
+  }
+
+  let mut current = counter.load(Ordering::Acquire);
+  loop {
+    let next = current.saturating_sub(bytes);
+    match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+      Ok(_) => return,
+      Err(observed) => current = observed,
+    }
+  }
+}
 
 /// 路由头之后可承载的最大包体。这个值才是上层 quiche 的 UDP payload 上限。
 pub const MAX_UDP_PACKET_FRAME_SIZE: usize =
@@ -24,9 +76,6 @@ pub const MAX_UDP_PACKET_FRAME_SIZE: usize =
 
 /// 多留一个字节以检测并丢弃被截断的超长数据报。
 pub(crate) const UDP_RECV_BUFFER_SIZE: usize = MAX_UDP_WIRE_DATAGRAM_SIZE + 1;
-
-/// 吸收驱动任务切换间隙与小突发，同时保持明确的每连接内存上限。
-const UDP_INCOMING_PACKET_QUEUE_CAPACITY: usize = 64;
 
 /// 接收端未就绪时投递的等待上限：超时丢包回到 recv_from，保证对端错误
 /// （ICMP port unreachable 等）能被检测并驱动通道关闭。
@@ -82,6 +131,41 @@ pub fn decode_udp_frame(frame: &[u8]) -> Option<(MtConnectionsId, &[u8])> {
   Some((id, &frame[MT_CONNECTIONS_UDP_FRAME_HEAD_SIZE..]))
 }
 
+#[derive(Clone, Debug)]
+pub struct UdpBandwidthAccountant {
+  pub local_out: Option<Arc<TokenBucket>>,
+  pub peer_in: Option<Arc<TokenBucket>>,
+  pub precharged_bytes: Arc<AtomicU64>,
+}
+
+impl UdpBandwidthAccountant {
+  pub fn account_sent(&self, wire_bytes: u64) {
+    let mut current = self.precharged_bytes.load(Ordering::Acquire);
+    let covered = loop {
+      let next = current.saturating_sub(wire_bytes);
+      match self.precharged_bytes.compare_exchange_weak(
+        current,
+        next,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        Ok(_) => break current.min(wire_bytes),
+        Err(observed) => current = observed,
+      }
+    };
+    let remaining = wire_bytes.saturating_sub(covered);
+
+    if remaining > 0 {
+      debit_pair(
+        self.local_out.as_deref(),
+        self.peer_in.as_deref(),
+        remaining,
+        Instant::now(),
+      );
+    }
+  }
+}
+
 /// 一条 MtConnections 的 UDP 侧双工通道，帧格式为 `MtConnectionsId + 包体`。
 ///
 /// 每个实例固定一个对端；上层 QUIC 连接释放时实例及其后台任务一同释放。
@@ -109,19 +193,47 @@ where
     peer_address: SocketAddr,
     id: MtConnectionsId,
   ) -> std::io::Result<Self> {
-    let socket = UdpSocket::bind(peer_address.unspecified()).await?;
+    Self::connect_side_bound(peer_address, id, None, None, None).await
+  }
+
+  pub async fn connect_side_bound(
+    peer_address: SocketAddr,
+    id: MtConnectionsId,
+    local_ip: Option<IpAddr>,
+    interface: Option<&str>,
+    accountant: Option<UdpBandwidthAccountant>,
+  ) -> std::io::Result<Self> {
+    if let Some(local_ip) = local_ip
+      && local_ip.is_ipv4() != peer_address.is_ipv4()
+    {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("local UDP address {local_ip} is incompatible with peer {peer_address}"),
+      ));
+    }
+
+    let bind_address = local_ip
+      .map(|ip| SocketAddr::new(ip, 0))
+      .unwrap_or_else(|| peer_address.unspecified());
+    let socket = bind_udp_socket(bind_address, interface)?;
 
     // UDP connect：限定单一对端并让 ICMP 错误（如对端无监听）通过
     // recv_from 快速返回，驱动 duplex 关闭而非挂起等超时。
     socket.connect(peer_address).await?;
 
-    Ok(Self::from_socket_inner(socket, peer_address, id, true))
+    Ok(Self::from_socket_inner(
+      socket,
+      peer_address,
+      id,
+      true,
+      accountant,
+    ))
   }
 
   /// 基于已绑定的 UDP socket 构造（测试等场景可直接指定本地地址）。
   #[cfg(test)]
   fn from_socket(socket: UdpSocket, peer_address: SocketAddr, id: MtConnectionsId) -> Self {
-    Self::from_socket_inner(socket, peer_address, id, false)
+    Self::from_socket_inner(socket, peer_address, id, false, None)
   }
 
   fn from_socket_inner(
@@ -129,7 +241,9 @@ where
     peer_address: SocketAddr,
     id: MtConnectionsId,
     connected: bool,
+    accountant: Option<UdpBandwidthAccountant>,
   ) -> Self {
+    configure_udp_socket_buffers(&socket);
     let local_address = socket
       .local_addr()
       .expect("a bound UDP socket must have a local address");
@@ -139,8 +253,9 @@ where
       flume::bounded::<TPacket>(UDP_INCOMING_PACKET_QUEUE_CAPACITY);
 
     let send_peer_address = peer_address;
-    let packet_sink =
-      futures::sink::unfold(socket.clone(), move |socket, packet: TPacket| async move {
+    let packet_sink = futures::sink::unfold(socket.clone(), move |socket, packet: TPacket| {
+      let accountant = accountant.clone();
+      async move {
         let frame = encode_udp_frame(&id, &packet).ok_or_else(|| {
           std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -158,10 +273,15 @@ where
           socket.send_to(&frame, send_peer_address).await?
         };
 
+        if let Some(accountant) = &accountant {
+          accountant.account_sent(length as u64 + UDP_WIRE_OVERHEAD_BYTES);
+        }
+
         log::trace!("sent {length}-byte UDP frame to {send_peer_address}");
 
         Ok(socket)
-      });
+      }
+    });
 
     let recv_socket = socket.clone();
     let recv_packet_sender = packet_sender.clone();
@@ -235,6 +355,7 @@ where
     socket: Arc<UdpSocket>,
     peer_address: SocketAddr,
     id: MtConnectionsId,
+    accountant: Option<UdpBandwidthAccountant>,
   ) -> (Self, flume::Sender<TPacket>) {
     let local_address = socket
       .local_addr()
@@ -246,9 +367,9 @@ where
     // upgrade 失败会作为底层 transport error 传播给 quiche。
     let send_socket: Weak<UdpSocket> = Arc::downgrade(&socket);
     let send_peer_address = peer_address;
-    let packet_sink = futures::sink::unfold(
-      send_socket,
-      move |send_socket, packet: TPacket| async move {
+    let packet_sink = futures::sink::unfold(send_socket, move |send_socket, packet: TPacket| {
+      let accountant = accountant.clone();
+      async move {
         let socket = send_socket.upgrade().ok_or_else(|| {
           std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
@@ -267,11 +388,15 @@ where
         })?;
 
         let length = socket.send_to(&frame, send_peer_address).await?;
+        if let Some(accountant) = &accountant {
+          accountant.account_sent(length as u64 + UDP_WIRE_OVERHEAD_BYTES);
+        }
+
         log::trace!("sent {length}-byte UDP frame to {send_peer_address}");
 
         Ok(send_socket)
-      },
-    );
+      }
+    });
 
     (
       Self {
@@ -429,6 +554,7 @@ mod tests {
       socket.clone(),
       peer.local_addr().unwrap(),
       MtConnectionsId::new(),
+      None,
     );
 
     drop(socket);

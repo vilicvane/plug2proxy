@@ -3,6 +3,7 @@ use std::ops::{Deref, DerefMut};
 #[derive(Debug)]
 pub struct QuicBytesPacket {
   bytes: Vec<u8>,
+  pub(crate) express: bool,
   pub(crate) delivery: Option<quiche::ReliablePacket>,
   pub(crate) recv_order: Option<quiche::ReliableRecv>,
 }
@@ -11,6 +12,7 @@ impl From<Vec<u8>> for QuicBytesPacket {
   fn from(value: Vec<u8>) -> Self {
     Self {
       bytes: value,
+      express: false,
       delivery: None,
       recv_order: None,
     }

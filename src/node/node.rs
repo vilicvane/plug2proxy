@@ -1054,8 +1054,8 @@ pub struct NodeHelloOut {
   /// Stable provider identity retained across HUB reconnect generations.
   pub id: NodeId,
   pub exits: OutExits,
-  /// Endpoint advertised for an optional HUB-coordinated peer path.
-  pub peer_endpoint: Option<SocketAddr>,
+  /// Endpoints advertised for an optional HUB-coordinated peer path.
+  pub peer_endpoints: Vec<SocketAddr>,
 }
 
 #[derive(Serialize, Deserialize)]

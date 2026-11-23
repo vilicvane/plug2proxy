@@ -1,6 +1,5 @@
 use std::{
   collections::HashMap,
-  marker::PhantomData,
   net::IpAddr,
   sync::{Arc, Mutex, Weak},
 };
@@ -8,24 +7,198 @@ use std::{
 use lowkit::{DropCallback, SelfWrapExt};
 use tokio::{
   io::AsyncWriteExt,
-  net::{TcpStream, UdpSocket},
-  sync::mpsc,
+  net::{TcpListener, TcpStream, UdpSocket},
+  sync::{Semaphore, mpsc},
   task::JoinSet,
   time::{Duration, sleep, timeout},
 };
 
 use crate::{
   mt_connections::{
-    MAX_UDP_WIRE_DATAGRAM_SIZE, MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+    LocalInterface, MAX_UDP_WIRE_DATAGRAM_SIZE, MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
     MT_CONNECTIONS_RESPONSE_HEAD_BUFFER_SIZE, MtConnections, MtConnectionsId, MtConnectionsMagic,
     MtConnectionsPacket, MtConnectionsRequestHead, MtConnectionsRequestHeadData,
     MtConnectionsResponseHead, MtConnectionsResponseHeadData, MtConnectionsSideUdpDuplex,
-    MtConnectionsUdpPacket, UDP_RECV_BUFFER_SIZE, UdpDuplexSlot, configure_mt_tcp_stream,
-    decode_udp_frame,
+    MtConnectionsUdpPacket, MtConnectionsUnderlayMetrics, UDP_RECV_BUFFER_SIZE,
+    UdpBandwidthAccountant, UdpDuplexSlot, configure_mt_tcp_stream, decode_udp_frame,
   },
   primitives::ConnectionSide,
-  utils::postcard::{PostcardStreamError, postcard_read_stream},
+  utils::{
+    net::configure_udp_socket_buffers,
+    postcard::{PostcardStreamError, postcard_read_stream},
+    task::reap_finished_tasks,
+  },
 };
+
+const MAX_CONCURRENT_MTCP_HANDSHAKES: usize = 128;
+
+pub struct MtListenerBinding {
+  pub interface_id: u16,
+  pub local_interface: Arc<LocalInterface>,
+  pub tcp_listener: TcpListener,
+  pub udp_socket: Option<UdpSocket>,
+}
+
+fn constant_time_eq(lhs: &[u8; 32], rhs: &[u8; 32]) -> bool {
+  let mut diff = 0_u8;
+  for (left, right) in lhs.iter().zip(rhs.iter()) {
+    diff |= left ^ right;
+  }
+  diff == 0
+}
+
+type PairPathCounter = Arc<dyn Fn(u16) -> usize + Send + Sync>;
+
+enum ExtendAuth {
+  Legacy,
+  Plan {
+    token: [u8; 32],
+    pair_to_server_if: HashMap<u16, u16>,
+    pair_max_paths: HashMap<u16, usize>,
+    path_counter: PairPathCounter,
+  },
+}
+
+impl ExtendAuth {
+  fn authorizes(
+    &self,
+    token: &[u8; 32],
+    pair_id: u16,
+    server_if_id: u16,
+    binding_idx: usize,
+  ) -> bool {
+    match self {
+      Self::Legacy => *token == [0; 32] && pair_id == 0 && binding_idx == 0,
+      Self::Plan {
+        token: expected,
+        pair_to_server_if,
+        pair_max_paths,
+        path_counter,
+      } => {
+        constant_time_eq(token, expected)
+          && pair_to_server_if.get(&pair_id) == Some(&server_if_id)
+          && pair_max_paths
+            .get(&pair_id)
+            .is_some_and(|&max_paths| path_counter(pair_id) < max_paths)
+      }
+    }
+  }
+}
+
+struct ListenerSession {
+  tcp_stream_sender: mpsc::UnboundedSender<(TcpStream, u16)>,
+  extend_auth: ExtendAuth,
+}
+
+struct ListenerBindingRuntime<TPacket>
+where
+  TPacket: 'static,
+{
+  interface_id: u16,
+  udp_socket: Option<Arc<UdpSocket>>,
+  udp_dispatch_map: Arc<Mutex<HashMap<MtConnectionsId, UdpDispatchEntry<TPacket>>>>,
+}
+
+pub(crate) struct MtListenerSessionHandle<TPacket>
+where
+  TPacket: 'static,
+{
+  id: MtConnectionsId,
+  bootstrap_server_if_id: u16,
+  server_interfaces: Vec<Arc<LocalInterface>>,
+  server_udp_enabled: Vec<bool>,
+  sessions: Arc<Mutex<HashMap<MtConnectionsId, ListenerSession>>>,
+  runtimes: Vec<Arc<ListenerBindingRuntime<TPacket>>>,
+  cleanup_channels: Arc<Mutex<Vec<(usize, MtConnectionsId)>>>,
+}
+
+impl<TPacket> MtListenerSessionHandle<TPacket>
+where
+  TPacket: MtConnectionsPacket + MtConnectionsUdpPacket,
+{
+  pub(crate) fn bootstrap_server_if_id(&self) -> u16 {
+    self.bootstrap_server_if_id
+  }
+
+  pub(crate) fn server_interfaces(&self) -> &[Arc<LocalInterface>] {
+    &self.server_interfaces
+  }
+
+  pub(crate) fn server_udp_enabled(&self) -> &[bool] {
+    &self.server_udp_enabled
+  }
+
+  pub(crate) fn install_extend_plan(
+    &self,
+    token: [u8; 32],
+    pair_to_server_if: HashMap<u16, u16>,
+    pair_max_paths: HashMap<u16, usize>,
+    underlay_metrics: &Arc<MtConnectionsUnderlayMetrics<TPacket>>,
+  ) {
+    let weak_metrics = Arc::downgrade(underlay_metrics);
+    let path_counter: PairPathCounter = Arc::new(move |pair_id| {
+      weak_metrics.upgrade().map_or(usize::MAX, |metrics| {
+        metrics.available_path_count_in_group(pair_id)
+      })
+    });
+
+    let mut sessions = self.sessions.lock().unwrap();
+    if let Some(session) = sessions.get_mut(&self.id) {
+      session.extend_auth = ExtendAuth::Plan {
+        token,
+        pair_to_server_if,
+        pair_max_paths,
+        path_counter,
+      };
+    }
+  }
+
+  pub(crate) fn clear_udp_channels(&self) {
+    let old_channels = std::mem::take(&mut *self.cleanup_channels.lock().unwrap());
+    for (binding_idx, channel_id) in old_channels {
+      if let Some(runtime) = self.runtimes.get(binding_idx) {
+        runtime.udp_dispatch_map.lock().unwrap().remove(&channel_id);
+      }
+    }
+  }
+
+  pub(crate) fn replace_udp_channels(
+    &self,
+    channels: Vec<(u16, MtConnectionsId, Option<UdpBandwidthAccountant>)>,
+  ) -> Vec<(MtConnectionsId, Arc<UdpDuplexSlot<TPacket>>)> {
+    self.clear_udp_channels();
+
+    let mut slots = Vec::with_capacity(channels.len());
+    let mut registered = Vec::with_capacity(channels.len());
+
+    for (server_if_id, channel_id, accountant) in channels {
+      let Some((binding_idx, runtime)) =
+        self.runtimes.iter().enumerate().find(|(_, runtime)| {
+          runtime.interface_id == server_if_id && runtime.udp_socket.is_some()
+        })
+      else {
+        continue;
+      };
+
+      let slot = Arc::new(UdpDuplexSlot::new());
+      runtime.udp_dispatch_map.lock().unwrap().insert(
+        channel_id,
+        UdpDispatchEntry {
+          sender: None,
+          peer_address: None,
+          verify_tcp_peer_ip: None,
+          accountant,
+          slot: Arc::downgrade(&slot),
+        },
+      );
+      registered.push((binding_idx, channel_id));
+      slots.push((channel_id, slot));
+    }
+
+    *self.cleanup_channels.lock().unwrap() = registered;
+    slots
+  }
+}
 
 /// UDP 分发条目：投递 sender 与 MtConnections 的共享 duplex 槽位。
 ///
@@ -37,7 +210,8 @@ where
 {
   sender: Option<flume::Sender<TPacket>>,
   peer_address: Option<std::net::SocketAddr>,
-  tcp_peer_ip: IpAddr,
+  verify_tcp_peer_ip: Option<IpAddr>,
+  accountant: Option<UdpBandwidthAccountant>,
   slot: Weak<UdpDuplexSlot<TPacket>>,
 }
 
@@ -45,25 +219,49 @@ pub struct MtConnectionsListener<TPacket>
 where
   TPacket: MtConnectionsPacket,
 {
-  listener: Arc<tokio::net::TcpListener>,
-  tcp_stream_sender_map: HashMap<MtConnectionsId, mpsc::UnboundedSender<TcpStream>>,
-  udp_dispatch_map: Arc<Mutex<HashMap<MtConnectionsId, UdpDispatchEntry<TPacket>>>>,
-  udp_socket: Option<Arc<UdpSocket>>,
+  created_receiver: mpsc::Receiver<Result<MtConnections<TPacket>, MtConnectionsListenerError>>,
+  #[cfg(test)]
+  runtimes: Arc<Vec<Arc<ListenerBindingRuntime<TPacket>>>>,
   // JoinSet drop 时自动 abort 全部任务（tokio 内置行为），
-  // 分发循环随 listener 释放而终止，无需手动管理。
+  // 分发与 accept 循环随 listener 释放而终止，无需手动管理。
   _join_set: JoinSet<()>,
-  _type_hint: PhantomData<TPacket>,
 }
 
 impl<TPacket> MtConnectionsListener<TPacket>
 where
   TPacket: MtConnectionsPacket + MtConnectionsUdpPacket,
 {
-  pub fn new(listener: tokio::net::TcpListener, udp_socket: Option<UdpSocket>) -> Self {
-    let udp_socket =
-      udp_socket.and_then(
-        |socket| match (listener.local_addr(), socket.local_addr()) {
+  pub fn new(listener: TcpListener, udp_socket: Option<UdpSocket>) -> Self {
+    Self::from_bindings(vec![MtListenerBinding {
+      interface_id: 0,
+      local_interface: LocalInterface::default_implicit(),
+      tcp_listener: listener,
+      udp_socket,
+    }])
+  }
+
+  pub fn from_bindings(bindings: Vec<MtListenerBinding>) -> Self {
+    assert!(
+      !bindings.is_empty(),
+      "listener requires at least one binding"
+    );
+
+    let mut runtimes = Vec::with_capacity(bindings.len());
+    let mut tcp_listeners = Vec::with_capacity(bindings.len());
+    let mut server_interfaces = Vec::with_capacity(bindings.len());
+    let mut server_udp_enabled = Vec::with_capacity(bindings.len());
+    let mut join_set = JoinSet::new();
+
+    for (index, binding) in bindings.into_iter().enumerate() {
+      assert_eq!(
+        binding.interface_id as usize, index,
+        "listener bindings must be ordered by sequential interface_id"
+      );
+
+      let udp_socket = binding.udp_socket.and_then(|socket| {
+        match (binding.tcp_listener.local_addr(), socket.local_addr()) {
           (Ok(tcp_address), Ok(udp_address)) if tcp_address.port() == udp_address.port() => {
+            configure_udp_socket_buffers(&socket);
             Some(socket.arc())
           }
           (Ok(tcp_address), Ok(udp_address)) => {
@@ -82,154 +280,254 @@ where
             log::warn!("disabling QomT UDP listener: cannot read UDP local address: {error}");
             None
           }
-        },
-      );
+        }
+      });
 
-    let udp_dispatch_map: Arc<Mutex<HashMap<MtConnectionsId, UdpDispatchEntry<TPacket>>>> =
+      let udp_dispatch_map: Arc<Mutex<HashMap<MtConnectionsId, UdpDispatchEntry<TPacket>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+      if let Some(udp_socket) = &udp_socket {
+        join_set.spawn(udp_dispatch_loop(
+          udp_socket.clone(),
+          udp_dispatch_map.clone(),
+        ));
+      }
+
+      server_udp_enabled.push(udp_socket.is_some());
+      server_interfaces.push(binding.local_interface);
+      tcp_listeners.push(binding.tcp_listener);
+      runtimes.push(Arc::new(ListenerBindingRuntime {
+        interface_id: binding.interface_id,
+        udp_socket,
+        udp_dispatch_map,
+      }));
+    }
+
+    let sessions: Arc<Mutex<HashMap<MtConnectionsId, ListenerSession>>> =
       Arc::new(Mutex::new(HashMap::new()));
+    let (created_sender, created_receiver) = mpsc::channel(64);
+    let handshake_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MTCP_HANDSHAKES));
+    let server_interfaces = Arc::new(server_interfaces);
+    let server_udp_enabled = Arc::new(server_udp_enabled);
+    let runtimes_shared = Arc::new(runtimes);
 
-    let mut join_set = JoinSet::new();
+    for (binding_idx, tcp_listener) in tcp_listeners.into_iter().enumerate() {
+      let sessions = sessions.clone();
+      let created_sender = created_sender.clone();
+      let handshake_semaphore = handshake_semaphore.clone();
+      let server_interfaces = server_interfaces.clone();
+      let server_udp_enabled = server_udp_enabled.clone();
+      let runtimes_shared = runtimes_shared.clone();
 
-    if let Some(udp_socket) = &udp_socket {
-      join_set.spawn(udp_dispatch_loop(
-        udp_socket.clone(),
-        udp_dispatch_map.clone(),
-      ));
+      join_set.spawn(async move {
+        let mut handshake_tasks = JoinSet::new();
+        let runtime = &runtimes_shared[binding_idx];
+
+        loop {
+          let stream = match tcp_listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+              let _ = created_sender.send(Err(error.into())).await;
+              break;
+            }
+          };
+
+          let Ok(permit) = handshake_semaphore.clone().try_acquire_owned() else {
+            log::warn!("too many pending mTCP handshakes; dropping incoming TCP stream");
+            continue;
+          };
+
+          reap_finished_tasks(&mut handshake_tasks, "mTCP accept handshake task");
+
+          let sessions = sessions.clone();
+          let created_sender = created_sender.clone();
+          let server_interfaces = server_interfaces.clone();
+          let server_udp_enabled = server_udp_enabled.clone();
+          let runtimes_shared = runtimes_shared.clone();
+          let runtime = runtime.clone();
+
+          handshake_tasks.spawn(async move {
+            let _permit = permit;
+            let mut stream = stream;
+
+            if configure_mt_tcp_stream(&stream)
+              .inspect_err(|error| {
+                log::warn!("error configuring incoming mTCP connection: {error}");
+              })
+              .is_err()
+            {
+              return;
+            }
+
+            let Ok(request_head_result) = timeout(
+              MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+              postcard_read_stream::<MtConnectionsRequestHead>(&mut stream),
+            )
+            .await
+            else {
+              log::warn!("timed out reading request head from incoming mTCP connection");
+              return;
+            };
+
+            let Ok(request_head) = request_head_result.inspect_err(|error| {
+              log::warn!("error reading request head from incoming mTCP connections: {error}")
+            }) else {
+              return;
+            };
+
+            match request_head.data {
+              MtConnectionsRequestHeadData::Create => {
+                let id = MtConnectionsId::new();
+
+                if send_response_head_with_timeout(
+                  &mut stream,
+                  MtConnectionsResponseHeadData::Created(id),
+                )
+                .await
+                .inspect_err(|error| {
+                  log::warn!(
+                    "error sending response head (created) to incoming mTCP connections: {error}"
+                  )
+                })
+                .is_err()
+                {
+                  return;
+                }
+
+                let (mut mt_connections, tcp_stream_sender, _) =
+                  MtConnections::new(stream, ConnectionSide::Server, id);
+
+                let cleanup_channels = Arc::new(Mutex::new(Vec::new()));
+
+                if runtime.udp_socket.is_some() {
+                  let slot = mt_connections.udp_duplex_slot();
+                  runtime.udp_dispatch_map.lock().unwrap().insert(
+                    id,
+                    UdpDispatchEntry {
+                      sender: None,
+                      peer_address: None,
+                      verify_tcp_peer_ip: Some(mt_connections.peer_address().ip().to_canonical()),
+                      accountant: None,
+                      slot: Arc::downgrade(&slot),
+                    },
+                  );
+                  cleanup_channels.lock().unwrap().push((binding_idx, id));
+                }
+
+                {
+                  let mut sessions_guard = sessions.lock().unwrap();
+                  sessions_guard.retain(|_, session| !session.tcp_stream_sender.is_closed());
+                  sessions_guard.insert(
+                    id,
+                    ListenerSession {
+                      tcp_stream_sender,
+                      extend_auth: ExtendAuth::Legacy,
+                    },
+                  );
+                }
+
+                let weak_sessions = Arc::downgrade(&sessions);
+                let weak_runtimes = Arc::downgrade(&runtimes_shared);
+                let cleanup_channels_for_drop = cleanup_channels.clone();
+                mt_connections.set_udp_registration(DropCallback::new(Box::new(move || {
+                  if let Some(sessions) = weak_sessions.upgrade() {
+                    sessions.lock().unwrap().remove(&id);
+                  }
+                  if let Some(runtimes) = weak_runtimes.upgrade() {
+                    for (b_idx, channel_id) in cleanup_channels_for_drop.lock().unwrap().drain(..) {
+                      if let Some(runtime) = runtimes.get(b_idx) {
+                        runtime.udp_dispatch_map.lock().unwrap().remove(&channel_id);
+                      }
+                    }
+                  }
+                })
+                  as Box<dyn Fn() + Send>));
+
+                mt_connections.set_listener_handle(MtListenerSessionHandle {
+                  id,
+                  bootstrap_server_if_id: runtime.interface_id,
+                  server_interfaces: (*server_interfaces).clone(),
+                  server_udp_enabled: (*server_udp_enabled).clone(),
+                  sessions: sessions.clone(),
+                  runtimes: (*runtimes_shared).clone(),
+                  cleanup_channels,
+                });
+
+                let _ = created_sender.send(Ok(mt_connections)).await;
+              }
+              MtConnectionsRequestHeadData::Extend { id, pair_id, token } => {
+                let authorized_sender = {
+                  let sessions_guard = sessions.lock().unwrap();
+                  sessions_guard.get(&id).and_then(|session| {
+                    (!session.tcp_stream_sender.is_closed()
+                      && session.extend_auth.authorizes(
+                        &token,
+                        pair_id,
+                        runtime.interface_id,
+                        binding_idx,
+                      ))
+                    .then(|| session.tcp_stream_sender.clone())
+                  })
+                };
+
+                if let Some(tcp_stream_sender) = authorized_sender {
+                  if send_response_head_with_timeout(
+                    &mut stream,
+                    MtConnectionsResponseHeadData::Extended,
+                  )
+                  .await
+                  .inspect_err(|error| {
+                    log::warn!(
+                      "error sending response head (extended) to incoming mTCP connections: {error}"
+                    )
+                  })
+                  .is_err()
+                  {
+                    return;
+                  }
+
+                  tcp_stream_sender.send((stream, pair_id)).ok();
+                } else {
+                  let _ = send_response_head_with_timeout(
+                    &mut stream,
+                    MtConnectionsResponseHeadData::AlreadyClosed,
+                  )
+                  .await
+                  .inspect_err(|error| {
+                    log::warn!(
+                      "error sending response head (already closed) to incoming mTCP connections: \
+                       {error}"
+                    )
+                  });
+                }
+              }
+            }
+          });
+        }
+      });
     }
 
     Self {
-      listener: listener.arc(),
-      tcp_stream_sender_map: HashMap::new(),
-      udp_dispatch_map,
-      udp_socket,
+      created_receiver,
+      #[cfg(test)]
+      runtimes: runtimes_shared,
       _join_set: join_set,
-      _type_hint: PhantomData,
     }
   }
 
   pub async fn accept(&mut self) -> Result<MtConnections<TPacket>, MtConnectionsListenerError> {
-    loop {
-      let (mut stream, _) = self.listener.accept().await?;
-
-      if configure_mt_tcp_stream(&stream)
-        .inspect_err(|error| {
-          log::warn!("error configuring incoming mTCP connection: {error}");
-        })
-        .is_err()
-      {
-        continue;
-      }
-
-      let Ok(request_head_result) = timeout(
-        MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
-        postcard_read_stream::<MtConnectionsRequestHead>(&mut stream),
-      )
-      .await
-      else {
-        log::warn!("timed out reading request head from incoming mTCP connection");
-        continue;
-      };
-
-      let Ok(request_head) = request_head_result.inspect_err(|error| {
-        log::warn!("error reading request head from incoming mTCP connections: {error}")
-      }) else {
-        continue;
-      };
-
-      match request_head.data {
-        MtConnectionsRequestHeadData::Create => {
-          let id = MtConnectionsId::new();
-
-          if send_response_head_with_timeout(
-            &mut stream,
-            MtConnectionsResponseHeadData::Created(id),
-          )
-          .await
-          .inspect_err(|error| {
-            log::warn!(
-              "error sending response head (created) to incoming mTCP connections: {error}"
-            )
-          })
-          .is_err()
-          {
-            continue;
-          }
-
-          let (mut mt_connections, tcp_stream_sender, _) =
-            MtConnections::new(stream, ConnectionSide::Server, id);
-
-          self
-            .tcp_stream_sender_map
-            .retain(|_, tcp_stream_sender| !tcp_stream_sender.is_closed());
-
-          self.tcp_stream_sender_map.insert(id, tcp_stream_sender);
-
-          if self.udp_socket.is_some() {
-            // 登记 UDP 分发槽位：UDP 首包在 accept 返回后的任意时刻到达，
-            // 分发循环通过共享槽位把 duplex 写入 MtConnections。
-            let slot = mt_connections.udp_duplex_slot();
-            self.udp_dispatch_map.lock().unwrap().insert(
-              id,
-              UdpDispatchEntry {
-                sender: None,
-                peer_address: None,
-                tcp_peer_ip: mt_connections.peer_address().ip().to_canonical(),
-                slot: Arc::downgrade(&slot),
-              },
-            );
-
-            // registration 跟随 MtConnections（包括 split 后的底层对象）存活，
-            // 连接释放时立即注销，避免 listener map 持续增长。
-            let udp_dispatch_map = Arc::downgrade(&self.udp_dispatch_map);
-            mt_connections.set_udp_registration(DropCallback::new(Box::new(move || {
-              if let Some(udp_dispatch_map) = udp_dispatch_map.upgrade() {
-                udp_dispatch_map.lock().unwrap().remove(&id);
-              }
-            })
-              as Box<dyn Fn() + Send>));
-          }
-
-          return Ok(mt_connections);
-        }
-        MtConnectionsRequestHeadData::Extend(id) => {
-          if let Some(tcp_stream_sender) = self.tcp_stream_sender_map.get(&id) {
-            if send_response_head_with_timeout(&mut stream, MtConnectionsResponseHeadData::Extended)
-              .await
-              .inspect_err(|error| {
-                log::warn!(
-                  "error sending response head (extended) to incoming mTCP connections: {error}"
-                )
-              })
-              .is_err()
-            {
-              continue;
-            }
-
-            tcp_stream_sender.send(stream).ok();
-          } else {
-            if send_response_head_with_timeout(
-              &mut stream,
-              MtConnectionsResponseHeadData::AlreadyClosed,
-            )
-            .await
-            .inspect_err(|error| {
-              log::warn!(
-                "error sending response head (already closed) to incoming mTCP connections: {error}"
-              )
-            })
-            .is_err()
-            {
-              continue;
-            }
-          }
-        }
-      }
-    }
+    self.created_receiver.recv().await.unwrap_or_else(|| {
+      Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "mTCP listener closed").into())
+    })
   }
 
   #[cfg(test)]
   pub(crate) fn udp_dispatch_count(&self) -> usize {
-    self.udp_dispatch_map.lock().unwrap().len()
+    self
+      .runtimes
+      .iter()
+      .map(|runtime| runtime.udp_dispatch_map.lock().unwrap().len())
+      .sum()
   }
 }
 
@@ -301,7 +599,9 @@ async fn udp_dispatch_loop<TPacket>(
           break;
         };
 
-        if from.ip().to_canonical() != entry.tcp_peer_ip {
+        if let Some(expected_ip) = entry.verify_tcp_peer_ip
+          && from.ip().to_canonical() != expected_ip
+        {
           log::trace!("UDP dispatch: source IP mismatch for {id:?}, dropping");
           break;
         }
@@ -332,8 +632,12 @@ async fn udp_dispatch_loop<TPacket>(
             break;
           };
 
-          let (duplex, sender) =
-            MtConnectionsSideUdpDuplex::listener_side(udp_socket.clone(), from, id);
+          let (duplex, sender) = MtConnectionsSideUdpDuplex::listener_side(
+            udp_socket.clone(),
+            from,
+            id,
+            entry.accountant.clone(),
+          );
 
           slot.set(duplex);
           entry.peer_address = Some(from);

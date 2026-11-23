@@ -16,6 +16,11 @@ const DEFAULT_TPROXY_MARK_MASK: u32 = 0x0000_00ff;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct InboundsConfig {
+  /// Reject inbound UDP port 443 (HTTP/3) packets across all configured
+  /// inbounds unless overridden per inbound, prompting clients to use native
+  /// TCP/HTTP2 instead. Disabled by default.
+  #[serde(default)]
+  pub reject_http3: bool,
   pub socks5: Option<Socks5InboundConfig>,
   pub tproxy: Option<TproxyInboundConfig>,
 }
@@ -26,15 +31,20 @@ impl InboundsConfig {
     dns_hijack: Option<SocketAddr>,
   ) -> anyhow::Result<Vec<AnyInbound>> {
     let mut inbounds = vec![];
+    let default_reject_http3 = self.reject_http3;
 
     if let Some(socks5) = self.socks5 {
-      inbounds.push(Socks5Inbound::new(socks5.into()).await?.into());
+      inbounds.push(
+        Socks5Inbound::new(socks5.into_options(default_reject_http3))
+          .await?
+          .into(),
+      );
     }
     if let Some(tproxy) = self.tproxy {
       let bypass_uid = resolve_bypass_user(&tproxy.network.bypass_user).await?;
       let dns_hijack = tproxy.hijack_dns.then_some(dns_hijack).flatten();
       inbounds.push(
-        TproxyInbound::new(tproxy.into_options(bypass_uid, dns_hijack))
+        TproxyInbound::new(tproxy.into_options(bypass_uid, dns_hijack, default_reject_http3))
           .await?
           .into(),
       );
@@ -56,16 +66,27 @@ pub struct TproxyInboundConfig {
   /// resolver layer instead.
   #[serde(default)]
   pub hijack_dns: bool,
+  /// Reject transparently intercepted UDP port 443 (HTTP/3) packets with ICMP
+  /// Port Unreachable so browsers immediately fall back to TCP/HTTP2. Inherits
+  /// `inbounds.reject_http3` (`false` by default) when omitted.
+  #[serde(default)]
+  pub reject_http3: Option<bool>,
   #[serde(default)]
   pub network: TproxyNetworkConfig,
 }
 
 impl TproxyInboundConfig {
-  fn into_options(self, bypass_uid: u32, dns_hijack: Option<SocketAddr>) -> TproxyInboundOptions {
+  fn into_options(
+    self,
+    bypass_uid: u32,
+    dns_hijack: Option<SocketAddr>,
+    default_reject_http3: bool,
+  ) -> TproxyInboundOptions {
     let TproxyInboundConfig {
       listen,
       sniff,
       hijack_dns: _,
+      reject_http3,
       // Network policy is consumed by the privileged `network` helper. The
       // long-running inbound only receives data-plane options.
       network: _,
@@ -75,6 +96,7 @@ impl TproxyInboundConfig {
       sniff,
       bypass_uid,
       dns_hijack,
+      reject_http3: reject_http3.unwrap_or(default_reject_http3),
     }
   }
 }
@@ -125,14 +147,31 @@ pub struct Socks5InboundConfig {
   pub listen: SerdeSocketAddress,
   #[serde(default = "default_sniff")]
   pub sniff: bool,
+  /// Drop SOCKS5 UDP port 443 (HTTP/3) packets so clients fall back to
+  /// TCP/HTTP2. Inherits `inbounds.reject_http3` (`false` by default) when
+  /// omitted.
+  #[serde(default)]
+  pub reject_http3: Option<bool>,
 }
 
-impl From<Socks5InboundConfig> for Socks5InboundOptions {
-  fn from(Socks5InboundConfig { listen, sniff }: Socks5InboundConfig) -> Self {
+impl Socks5InboundConfig {
+  fn into_options(self, default_reject_http3: bool) -> Socks5InboundOptions {
+    let Socks5InboundConfig {
+      listen,
+      sniff,
+      reject_http3,
+    } = self;
     Socks5InboundOptions {
       listen: listen.into(),
       sniff,
+      reject_http3: reject_http3.unwrap_or(default_reject_http3),
     }
+  }
+}
+
+impl From<Socks5InboundConfig> for Socks5InboundOptions {
+  fn from(config: Socks5InboundConfig) -> Self {
+    config.into_options(false)
   }
 }
 
@@ -175,6 +214,49 @@ mod tests {
     let enabled: InboundsConfig =
       serde_json::from_str(r#"{"tproxy":{"listen":"127.0.0.1:12345","hijack_dns":true}}"#).unwrap();
     assert!(enabled.tproxy.unwrap().hijack_dns);
+  }
+
+  #[test]
+  fn reject_http3_defaults_to_disabled_inherits_inbounds_and_allows_override() {
+    let default: InboundsConfig = serde_json::from_str(
+      r#"{"socks5":{"listen":"127.0.0.1:1080"},"tproxy":{"listen":"127.0.0.1:12345"}}"#,
+    )
+    .unwrap();
+    assert!(!default.reject_http3);
+    assert!(
+      !default
+        .socks5
+        .unwrap()
+        .into_options(default.reject_http3)
+        .reject_http3
+    );
+    assert!(
+      !default
+        .tproxy
+        .unwrap()
+        .into_options(1000, None, default.reject_http3)
+        .reject_http3
+    );
+
+    let inherited: InboundsConfig = serde_json::from_str(
+      r#"{"reject_http3":true,"socks5":{"listen":"127.0.0.1:1080","reject_http3":false},"tproxy":{"listen":"127.0.0.1:12345"}}"#,
+    )
+    .unwrap();
+    assert!(inherited.reject_http3);
+    assert!(
+      !inherited
+        .socks5
+        .unwrap()
+        .into_options(inherited.reject_http3)
+        .reject_http3
+    );
+    assert!(
+      inherited
+        .tproxy
+        .unwrap()
+        .into_options(1000, None, inherited.reject_http3)
+        .reject_http3
+    );
   }
 
   #[test]

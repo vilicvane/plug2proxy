@@ -42,6 +42,6 @@ where
 pub enum PostcardStreamError {
   #[error("I/O error: {0}")]
   Io(#[from] std::io::Error),
-  #[error("Postcard deserialization error")]
+  #[error("Postcard deserialization error: {0}")]
   Deserialization(#[from] postcard::Error),
 }

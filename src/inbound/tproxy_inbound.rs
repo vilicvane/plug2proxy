@@ -28,7 +28,7 @@ use crate::{
     InboundUdpPacketStream, IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource,
     UdpPacketStreamError,
   },
-  utils::task::reap_finished_tasks,
+  utils::{net::configure_udp_socket_buffers, task::reap_finished_tasks},
 };
 
 const TCP_PENDING_CONNECTIONS: usize = 1024;
@@ -58,6 +58,7 @@ pub struct TproxyInboundOptions {
   pub sniff: bool,
   pub bypass_uid: u32,
   pub dns_hijack: Option<SocketAddr>,
+  pub reject_http3: bool,
 }
 
 impl TproxyInbound {
@@ -143,6 +144,7 @@ impl TproxyInbound {
       outgoing_packet_sender,
       incoming_packet_receiver,
       options.dns_hijack,
+      options.reject_http3,
     ));
 
     log::info!("TPROXY TCP and UDP are listening on {listen_address}...");
@@ -309,6 +311,7 @@ fn create_udp_socket(listen: SocketAddr) -> std::io::Result<tokio::io::unix::Asy
     1,
   )?;
   socket.set_nonblocking(true)?;
+  configure_udp_socket_buffers(&socket);
   socket.bind(&listen.into())?;
   tokio::io::unix::AsyncFd::new(socket)
 }
@@ -319,11 +322,13 @@ async fn run_udp_socket(
   outgoing_sender: flume::Sender<OutgoingUdpPacket>,
   incoming_receiver: flume::Receiver<IncomingUdpPacket>,
   dns_hijack: Option<SocketAddr>,
+  reject_http3: bool,
 ) {
   let response_sockets = Cache::builder()
     .max_capacity(UDP_RESPONSE_SOCKET_CAPACITY)
     .time_to_idle(UDP_RESPONSE_SOCKET_IDLE_TIMEOUT)
     .build();
+  let icmp_reject_socket = reject_http3.then(create_icmp_reject_socket).flatten();
   let mut buffer = vec![0; UDP_RECEIVE_BUFFER_SIZE];
   let mut dropped_packets = 0_u64;
   let dns_permits = Arc::new(Semaphore::new(DNS_PROXY_CONCURRENCY));
@@ -339,6 +344,16 @@ async fn run_udp_socket(
               log::warn!(
                 "ignoring direct UDP packet to TPROXY listener from {source}; traffic must arrive via TPROXY"
               );
+              continue;
+            }
+            if reject_http3 && destination.port() == 443 {
+              if let (Some(icmp_socket), SocketAddr::V4(src_v4), SocketAddr::V4(dst_v4)) =
+                (&icmp_reject_socket, source, destination)
+              {
+                let icmp = build_icmpv4_port_unreachable(src_v4, dst_v4, length);
+                let target = SocketAddr::V4(std::net::SocketAddrV4::new(*src_v4.ip(), 0));
+                let _ = icmp_socket.send_to(&icmp, &target.into());
+              }
               continue;
             }
             if destination.port() == 53
@@ -483,6 +498,7 @@ fn create_response_socket(destination: SocketAddr) -> std::io::Result<Socket> {
   socket.set_reuse_address(true)?;
   socket.set_reuse_port(true)?;
   socket.set_nonblocking(true)?;
+  configure_udp_socket_buffers(&socket);
   socket.bind(&destination.into())?;
   Ok(socket)
 }
@@ -490,6 +506,60 @@ fn create_response_socket(destination: SocketAddr) -> std::io::Result<Socket> {
 fn probe_response_socket_capabilities() -> std::io::Result<()> {
   drop(create_response_socket(CAPABILITY_PROBE_ADDRESS)?);
   Ok(())
+}
+
+fn create_icmp_reject_socket() -> Option<Socket> {
+  let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).ok()?;
+  socket.set_nonblocking(true).ok()?;
+  Some(socket)
+}
+
+fn build_icmpv4_port_unreachable(
+  source: std::net::SocketAddrV4,
+  destination: std::net::SocketAddrV4,
+  payload_len: usize,
+) -> [u8; 36] {
+  let mut packet = [0_u8; 36];
+  // RFC 792: Type 3 = Destination Unreachable, Code 3 = Port Unreachable.
+  packet[0] = 3;
+  packet[1] = 3;
+
+  // Quoted 20-byte IPv4 header + original 8-byte UDP header so the client
+  // kernel matches the exact 4-tuple and delivers ECONNREFUSED immediately.
+  let udp_len = (8_usize.saturating_add(payload_len)).min(u16::MAX as usize) as u16;
+  let ip_total_len = 20_u16.saturating_add(udp_len);
+  packet[8] = 0x45;
+  packet[10..12].copy_from_slice(&ip_total_len.to_be_bytes());
+  packet[16] = 64;
+  packet[17] = libc::IPPROTO_UDP as u8;
+  packet[20..24].copy_from_slice(&source.ip().octets());
+  packet[24..28].copy_from_slice(&destination.ip().octets());
+  let ip_checksum = internet_checksum(&packet[8..28]);
+  packet[18..20].copy_from_slice(&ip_checksum.to_be_bytes());
+
+  packet[28..30].copy_from_slice(&source.port().to_be_bytes());
+  packet[30..32].copy_from_slice(&destination.port().to_be_bytes());
+  packet[32..34].copy_from_slice(&udp_len.to_be_bytes());
+
+  let icmp_checksum = internet_checksum(&packet);
+  packet[2..4].copy_from_slice(&icmp_checksum.to_be_bytes());
+  packet
+}
+
+fn internet_checksum(bytes: &[u8]) -> u16 {
+  let mut sum = 0_u32;
+  let mut index = 0;
+  while index + 1 < bytes.len() {
+    sum += u32::from(u16::from_be_bytes([bytes[index], bytes[index + 1]]));
+    index += 2;
+  }
+  if index < bytes.len() {
+    sum += u32::from(bytes[index]) << 8;
+  }
+  while (sum >> 16) != 0 {
+    sum = (sum & 0xffff) + (sum >> 16);
+  }
+  !(sum as u16)
 }
 
 fn socket_destination(address: SocketAddr) -> SocketDestination {
@@ -758,6 +828,7 @@ mod tests {
         sniff: true,
         bypass_uid: unsafe { libc::geteuid() },
         dns_hijack: Some("0.0.0.0:12345".parse().unwrap()),
+        reject_http3: false,
       }))
       .unwrap_err();
     assert!(error.to_string().contains("must not overlap"));
@@ -774,6 +845,7 @@ mod tests {
         sniff: true,
         bypass_uid: unsafe { libc::geteuid() },
         dns_hijack: None,
+        reject_http3: false,
       }))
       .unwrap_err();
     assert!(error.to_string().contains("IPv4"));
@@ -790,6 +862,7 @@ mod tests {
         sniff: true,
         bypass_uid: unsafe { libc::geteuid() },
         dns_hijack: None,
+        reject_http3: false,
       }))
       .unwrap_err();
     assert!(error.to_string().contains("loopback"));
@@ -807,8 +880,25 @@ mod tests {
         sniff: true,
         bypass_uid: effective_uid.wrapping_add(1),
         dns_hijack: None,
+        reject_http3: false,
       }))
       .unwrap_err();
     assert!(error.to_string().contains("effective uid"));
+  }
+
+  #[test]
+  fn builds_valid_icmpv4_port_unreachable_checksums_and_tuple() {
+    let src: std::net::SocketAddrV4 = "100.69.178.77:54997".parse().unwrap();
+    let dst: std::net::SocketAddrV4 = "192.178.40.6:443".parse().unwrap();
+    let icmp = build_icmpv4_port_unreachable(src, dst, 1250);
+
+    assert_eq!(icmp[0], 3);
+    assert_eq!(icmp[1], 3);
+    assert_eq!(internet_checksum(&icmp), 0);
+    assert_eq!(internet_checksum(&icmp[8..28]), 0);
+    assert_eq!(&icmp[20..24], &src.ip().octets());
+    assert_eq!(&icmp[24..28], &dst.ip().octets());
+    assert_eq!(u16::from_be_bytes([icmp[28], icmp[29]]), 54997);
+    assert_eq!(u16::from_be_bytes([icmp[30], icmp[31]]), 443);
   }
 }

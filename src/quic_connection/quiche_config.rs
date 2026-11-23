@@ -21,13 +21,14 @@ pub const MAX_UDP_DATAGRAM_SIZE: usize = MAX_UDP_PACKET_FRAME_SIZE;
 /// bounded capacity. DATAGRAM delivery is intentionally lossy: once either
 /// queue is full, new application datagrams are rejected or dropped instead
 /// of applying stream-style backpressure to the QUIC driver.
-pub const QUIC_DATAGRAM_QUEUE_CAPACITY: usize = 64;
+pub const QUIC_DATAGRAM_QUEUE_CAPACITY: usize = 1024;
 
 /// The UDP bypass is actively kept alive by QUIC PING frames. If no packet is
 /// received for this long, quiche closes the path and the QomT supervisor can
 /// establish a new UDP QUIC connection. quiche may raise the effective value
 /// to at least three PTOs on unusually high-latency paths.
 pub const QOMT_UDP_IDLE_TIMEOUT: std::time::Duration = duration!("15s");
+pub const QOMT_UDP_STREAM_ALPN: &[u8] = b"p2p-s";
 
 pub const MAX_DATA_BUFFER_SIZE_PER_STREAM: u64 = bytes!("64 MiB");
 pub const MAX_DATA_BUFFER_SIZE: u64 = MAX_DATA_BUFFER_SIZE_PER_STREAM * 8;
@@ -89,11 +90,13 @@ pub fn create_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche
   Ok(config)
 }
 
-/// UDP 旁路路径的 quiche 配置：共享证书、ALPN 与流控参数，但保留真实
-/// UDP 所需的 QUIC pacing，并把包大小限制到外层帧的 MTU 预算内。
+/// UDP 旁路路径的 quiche 配置：共享证书、ALPN 与流控参数，与主连接一致使用
+/// BBRv2 拥塞控制，保留真实 UDP 所需的 QUIC pacing，并把包大小限制到外层帧的
+/// MTU 预算内。
 pub fn create_udp_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<quiche::Config> {
   let mut config = create_common_quiche_config(pem_path)?;
 
+  config.set_application_protos(&[QOMT_UDP_STREAM_ALPN, b"p2p"])?;
   config.set_max_idle_timeout(QOMT_UDP_IDLE_TIMEOUT.as_millis() as u64);
   config.set_max_recv_udp_payload_size(MAX_UDP_DATAGRAM_SIZE);
   config.set_max_send_udp_payload_size(MAX_UDP_DATAGRAM_SIZE);
@@ -102,6 +105,7 @@ pub fn create_udp_quiche_config(pem_path: impl AsRef<Path>) -> quiche::Result<qu
     QUIC_DATAGRAM_QUEUE_CAPACITY,
     QUIC_DATAGRAM_QUEUE_CAPACITY,
   );
+  config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Bbr2Gcongestion);
   config.enable_pacing(true);
 
   Ok(config)

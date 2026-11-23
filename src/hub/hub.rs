@@ -25,7 +25,10 @@ use crate::{
   hub::HubConfig,
   r#in::InLike,
   inbound::AnyInbound,
-  mt_connections::{MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener},
+  mt_connections::{
+    MT_CONNECTIONS_HANDSHAKE_TIMEOUT, MtConnectionsListener, MtListenerBinding,
+    build_local_interfaces, warn_missing_vpc_advertise,
+  },
   node::{
     LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeHelloOut, NodeId, NodeMessageToIn,
     NodeMessageToInUpdate, NodeMessageToOut, NodeOutDispatcher, NodeResolveAnswers, OutDispatcher,
@@ -37,6 +40,7 @@ use crate::{
   route::{RouteMatch, Router},
   udp_forwarder::{IncomingUdpPacket, OutgoingUdpPacket},
   utils::{
+    net::{bind_tcp_listener, bind_udp_socket},
     postcard::{postcard_read_stream, postcard_read_stream_to_end},
     task::reap_finished_tasks,
   },
@@ -52,6 +56,7 @@ pub struct Hub {
   in_update_sender_map: Mutex<HashMap<NodeId, Arc<mpsc::UnboundedSender<Vec<u8>>>>>,
   in_update_lock: tokio::sync::Mutex<()>,
   out_map: Mutex<HashMap<NodeId, HubOutState>>,
+  next_out_session_seq: AtomicU64,
   router: Router,
   inbounds: Vec<Arc<AnyInbound>>,
   context_dir: PathBuf,
@@ -60,9 +65,10 @@ pub struct Hub {
 const IN_UPDATE_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct HubOutState {
+  session_seq: u64,
   provider_id: NodeId,
   exits: OutExits,
-  peer_endpoint: Option<SocketAddr>,
+  peer_endpoints: Vec<SocketAddr>,
 }
 
 pub struct HubOptions {
@@ -74,6 +80,20 @@ impl Hub {
   pub fn new(
     tcp_listener: TcpListener,
     udp_socket: Option<UdpSocket>,
+    inbounds: Vec<AnyInbound>,
+    router: Router,
+    options: HubOptions,
+  ) -> Self {
+    Self::with_listener(
+      MtConnectionsListener::new(tcp_listener, udp_socket),
+      inbounds,
+      router,
+      options,
+    )
+  }
+
+  pub fn with_listener(
+    mt_connections_listener: MtConnectionsListener<QuicBytesPacket>,
     inbounds: Vec<AnyInbound>,
     router: Router,
     HubOptions {
@@ -94,13 +114,14 @@ impl Hub {
     Self {
       id: NodeId::new(),
       exits,
-      mt_connections_listener: MtConnectionsListener::new(tcp_listener, udp_socket).tokio_mutex(),
+      mt_connections_listener: mt_connections_listener.tokio_mutex(),
       local_out_dispatchers,
       connected_out_dispatcher_map: HashMap::new().mutex(),
       out_dispatcher_revision: AtomicU64::new(0),
       in_update_sender_map: HashMap::new().mutex(),
       in_update_lock: tokio::sync::Mutex::new(()),
       out_map: HashMap::new().mutex(),
+      next_out_session_seq: AtomicU64::new(0),
       router,
       inbounds: inbounds.into_iter().map(|inbound| inbound.arc()).collect(),
       context_dir,
@@ -303,8 +324,9 @@ impl Hub {
               this.relay_udp(exit, Box::new(packet_stream)).await?;
             }
             NodeMessageToOut::Resolve(exit, query) => {
+              let lane = if stream.is_udp_bypass() { " (udp)" } else { "" };
               log::debug!(
-                "QOMT {qomt_connection_id} stream {stream_id} received RESOLVE \
+                "QOMT {qomt_connection_id} stream {stream_id}{lane} received RESOLVE \
                  from IN {node_id}: name={}, record_type={}, exit={exit}.",
                 query.name,
                 query.record_type,
@@ -316,6 +338,7 @@ impl Hub {
               stream
                 .write_all(&postcard::to_allocvec(&answers).unwrap())
                 .await?;
+              stream.shutdown().await?;
             }
           }
 
@@ -345,15 +368,17 @@ impl Hub {
     NodeHelloOut {
       id: provider_id,
       exits,
-      peer_endpoint,
+      peer_endpoints,
     }: NodeHelloOut,
     session_id: NodeId,
     remote_address: SocketAddr,
     qomt_connection: QomtConnection,
   ) {
     let exits = exits.for_advertising();
-    let peer_endpoint =
-      peer_endpoint.map(|endpoint| complete_peer_endpoint(endpoint, remote_address));
+    let peer_endpoints = peer_endpoints
+      .into_iter()
+      .map(|endpoint| complete_peer_endpoint(endpoint, remote_address))
+      .collect();
     let qomt_connection = qomt_connection.arc();
     let out_dispatcher = NodeOutDispatcher::new(exits.clone(), qomt_connection.clone()).arc();
     let registered_out_dispatcher: Arc<dyn OutDispatcher> = out_dispatcher.clone();
@@ -376,9 +401,10 @@ impl Hub {
       self.out_map.lock().unwrap().insert(
         session_id,
         HubOutState {
+          session_seq: self.next_out_session_seq.fetch_add(1, Ordering::Relaxed),
           provider_id,
           exits,
-          peer_endpoint,
+          peer_endpoints,
         },
       );
 
@@ -463,39 +489,47 @@ fn complete_peer_endpoint(endpoint: SocketAddr, remote_address: SocketAddr) -> S
   );
 
   if endpoint.ip().is_unspecified() {
-    SocketAddr::new(remote_address.ip(), endpoint.port())
+    SocketAddr::new(remote_address.ip().to_canonical(), endpoint.port())
   } else {
-    endpoint
+    SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port())
   }
 }
 
 fn build_peer_outs<'a>(out_states: impl IntoIterator<Item = &'a HubOutState>) -> Vec<PeerOut> {
-  let mut peer_outs = Vec::<PeerOut>::new();
+  let mut entries = Vec::<(u64, PeerOut)>::new();
 
   for state in out_states {
-    let Some(address) = state.peer_endpoint else {
+    if state.peer_endpoints.is_empty() {
       continue;
-    };
+    }
 
-    if let Some(existing) = peer_outs
-      .iter()
-      .find(|peer_out| peer_out.provider_id == state.provider_id && peer_out.address == address)
+    if let Some((best_seq, existing)) = entries
+      .iter_mut()
+      .find(|(_, peer_out)| peer_out.provider_id == state.provider_id)
     {
       assert_eq!(
         existing.exits, state.exits,
         "one peer OUT provider advertised inconsistent exits"
       );
+
+      if state.session_seq >= *best_seq {
+        *best_seq = state.session_seq;
+        existing.addresses = state.peer_endpoints.clone();
+      }
       continue;
     }
 
-    peer_outs.push(PeerOut {
-      provider_id: state.provider_id,
-      exits: state.exits.clone(),
-      address,
-    });
+    entries.push((
+      state.session_seq,
+      PeerOut {
+        provider_id: state.provider_id,
+        exits: state.exits.clone(),
+        addresses: state.peer_endpoints.clone(),
+      },
+    ));
   }
 
-  peer_outs
+  entries.into_iter().map(|(_, peer_out)| peer_out).collect()
 }
 
 impl Node for Hub {
@@ -537,6 +571,7 @@ pub async fn run_hub(
   context_dir: impl AsRef<Path>,
   HubConfig {
     listen,
+    interfaces,
     exits,
     route: route_config,
     inbounds: inbounds_config,
@@ -557,23 +592,68 @@ pub async fn run_hub(
     generate_node_pem_file(context_dir, "hub", false).await?;
   }
 
-  let tcp_listener = TcpListener::bind(*listen).await?;
-  let listen_address = tcp_listener.local_addr()?;
+  let mt_connections_listener = if interfaces.is_empty() {
+    let tcp_listener = TcpListener::bind(*listen).await?;
+    let listen_address = tcp_listener.local_addr()?;
 
-  // UDP listener 与 TCP listener 是平行资源，使用 TCP 实际绑定地址
-  // 保持两者地址和端口一致。
-  let udp_socket = UdpSocket::bind(listen_address)
-    .await
-    .inspect_err(|error| {
-      log::warn!("error binding UDP listener at {listen_address}: {error}");
-    })
-    .ok();
+    // UDP listener 与 TCP listener 是平行资源，使用 TCP 实际绑定地址
+    // 保持两者地址和端口一致。
+    let udp_socket = bind_udp_socket(listen_address, None)
+      .inspect_err(|error| {
+        log::warn!("error binding UDP listener at {listen_address}: {error}");
+      })
+      .ok();
 
-  log::info!(
-    "{} is listening on {}...",
-    "HUB".cyan(),
-    listen_address.to_string().yellow()
-  );
+    log::info!(
+      "{} is listening on {}...",
+      "HUB".cyan(),
+      listen_address.to_string().yellow()
+    );
+
+    MtConnectionsListener::new(tcp_listener, udp_socket)
+  } else {
+    let local_interfaces = build_local_interfaces(interfaces, Some(*listen))?;
+    let multi_interface = local_interfaces.len() > 1;
+    let mut bindings = Vec::with_capacity(local_interfaces.len());
+    let mut listening_labels = Vec::with_capacity(local_interfaces.len());
+
+    for local_interface in local_interfaces {
+      let bind_address = local_interface
+        .listen_address
+        .expect("HUB interfaces must resolve a listen address");
+      let tcp_listener = bind_tcp_listener(bind_address, local_interface.interface.as_deref())?;
+      let listen_address = tcp_listener.local_addr()?;
+      let local_interface = local_interface.with_resolved_port(listen_address.port());
+      if multi_interface {
+        warn_missing_vpc_advertise("HUB", &local_interface, listen_address);
+      }
+      let udp_socket = if local_interface.udp {
+        bind_udp_socket(listen_address, local_interface.interface.as_deref())
+          .inspect_err(|error| {
+            log::warn!("error binding UDP listener at {listen_address}: {error}");
+          })
+          .ok()
+      } else {
+        None
+      };
+
+      listening_labels.push(listen_address.to_string());
+      bindings.push(MtListenerBinding {
+        interface_id: local_interface.id,
+        local_interface,
+        tcp_listener,
+        udp_socket,
+      });
+    }
+
+    log::info!(
+      "{} is listening on {}...",
+      "HUB".cyan(),
+      listening_labels.join(", ").yellow()
+    );
+
+    MtConnectionsListener::from_bindings(bindings)
+  };
 
   let inbounds = if let Some(inbounds_config) = inbounds_config {
     inbounds_config.into_inbounds(dns_hijack).await?
@@ -589,9 +669,8 @@ pub async fn run_hub(
 
   let local_out_dispatchers = build_local_out_dispatchers(exits)?;
 
-  let hub = Hub::new(
-    tcp_listener,
-    udp_socket,
+  let hub = Hub::with_listener(
+    mt_connections_listener,
     inbounds,
     router,
     HubOptions {
@@ -629,12 +708,65 @@ mod tests {
 
   use super::*;
 
-  fn test_out_state(provider_id: NodeId, peer_endpoint: Option<SocketAddr>) -> HubOutState {
+  fn test_out_state_seq(
+    provider_id: NodeId,
+    session_seq: u64,
+    peer_endpoints: Vec<SocketAddr>,
+  ) -> HubOutState {
     HubOutState {
+      session_seq,
       provider_id,
       exits: OutExits::new([OutExit::Proxy, OutExit::from("us")]),
-      peer_endpoint,
+      peer_endpoints,
     }
+  }
+
+  fn test_out_state(provider_id: NodeId, peer_endpoints: Vec<SocketAddr>) -> HubOutState {
+    test_out_state_seq(provider_id, 0, peer_endpoints)
+  }
+
+  #[test]
+  fn completes_ipv4_mapped_ipv6_remote_as_canonical_ipv4() {
+    assert_eq!(
+      complete_peer_endpoint(
+        "0.0.0.0:2233".parse().unwrap(),
+        "[::ffff:198.51.100.7]:49152".parse().unwrap(),
+      ),
+      "198.51.100.7:2233".parse().unwrap(),
+    );
+    assert_eq!(
+      complete_peer_endpoint(
+        "[::ffff:198.51.100.8]:2233".parse().unwrap(),
+        "192.0.2.1:1234".parse().unwrap(),
+      ),
+      "198.51.100.8:2233".parse().unwrap(),
+    );
+  }
+
+  #[test]
+  fn newest_peer_out_session_replaces_stale_endpoints_without_panicking() {
+    let provider_id = NodeId::new();
+    let stale_address = "198.51.100.10:2233".parse().unwrap();
+    let fresh_address = "203.0.113.20:2233".parse().unwrap();
+    let stale = test_out_state_seq(provider_id, 1, vec![stale_address]);
+    let fresh = test_out_state_seq(provider_id, 2, vec![fresh_address]);
+
+    assert_eq!(
+      build_peer_outs([&stale, &fresh]),
+      vec![PeerOut {
+        provider_id,
+        exits: stale.exits.clone(),
+        addresses: vec![fresh_address],
+      }],
+    );
+    assert_eq!(
+      build_peer_outs([&fresh, &stale]),
+      vec![PeerOut {
+        provider_id,
+        exits: fresh.exits.clone(),
+        addresses: vec![fresh_address],
+      }],
+    );
   }
 
   #[test]
@@ -669,15 +801,15 @@ mod tests {
   fn deduplicates_peer_out_sessions_for_one_provider_and_address() {
     let provider_id = NodeId::new();
     let address = "203.0.113.8:2233".parse().unwrap();
-    let first_session = test_out_state(provider_id, Some(address));
-    let second_session = test_out_state(provider_id, Some(address));
+    let first_session = test_out_state(provider_id, vec![address]);
+    let second_session = test_out_state(provider_id, vec![address]);
 
     assert_eq!(
       build_peer_outs([&first_session, &second_session]),
       vec![PeerOut {
         provider_id,
         exits: first_session.exits.clone(),
-        address,
+        addresses: vec![address],
       }],
     );
   }
@@ -687,8 +819,8 @@ mod tests {
     let first_provider_id = NodeId::new();
     let second_provider_id = NodeId::new();
     let address = "203.0.113.8:2233".parse().unwrap();
-    let first_provider = test_out_state(first_provider_id, Some(address));
-    let second_provider = test_out_state(second_provider_id, Some(address));
+    let first_provider = test_out_state(first_provider_id, vec![address]);
+    let second_provider = test_out_state(second_provider_id, vec![address]);
 
     let peer_outs = build_peer_outs([&first_provider, &second_provider]);
 
@@ -709,8 +841,8 @@ mod tests {
   fn peer_out_disappears_only_after_its_last_session_is_removed() {
     let provider_id = NodeId::new();
     let address = "203.0.113.8:2233".parse().unwrap();
-    let first_session = test_out_state(provider_id, Some(address));
-    let second_session = test_out_state(provider_id, Some(address));
+    let first_session = test_out_state(provider_id, vec![address]);
+    let second_session = test_out_state(provider_id, vec![address]);
 
     assert_eq!(build_peer_outs([&first_session, &second_session]).len(), 1);
     assert_eq!(build_peer_outs([&second_session]).len(), 1);
@@ -781,7 +913,7 @@ mod tests {
           &postcard::to_allocvec(&NodeHello::Out(NodeHelloOut {
             id: provider_id,
             exits: advertised_exits.clone(),
-            peer_endpoint: Some(([0, 0, 0, 0], advertised_port).into()),
+            peer_endpoints: vec![([0, 0, 0, 0], advertised_port).into()],
           }))
           .unwrap(),
         )
@@ -796,7 +928,7 @@ mod tests {
         vec![PeerOut {
           provider_id,
           exits: advertised_exits,
-          address: ([127, 0, 0, 1], advertised_port).into(),
+          addresses: vec![([127, 0, 0, 1], advertised_port).into()],
         }]
       );
 

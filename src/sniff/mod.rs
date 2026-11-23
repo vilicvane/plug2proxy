@@ -637,8 +637,9 @@ impl QuicSniffer {
       self.connection = Some(connection);
     }
 
+    let is_first_datagram = self.datagrams == 1;
     let connection = self.connection.as_mut().unwrap();
-    let _ = connection.recv(
+    let recv_result = connection.recv(
       &mut packet,
       quiche::RecvInfo {
         from: source,
@@ -651,7 +652,7 @@ impl QuicSniffer {
       return SniffOutcome::domain(SniffedProtocol::Quic, domain.as_bytes());
     }
 
-    if connection.is_closed() {
+    if connection.is_closed() || (is_first_datagram && recv_result.is_err()) {
       self.finished = true;
       SniffOutcome::NoDomain
     } else {
@@ -659,6 +660,9 @@ impl QuicSniffer {
     }
   }
 }
+
+const QUIC_V1_VERSION: u32 = 0x0000_0001;
+const QUIC_V2_VERSION: u32 = 0x6b33_43cf;
 
 pub(crate) fn quic_initial_dcid(payload: &[u8]) -> Option<Vec<u8>> {
   if !QuicSniffer::looks_like_initial(payload) {
@@ -669,20 +673,47 @@ pub(crate) fn quic_initial_dcid(payload: &[u8]) -> Option<Vec<u8>> {
   (header.ty == quiche::Type::Initial).then(|| header.dcid.to_vec())
 }
 
+/// Extract the client's Source Connection ID from any client-originated QUIC
+/// Long Header packet (`Initial`, `0-RTT`, or `Handshake` across QUICv1 and
+/// QUICv2). Including `0-RTT` and `Handshake` ensures reordered flights never
+/// classify an overtaking `0-RTT` packet as non-QUIC (`None`) before `Initial`
+/// arrives.
 pub(crate) fn quic_initial_client_connection_id(payload: &[u8]) -> Option<Vec<u8>> {
-  if !QuicSniffer::looks_like_initial(payload) {
+  let mut cursor = SliceCursor::new(payload);
+  let first = cursor.take_u8()?;
+  if first & 0xc0 != 0xc0 {
     return None;
   }
-  let mut packet = payload.to_vec();
-  let header = quiche::Header::from_slice(&mut packet, quiche::MAX_CONN_ID_LEN).ok()?;
-  if header.ty != quiche::Type::Initial {
+
+  let version = u32::from_be_bytes(cursor.take(4)?.try_into().ok()?);
+  let long_type = (first & 0x30) >> 4;
+  let is_client_long_packet = match version {
+    // QUICv1 (RFC 9000): 0x00 = Initial, 0x01 = 0-RTT, 0x02 = Handshake, 0x03 = Retry.
+    QUIC_V1_VERSION => long_type != 0x03,
+    // QUICv2 (RFC 9369): 0x00 = Retry, 0x01 = Initial, 0x02 = 0-RTT, 0x03 = Handshake.
+    QUIC_V2_VERSION => long_type != 0x00,
+    _ => false,
+  };
+  if !is_client_long_packet {
     return None;
   }
+
+  let dcid_len = cursor.take_u8()? as usize;
+  if dcid_len > quiche::MAX_CONN_ID_LEN {
+    return None;
+  }
+  cursor.take(dcid_len)?;
+
+  let scid_len = cursor.take_u8()? as usize;
+  if scid_len > quiche::MAX_CONN_ID_LEN {
+    return None;
+  }
+  let scid = cursor.take(scid_len)?;
 
   // An empty SCID is valid (e.g. Chrome). Never substitute the DCID: the
   // server selects a new DCID during Initial/Retry, within the same handshake.
   // With no client CID, conservatively retain the socket for the UDP tuple.
-  Some(header.scid.to_vec())
+  Some(scid.to_vec())
 }
 
 #[cfg(test)]

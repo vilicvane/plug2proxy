@@ -1327,6 +1327,7 @@ async fn reliable_transport_failure_wakes_recovery_for_a_lost_tail_packet() -> a
       transport_stream(out_receiver, true),
     );
     tokio::try_join!(out.established(), hub.established())?;
+    sleep(duration!("20ms")).await;
     fail_next.store(true, atomic::Ordering::Release);
     tokio::try_join!(
       async {

@@ -1,22 +1,24 @@
-# QUIC over TCP：按 TCP ACK 进度恢复
+# QUIC over TCP：基于内核 TCP_INFO 的三态健康与无损恢复
 
-仅 Linux 的 QomT 主连接启用此模式。UDP 旁路保留标准 QUIC 丢包检测、PTO 和 pacing；未提供累计 TCP ACK 采样的平台仍使用标准 QUIC 恢复。
+仅 Linux 的 QomT 主连接启用此模式。UDP 旁路保留标准 QUIC 丢包检测、PTO 和 pacing；未提供 `TCP_INFO` 采样的平台仍使用标准 QUIC 恢复。
 
-## 活跃判断与调度
+## 三态路径模型（Clean / Stalling / Dead）
 
-- 每条 TCP 每 50 ms 读取 `TCP_INFO.tcpi_bytes_acked`。只有累计确认字节增加才刷新活跃时间；反向收包、重复 ACK、RTO 增长均不刷新。
-- 活跃窗口为 `max(1s, 4 × (TCP RTT + RTT variation))`，只在确认进度出现时更新窗口大小。新连接获得 1 秒启动宽限。
-- 窗口内没有确认进度则暂停为该 TCP 分配新的 QUIC 包。读循环、ACK 采样和已开始的帧写入继续运行；不能中断半帧后复用该字节流。
-- 无确认进度达到 500 ms 后，写循环每 500 ms 最多发一个零长度传输帧（4 字节长度字段）。它不进入 QUIC，内核对这些新字节的 ACK 能保持闲置连接活跃，也能使暂停连接恢复。探测和数据共用串行写循环，不额外堆积后台写任务。
-- 断连、写超时按原有方式移除 TCP，并在还有其他连接时补充连接。
+每条 TCP 每 50 ms 读取内核 `TCP_INFO`（`tcpi_ca_state`、`tcpi_backoff`、`tcpi_probes`、`tcpi_unacked`、`tcpi_notsent_bytes`、`tcpi_bytes_acked`、`tcpi_delivered` 等），把**调度选路**与**路径生死**严格拆开：
 
-## 包与连接的关联
+1. **顺畅（Clean）**：
+   - 发送缓冲区为空（`unacked == 0 && notsent_bytes == 0`，闲置连接天然保持 Clean，无需周期发送零长度探测帧），或未进入 `Loss`、无未响应超时退避且累计确认未超出队头停滞窗口 `max(500ms, 2 × RTO, 4 × (RTT + RTTvar))`。
+   - 正常派发新 QUIC 包。
+2. **补洞 / 拥塞（Stalling）**：
+   - 存在未确认或未发完数据，且出现队头停滞（超出 `stall_window`）、进入 `TCP_CA_Loss` 或出现退避（`backoff / probes >= 1`），但尚未满足 Dead 条件（例如对端仍在通过 SACK 推进 `tcpi_delivered`，或连续未响应 RTO 次数 `< 3`）。
+   - **仅暂停向该连接派发新包**，避免新包排在队头洞后被阻塞；**绝不调用 `ReliableTransport::fail()`**，待内核补完洞后沿用同一发送代次恢复，不产生假丢包与重复重传。
+3. **真死路（Dead）**：
+   - 连接读写关闭 / 报错，或在有待确认数据时 `tcpi_delivered` 与 `tcpi_bytes_acked` 均无任何推进（纯反向收包、无新 SACK 的旧重复 ACK 均不会推进 `tcpi_delivered`），持续超过 `max(3s, 8 × (RTT + RTTvar))` 且连续未响应超时 `max(backoff, probes) >= 3`。
+   - 立即标记该代次 `fail()`，通知 QUIC 将该连接上未确认的帧迁移到健康连接重发；若池中存在其他存活连接则直接关闭该半死 socket 触发重连替换（若仅剩最后一条连接则待新连接建立或 `TCP_USER_TIMEOUT` 到期时清理）。
 
-quiche 为每个输出 datagram 创建本地 delivery handle；同一 datagram 中合并的 QUIC 包共享该 handle。mTCP 真正选中 TCP 时才绑定发送代次。
+## 跨路迁移不触发外层拥塞窗口塌缩
 
-TCP 暂停或关闭会永久标记当前代次失败，通知 QUIC 恢复该代次所有未确认的包，包括没有后续 QUIC ACK 的尾包。恢复后的 TCP 创建新代次，旧包不会重新获得保护。分配与暂停之间的竞态会再次通知恢复，避免把包留在已失效的代次上。
-
-TCP 模式不再使用包序号阈值、时间阈值、PTO 探测重发、relaxed-loss 实验或动态/固定 5 秒丢包保护。QUIC 流控、拥塞统计和连接生命周期超时继续工作。
+在 `reliable_transport` 模式下，底层每条 TCP 连接已由各自内核 TCP BBR 独立控速；单条死路触发 `ReliableTransport::fail()` 属于跨 TCP 路径故障转移而非网络拥塞丢包，`quiche` 仅回收在途字节并重排帧，用 `on_packet_neutered` 清理采样状态，**不触发外层全局 `cwnd` 削减**。
 
 ## 跨 TCP 乱序
 
@@ -26,6 +28,4 @@ TCP 模式使用 4 字节 QUIC 包号，并按实际 TCP 连接维护独立、�
 
 ## 依赖与部署兼容性
 
-`Cargo.toml` 与 `Cargo.lock` 固定 quiche 提交 `64d237cc8e00863c0ef0c76fd5bc8bbb900b6b27`（`vilicvane/quiche` 的 `tcp-ack-recovery` 分支）。构建直接获取该 Git revision，不需要相邻的本地工作树。
-
-两端均需更新才能获得完整的跨 TCP 乱序保障；旧端点仍有原接收窗口限制。零长度探测沿用既有帧格式。
+`Cargo.toml` 与 `Cargo.lock` 固定 quiche 提交 `4043cb6d372a43bc61806fa983b434e5f9e3997b`（`vilicvane/quiche` 的 `tcp-ack-recovery` 分支）。构建直接获取该 Git revision，不需要相邻的本地工作树。

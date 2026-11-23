@@ -52,6 +52,7 @@ async fn test_hub_out() -> anyhow::Result<()> {
   let socks5_inbound = Socks5Inbound::new(Socks5InboundOptions {
     listen: socks5_listen_address,
     sniff: true,
+    reject_http3: false,
   })
   .await?;
 
@@ -107,8 +108,9 @@ async fn test_hub_out() -> anyhow::Result<()> {
         router,
         InOptions {
           context_dir: in_dir,
+          local_interfaces: vec![],
           hub: InHubOptions {
-            address: hub_address,
+            addresses: vec![hub_address],
             connections: 2,
           },
         },
@@ -129,11 +131,12 @@ async fn test_hub_out() -> anyhow::Result<()> {
             tags: vec!["system".into()],
           },
         )],
+        local_interfaces: vec![],
         listen: None,
         advertise: None,
         context_dir: out_dir,
         hubs: vec![OutHubOptions {
-          address: hub_address,
+          addresses: vec![hub_address],
           connections: 2,
         }],
       });
@@ -284,8 +287,9 @@ async fn test_hub_out_resolve() -> anyhow::Result<()> {
     Router::new(&in_dir),
     InOptions {
       context_dir: in_dir,
+      local_interfaces: vec![],
       hub: InHubOptions {
-        address: hub_address,
+        addresses: vec![hub_address],
         connections: 2,
       },
     },
@@ -304,11 +308,12 @@ async fn test_hub_out_resolve() -> anyhow::Result<()> {
             tags: vec!["system".into()],
           },
         )],
+        local_interfaces: vec![],
         listen: None,
         advertise: None,
         context_dir: out_dir,
         hubs: vec![OutHubOptions {
-          address: hub_address,
+          addresses: vec![hub_address],
           connections: 2,
         }],
       });
@@ -402,15 +407,16 @@ async fn out_serves_multiple_hubs_and_recovers_one_independently() -> anyhow::Re
             tags: vec!["system".into()],
           },
         )],
+        local_interfaces: vec![],
         listen: None,
         advertise: None,
         hubs: vec![
           OutHubOptions {
-            address: second_address,
+            addresses: vec![second_address],
             connections: 2,
           },
           OutHubOptions {
-            address: first_address,
+            addresses: vec![first_address],
             connections: 2,
           },
         ],
@@ -585,6 +591,123 @@ async fn assert_hub_tcp_udp_dns(hub: &Hub) -> anyhow::Result<()> {
     assert!(Message::from_vec(&bytes)?.answers.iter().any(|record| {
       matches!(&record.data, RData::A(address) if address.0 == Ipv4Addr::LOCALHOST)
     }));
+
+    anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn multi_ip_in_peer_out_end_to_end() -> anyhow::Result<()> {
+  use crate::mt_connections::{TunnelInterfaceConfig, build_local_interfaces};
+
+  timeout(duration!("15s"), async {
+    let test_dir = test_dir().join(format!("multi_ip_peer_{}", uuid::Uuid::new_v4()));
+    let hub_dir = test_dir.join("hub");
+    let in_dir = test_dir.join("in");
+    let out_dir = test_dir.join("out");
+
+    generate_ca_pem_file(&test_dir).await?;
+    generate_node_pem_file(&test_dir, "hub", true).await?;
+    generate_node_pem_file(&test_dir, "in", true).await?;
+    generate_node_pem_file(&test_dir, "out", true).await?;
+
+    let hub_tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let hub_address = hub_tcp_listener.local_addr()?;
+    let hub_udp_socket = UdpSocket::bind(hub_address).await.ok();
+
+    let target_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let target_address = target_listener.local_addr()?;
+
+    let out_if_configs: Vec<TunnelInterfaceConfig> = serde_json::from_str(
+      r#"[
+        {"address": "127.0.0.1", "bandwidth": "200KB/s", "connections_limit": 2},
+        {"address": "127.0.0.2", "metered": true, "connections_limit": 2}
+      ]"#,
+    )?;
+    let out_listen: SocketAddr = "0.0.0.0:0".parse()?;
+    let out_interfaces = build_local_interfaces(out_if_configs, Some(out_listen))?;
+
+    let in_if_configs: Vec<TunnelInterfaceConfig> = serde_json::from_str(
+      r#"[
+        {"address": "127.0.0.1", "bandwidth": "200KB/s", "connections_limit": 2},
+        {"address": "127.0.0.2", "metered": true, "connections_limit": 2}
+      ]"#,
+    )?;
+    let in_interfaces = build_local_interfaces(in_if_configs, None)?;
+
+    let hub = Hub::new(
+      hub_tcp_listener,
+      hub_udp_socket,
+      vec![],
+      Router::new(&hub_dir),
+      HubOptions {
+        local_out_dispatchers: vec![LocalOutDispatcher::new_default(DefaultLocalExit::Private)],
+        context_dir: hub_dir,
+      },
+    )
+    .arc();
+
+    let in_node = In::new(
+      vec![],
+      Router::new(&in_dir),
+      InOptions {
+        context_dir: in_dir,
+        local_interfaces: in_interfaces,
+        hub: InHubOptions {
+          addresses: vec![hub_address],
+          connections: 2,
+        },
+      },
+    )
+    .arc();
+
+    let out_node = Out::new(OutOptions {
+      local_out_dispatchers: vec![LocalOutDispatcher::new_default(
+        DefaultLocalExit::Advertised {
+          tags: vec!["peer".into()],
+        },
+      )],
+      local_interfaces: out_interfaces,
+      listen: Some(out_listen),
+      advertise: None,
+      hubs: vec![OutHubOptions {
+        addresses: vec![hub_address],
+        connections: 2,
+      }],
+      context_dir: out_dir,
+    });
+
+    let mut tasks = JoinSet::new();
+    tasks.spawn(hub.run_shared());
+    tasks.spawn(in_node.clone().run_shared());
+    tasks.spawn(out_node.run());
+
+    // Wait for BOTH the HUB-relayed exit and the direct multi-IP IN -> peer OUT dispatcher.
+    let direct_dispatcher = timeout(duration!("10s"), async {
+      loop {
+        let matching: Vec<_> = in_node
+          .get_out_dispatchers()
+          .into_iter()
+          .filter(|dispatcher| dispatcher.match_exit(&OutExit::from("peer")).is_some())
+          .collect();
+
+        if matching.len() >= 2 {
+          return matching.into_iter().next().unwrap();
+        }
+
+        sleep(duration!("25ms")).await;
+      }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for multi-IP IN -> peer OUT connection"))?;
+
+    let mut stream = direct_dispatcher
+      .connect(OutExit::from("peer"), test_destination(target_address))
+      .await?;
+    let (mut target_stream, _) = target_listener.accept().await?;
+    assert_tcp_echo(&mut *stream, &mut target_stream).await?;
 
     anyhow::Ok(())
   })

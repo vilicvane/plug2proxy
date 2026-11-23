@@ -5,7 +5,8 @@ use crate::{
   route::{
     AnyRule,
     rule::{
-      AddressRule, AndRule, AnyDomainMatcher, DomainRule, FallbackRule, GeoIpRule, ProtocolRule,
+      AddressRule, AndRule, AnyDomainMatcher, DomainRule, ExclusiveAndRule, FallbackRule,
+      GeoIpRule, ProtocolRule,
     },
   },
   utils::serde::{SerdeIpNet, SerdeOneOrMany},
@@ -69,7 +70,7 @@ impl RouteRuleConfig {
       RouteRuleConfig::And(config) => {
         let priority = config.priority.unwrap_or(priority_default);
 
-        AndRule {
+        let rule = AndRule {
           rules: config
             .r#match
             .into_iter()
@@ -77,8 +78,13 @@ impl RouteRuleConfig {
             .collect(),
           priority,
           exits: config.exit.into(),
+        };
+
+        if config.exclusive {
+          ExclusiveAndRule(rule).into()
+        } else {
+          rule.into()
         }
-        .into()
       }
     }
   }
@@ -110,12 +116,15 @@ pub struct RuleCommonConfig {
 }
 
 /// `type: "and"`：组内所有条件同时命中时才命中。条件只含 filter 层，
-/// `priority` 与 `exit` 由组级配置提供。
+/// `priority` 与 `exit` 由组级配置提供。`exclusive` 命中时只使用该规则的出口，
+/// 不累计其他规则；多个 exclusive 规则按 priority 选择首个命中者。
 #[derive(Clone, Debug, Deserialize)]
 pub struct AndRuleConfig {
   pub r#match: Vec<RouteRuleFilterConfig>,
   pub priority: Option<i64>,
   pub exit: SerdeOneOrMany<OutExitConfig>,
+  #[serde(default)]
+  pub exclusive: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -334,6 +343,41 @@ mod tests {
     // 条件只提供匹配，不携带组的 exit。
     assert!(domain_rule.exits.is_empty());
     assert!(address_rule.exits.is_empty());
+  }
+
+  #[test]
+  fn exclusive_and_config_survives_postcard_round_trip() {
+    let config: RouteConfig = serde_json::from_str(
+      r#"{
+        "rules": [{
+          "type": "and",
+          "match": [
+            { "type": "protocol", "match": "ssh" },
+            { "type": "geoip", "match": "JP" }
+          ],
+          "priority": 900,
+          "exit": "hk",
+          "exclusive": true
+        }]
+      }"#,
+    )
+    .unwrap();
+    let rules: Vec<AnyRule> = config.into();
+    let encoded = postcard::to_allocvec(&rules).unwrap();
+    let decoded: Vec<AnyRule> = postcard::from_bytes(&encoded).unwrap();
+
+    let [AnyRule::ExclusiveAnd(ExclusiveAndRule(rule))] = decoded.as_slice() else {
+      panic!("expected one exclusive AND rule");
+    };
+
+    assert_eq!(rule.priority, 900);
+    assert_eq!(rule.exits, [crate::primitives::OutExit::from("hk")]);
+    let [AnyRule::Protocol(protocol), AnyRule::GeoIp(geoip)] = rule.rules.as_slice() else {
+      panic!("expected SSH and JP conditions");
+    };
+    assert_eq!(protocol.matches, [crate::primitives::SniffedProtocol::Ssh]);
+    assert_eq!(geoip.matches, ["JP"]);
+    assert!(!geoip.negate);
   }
 
   #[test]

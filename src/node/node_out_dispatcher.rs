@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use lowkit::SelfWrapExt;
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, time::timeout};
 
 use crate::{
   node::{
@@ -237,20 +237,67 @@ impl OutDispatcher for NodeOutDispatcher {
       return Err(Error::OutDispatcherUnavailable);
     }
 
+    let request = postcard::to_allocvec(&NodeMessageToOut::Resolve(exit.clone(), query.clone()))
+      .expect("failed to serialize Resolve request");
+    let cid = self.qomt_connection.diagnostic_id();
+
+    if let Some((mut udp_stream, udp_rtt)) = self.qomt_connection.try_open_udp_stream() {
+      let stream_id = udp_stream.id();
+      let udp_deadline = udp_rtt
+        .map(|rtt| rtt.saturating_mul(5))
+        .unwrap_or(Duration::from_millis(1000))
+        .clamp(Duration::from_millis(800), Duration::from_millis(2000));
+
+      log::debug!(
+        "QOMT {cid} stream {stream_id} (udp) sending RESOLVE {} type {} via {exit}.",
+        query.name,
+        query.record_type,
+      );
+
+      let udp_attempt = timeout(udp_deadline, async {
+        udp_stream.write_all(&request).await?;
+        udp_stream.shutdown().await?;
+        postcard_read_stream::<NodeResolveAnswers>(&mut udp_stream).await
+      })
+      .await;
+
+      match udp_attempt {
+        Ok(Ok(answers)) => {
+          log::debug!(
+            "QOMT {cid} stream {stream_id} (udp) RESOLVE {} answered: {:?}.",
+            query.name,
+            answers,
+          );
+          return Ok(answers);
+        }
+        Ok(Err(error)) => {
+          log::debug!(
+            "QOMT {cid} stream {stream_id} (udp) RESOLVE {} failed ({error}); falling back to mTCP.",
+            query.name,
+          );
+        }
+        Err(_) => {
+          log::debug!(
+            "QOMT {cid} stream {stream_id} (udp) RESOLVE {} timed out after {udp_deadline:?}; falling back to mTCP.",
+            query.name,
+          );
+        }
+      }
+    }
+
+    if self.qomt_connection.state() != QuicConnectionState::Established {
+      return Err(Error::OutDispatcherUnavailable);
+    }
+
     let mut stream = self.qomt_connection.open_stream();
     let stream_id = stream.id();
     log::debug!(
-      "QOMT {} stream {stream_id} sending RESOLVE {} type {} via {exit}.",
-      self.qomt_connection.diagnostic_id(),
+      "QOMT {cid} stream {stream_id} sending RESOLVE {} type {} via {exit}.",
       query.name,
       query.record_type,
     );
-    let message = NodeMessageToOut::Resolve(exit, query.clone());
 
-    if let Err(error) = stream
-      .write_all(&postcard::to_allocvec(&message).unwrap())
-      .await
-    {
+    if let Err(error) = stream.write_all(&request).await {
       if self.qomt_connection.state() != QuicConnectionState::Established {
         return Err(Error::OutDispatcherUnavailable);
       }
@@ -261,8 +308,7 @@ impl OutDispatcher for NodeOutDispatcher {
     let answers = postcard_read_stream::<NodeResolveAnswers>(&mut stream).await?;
 
     log::debug!(
-      "QOMT {} stream {stream_id} RESOLVE {} answered: {:?}.",
-      self.qomt_connection.diagnostic_id(),
+      "QOMT {cid} stream {stream_id} RESOLVE {} answered: {:?}.",
       query.name,
       answers,
     );

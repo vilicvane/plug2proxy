@@ -12,7 +12,7 @@ use std::{
 
 use colored::Colorize;
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use lits::bytes;
+use lits::{bytes, duration};
 use lowkit::{DropCallback, SelfWrapExt, tokio_join_set};
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt, duplex},
@@ -23,7 +23,7 @@ use tokio::{
 
 use crate::{
   constants::SERVER_COMMON_NAME,
-  mt_connections::MtConnectionsUnderlayMetrics,
+  mt_connections::{MtConnectionsUnderlayMetrics, UnderlayControl, UnderlaySendReadiness},
   primitives::ConnectionSide,
   quic_connection::{
     MAX_DATAGRAM_SIZE, QUIC_DATAGRAM_QUEUE_CAPACITY, QuicBytesPacket, QuicStream,
@@ -35,6 +35,12 @@ use crate::{
 const READ_WRITE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
 
 const STREAM_PIPE_BUFFER_SIZE: usize = bytes!("8 KiB") as usize;
+const STREAM_PRIORITY_HALF_LIFE_SECS: f64 = 2.0;
+const STREAM_PRIORITY_BASE_BYTES: f64 = 1024.0;
+const STREAM_PRIORITY_LOG_SCALE: f64 = 16.0;
+const EXPRESS_STREAM_MAX_URGENCY: u8 = 64;
+const EXPRESS_PACKET_MAX_BYTES: usize = 4096;
+const EXPRESS_ALLOWANCE_BYTES: usize = 64 * 1024;
 const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // Upper bound for how long the send loop may park after quiche reports
 // Done. quiche's own timer can legitimately be far in the future (the
@@ -42,6 +48,10 @@ const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // freeze the connection indefinitely. on_timeout() is a no-op when no
 // quiche timer is due, making the extra wakeups cheap.
 const SEND_DONE_BACKSTOP: Duration = Duration::from_secs(1);
+// Tokio's timer wheel rounds sub-millisecond deadlines up to 1ms ticks; only
+// yield to sleep_until once quiche's accumulated pacing target reaches at
+// least one timer quantum ahead of now.
+const PACING_SLEEP_GRANULARITY: Duration = duration!("1ms");
 
 fn shutdown_torn_down_local_stream(
   connection: &mut quiche::Connection,
@@ -60,9 +70,13 @@ pub struct QuicPathMetrics {
   pub rtt: Duration,
   pub min_rtt: Option<Duration>,
   pub rttvar: Duration,
+  pub cwnd: usize,
+  pub delivery_rate: u64,
   pub dgram_sent: usize,
   pub dgram_recv: usize,
   pub dgram_lost: usize,
+  pub dgram_send_queue_len: usize,
+  pub dgram_send_queue_bytes: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +92,56 @@ pub enum QuicDatagramSendError {
   QueueFull,
   #[error("QUIC DATAGRAM send failed: {0}")]
   Quiche(quiche::Error),
+}
+
+struct StreamPriorityTracker {
+  recent_bytes: f64,
+  last_update: Instant,
+  applied_urgency: Option<u8>,
+}
+
+impl StreamPriorityTracker {
+  fn new(now: Instant) -> Self {
+    Self {
+      recent_bytes: 0.0,
+      last_update: now,
+      applied_urgency: None,
+    }
+  }
+
+  fn decay(&mut self, now: Instant) {
+    let elapsed = now.saturating_duration_since(self.last_update).as_secs_f64();
+    if elapsed > 0.0 {
+      self.recent_bytes *= 0.5_f64.powf(elapsed / STREAM_PRIORITY_HALF_LIFE_SECS);
+      self.last_update = now;
+    }
+  }
+
+  fn urgency(&self) -> u8 {
+    (STREAM_PRIORITY_LOG_SCALE * (1.0 + self.recent_bytes / STREAM_PRIORITY_BASE_BYTES).log2())
+      .floor()
+      .clamp(0.0, u8::MAX as f64) as u8
+  }
+
+  fn take_if_changed(&mut self) -> Option<u8> {
+    let next = self.urgency();
+    if self.applied_urgency == Some(next) {
+      return None;
+    }
+    self.applied_urgency = Some(next);
+    Some(next)
+  }
+
+  fn refresh_urgency(&mut self, now: Instant) -> Option<u8> {
+    self.decay(now);
+    self.take_if_changed()
+  }
+
+  fn record_send(&mut self, bytes: usize, now: Instant) -> Option<u8> {
+    self.decay(now);
+    self.recent_bytes += bytes as f64;
+    self.take_if_changed()
+  }
 }
 
 struct StreamSignals {
@@ -306,6 +370,8 @@ impl QuicDatagramSocket {
     {
       return None;
     }
+    let dgram_send_queue_len = connection.dgram_send_queue_len();
+    let dgram_send_queue_bytes = connection.dgram_send_queue_byte_size();
     let path = connection
       .path_stats()
       .find(|path| path.active)
@@ -315,9 +381,13 @@ impl QuicDatagramSocket {
       rtt: path.rtt,
       min_rtt: path.min_rtt,
       rttvar: path.rttvar,
+      cwnd: path.cwnd,
+      delivery_rate: path.delivery_rate,
       dgram_sent: path.dgram_sent,
       dgram_recv: path.dgram_recv,
       dgram_lost: path.dgram_lost,
+      dgram_send_queue_len,
+      dgram_send_queue_bytes,
     })
   }
 
@@ -498,6 +568,7 @@ pub struct QuicConnection {
   side: ConnectionSide,
   state_updater: Arc<StateUpdater>,
   connection_signals: Arc<ConnectionSignals>,
+  underlay_control: Arc<Mutex<Option<Arc<dyn UnderlayControl>>>>,
   create_stream: Arc<dyn Fn(ConnectionSide, u64) -> QuicStream + Send + Sync>,
   stream_receiver: tokio::sync::Mutex<mpsc::UnboundedReceiver<QuicStream>>,
   datagram_socket: QuicDatagramSocket,
@@ -509,12 +580,15 @@ impl QuicConnection {
     &mut self,
     metrics: Arc<MtConnectionsUnderlayMetrics>,
   ) {
+    let control: Arc<dyn UnderlayControl> = metrics.clone();
+    *self.underlay_control.lock().unwrap() = Some(control);
+
     let connection = self.connection.clone();
     let connection_signals = self.connection_signals.clone();
     let state_updater = self.state_updater.clone();
     self._join_set.spawn(async move {
       loop {
-        metrics.loss_notify.notified().await;
+        metrics.loss_notify().notified().await;
         {
           let mut connection = connection.lock().unwrap();
           connection.on_reliable_transport_update();
@@ -668,7 +742,7 @@ impl QuicConnection {
   }
 
   fn create<TSink, TStream>(
-    connection: quiche::Connection,
+    mut connection: quiche::Connection,
     id: quiche::ConnectionId<'static>,
     side: ConnectionSide,
     first_packet: Option<QuicBytesPacket>,
@@ -680,9 +754,11 @@ impl QuicConnection {
     TSink::Error: std::fmt::Display,
     TStream: Stream<Item = QuicBytesPacket> + Unpin + Send + 'static,
   {
+    connection.set_express_allowance(EXPRESS_STREAM_MAX_URGENCY, EXPRESS_ALLOWANCE_BYTES);
     let connection = connection.mutex().arc();
     let state_updater = StateUpdater::new(side).arc();
     let connection_signals = ConnectionSignals::new(state_updater.clone()).arc();
+    let underlay_control: Arc<Mutex<Option<Arc<dyn UnderlayControl>>>> = Arc::new(Mutex::new(None));
     let diagnostic_connection_id = format_connection_id(&id);
 
     let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
@@ -731,6 +807,7 @@ impl QuicConnection {
 
           async move {
             let mut buffer = [0; READ_WRITE_BUFFER_SIZE];
+            let mut priority_tracker = StreamPriorityTracker::new(Instant::now());
 
             'outer: loop {
               // When the external writer is dropped, the duplex pipe
@@ -751,14 +828,51 @@ impl QuicConnection {
                     log::trace!("{side} {id}: stream send {offset}..{total_length}");
 
                     let empty_fin = total_length == 0;
-                    let stream_send_result = normalize_stream_send_result(
-                      connection.lock().unwrap().stream_send(
-                        id,
-                        &buffer[offset..total_length],
+                    let (stream_send_result, terminal) = {
+                      let mut connection = connection.lock().unwrap();
+                      let now = Instant::now();
+
+                      let is_created = stream_signals.created.load(atomic::Ordering::Acquire);
+                      if (!empty_fin || is_created)
+                        && let Some(urgency) = priority_tracker.refresh_urgency(now)
+                      {
+                        match connection.stream_priority(id, urgency, true) {
+                          Ok(()) => {
+                            stream_signals
+                              .created
+                              .store(true, atomic::Ordering::Release);
+                          }
+                          Err(error) => {
+                            log::debug!("{side} {id}: failed to refresh stream priority: {error}");
+                          }
+                        }
+                      }
+
+                      let result = normalize_stream_send_result(
+                        connection.stream_send(id, &buffer[offset..total_length], empty_fin),
                         empty_fin,
-                      ),
-                      empty_fin,
-                    );
+                      );
+
+                      let terminal = match result {
+                        Ok(Some(length)) => {
+                          if let Some(urgency) = priority_tracker.record_send(length, now)
+                            && let Err(error) = connection.stream_priority(id, urgency, true)
+                          {
+                            log::debug!("{side} {id}: failed to update stream priority: {error}");
+                          }
+
+                          false
+                        }
+                        Ok(None) => matches!(
+                          connection.stream_capacity(id),
+                          Err(quiche::Error::InvalidStreamState(_))
+                            | Err(quiche::Error::StreamStopped(_))
+                        ),
+                        Err(_) => false,
+                      };
+
+                      (result, terminal)
+                    };
 
                     match stream_send_result {
                       Ok(Some(length)) => {
@@ -786,11 +900,6 @@ impl QuicConnection {
                         // were blocked on flow control, stream_send will
                         // return Done forever. Detect that terminal state
                         // and give up instead of retrying pointlessly.
-                        let terminal = matches!(
-                          connection.lock().unwrap().stream_capacity(id),
-                          Err(quiche::Error::InvalidStreamState(_))
-                            | Err(quiche::Error::StreamStopped(_))
-                        );
                         if terminal {
                           log::debug!("{side} {id}: stream gone while blocked; abandoning send");
                           break 'outer;
@@ -999,6 +1108,7 @@ impl QuicConnection {
       side,
       state_updater: state_updater.clone(),
       connection_signals: connection_signals.clone(),
+      underlay_control: underlay_control.clone(),
       create_stream: create_stream.clone(),
       next_stream_id_index: AtomicU64::new(0),
       stream_receiver: stream_receiver.tokio_mutex(),
@@ -1008,6 +1118,7 @@ impl QuicConnection {
           let connection = connection.clone();
           let connection_signals = connection_signals.clone();
           let state_updater = state_updater.clone();
+          let underlay_control = underlay_control.clone();
 
           async move {
             let mut buffer = [0; MAX_DATAGRAM_SIZE];
@@ -1015,15 +1126,91 @@ impl QuicConnection {
             let mut packet_count = 0;
             let mut byte_count = 0;
 
-            loop {
+            'send_loop: loop {
               log::trace!("{side} {send}", send = "send".green());
+
+              let control = underlay_control.lock().unwrap().clone();
+              let connection_notified = connection_signals.connection_send.notified();
+              tokio::pin!(connection_notified);
+              connection_notified.as_mut().enable();
+
+              let mut sender_notified = control
+                .as_ref()
+                .map(|control| Box::pin(control.sender_notify().notified()));
+              if let Some(notified) = sender_notified.as_mut() {
+                notified.as_mut().enable();
+              }
+
+              let (allow_bulk, bulk_ready_at) = match &control {
+                Some(control) => match control.send_readiness() {
+                  UnderlaySendReadiness::Ready {
+                    allow_bulk,
+                    bulk_ready_at,
+                  } => (allow_bulk, bulk_ready_at),
+                  UnderlaySendReadiness::Closed => (true, None),
+                  UnderlaySendReadiness::Wait { ready_at } => {
+                    let timeout_instant = connection.lock().unwrap().timeout_instant();
+                    let timer_deadline = match (ready_at, timeout_instant) {
+                      (Some(a), Some(b)) => Some(a.min(b)),
+                      (Some(a), None) => Some(a),
+                      (None, Some(b)) => Some(b),
+                      (None, None) => None,
+                    };
+                    let timer_sleep = async {
+                      match timer_deadline {
+                        Some(deadline) => sleep_until(deadline.into()).await,
+                        None => std::future::pending().await,
+                      }
+                    };
+
+                    tokio::select! {
+                      _ = async {
+                        match sender_notified.as_mut() {
+                          Some(notified) => notified.await,
+                          None => std::future::pending().await,
+                        }
+                      } => {}
+                      _ = &mut connection_notified => {}
+                      _ = timer_sleep => {
+                        if timeout_instant.is_some_and(|due| Instant::now() >= due) {
+                          let mut connection = connection.lock().unwrap();
+                          connection.on_timeout();
+                          state_updater.update(&connection);
+                        }
+                      }
+                      _ = state_updater.wait(State::Closed) => break 'send_loop,
+                    }
+                    continue 'send_loop;
+                  }
+                },
+                None => (true, None),
+              };
+
+              let datagram_cap = control
+                .as_ref()
+                .map(|control| control.suggested_send_datagram_size())
+                .unwrap_or(MAX_DATAGRAM_SIZE)
+                .clamp(2048, MAX_DATAGRAM_SIZE);
 
               let send_result = {
                 let mut connection = connection.lock().unwrap();
+                let next_is_express = !allow_bulk
+                  || connection
+                    .peek_flushable_urgency()
+                    .is_some_and(|urgency| urgency <= EXPRESS_STREAM_MAX_URGENCY);
+                let effective_cap = if next_is_express {
+                  datagram_cap.min(EXPRESS_PACKET_MAX_BYTES)
+                } else {
+                  datagram_cap
+                };
+                let max_urgency = (!allow_bulk).then_some(EXPRESS_STREAM_MAX_URGENCY);
 
                 let result = connection
-                  .send(&mut buffer)
-                  .map(|(length, info)| (length, info, connection.take_reliable_packet()));
+                  .send_with_max_urgency(&mut buffer[..effective_cap], max_urgency)
+                  .map(|(length, info)| {
+                    let express = connection.last_sent_urgency() <= EXPRESS_STREAM_MAX_URGENCY;
+                    (length, info, connection.take_reliable_packet(), express)
+                  });
 
                 state_updater.update(&connection);
 
@@ -1031,15 +1218,19 @@ impl QuicConnection {
               };
 
               match send_result {
-                Ok((length, send_info, delivery)) => {
+                Ok((length, send_info, delivery, express)) => {
                   packet_count += 1;
                   byte_count += length;
 
                   log::trace!("{side} send {packet_count} packets, {byte_count} bytes");
 
-                  tokio::select! {
-                    _ = sleep_until(send_info.at.into()) => {}
-                    _ = state_updater.wait(State::Closed) => break,
+                  if send_info.at.saturating_duration_since(Instant::now())
+                    >= PACING_SLEEP_GRANULARITY
+                  {
+                    tokio::select! {
+                      _ = sleep_until(send_info.at.into()) => {}
+                      _ = state_updater.wait(State::Closed) => break,
+                    }
                   }
 
                   connection_signals
@@ -1047,6 +1238,7 @@ impl QuicConnection {
                     .store(true, atomic::Ordering::Release);
 
                   let mut packet: QuicBytesPacket = buffer[..length].to_vec().into();
+                  packet.express = express;
                   packet.delivery = delivery;
                   let send_result = tokio::select! {
                     result = underlying_sink.send(packet) => Some(result),
@@ -1081,17 +1273,28 @@ impl QuicConnection {
 
                   let backstop = TokioInstant::now() + SEND_DONE_BACKSTOP;
 
-                  let deadline = timeout_instant
+                  let mut deadline = timeout_instant
                     .map(Into::into)
                     .unwrap_or(backstop)
                     .min(backstop);
+                  if let Some(ready_at) = bulk_ready_at {
+                    deadline = deadline.min(ready_at.into());
+                  }
 
                   tokio::select! {
-                    _ = connection_signals.connection_send.notified() => {}
+                    _ = &mut connection_notified => {}
+                    _ = async {
+                      match sender_notified.as_mut() {
+                        Some(notified) if !allow_bulk => notified.await,
+                        _ => std::future::pending().await,
+                      }
+                    } => {}
                     _ = sleep_until(deadline) => {
-                      let mut connection = connection.lock().unwrap();
-                      connection.on_timeout();
-                      state_updater.update(&connection);
+                      if timeout_instant.is_some_and(|due| Instant::now() >= due) {
+                        let mut connection = connection.lock().unwrap();
+                        connection.on_timeout();
+                        state_updater.update(&connection);
+                      }
                     }
                     _ = state_updater.wait(State::Closed) => break,
                   }
@@ -1534,6 +1737,10 @@ impl QuicConnection {
     self.build_connection_result(())
   }
 
+  pub fn application_proto(&self) -> Vec<u8> {
+    self.connection.lock().unwrap().application_proto().to_vec()
+  }
+
   fn build_connection_result<TOk>(&self, ok: TOk) -> Result<TOk, QuicConnectionError> {
     let connection = self.connection.lock().unwrap();
 
@@ -1745,6 +1952,165 @@ mod unit_tests {
       drop(out_stream);
       drop(hub_stream);
 
+      anyhow::Ok(())
+    })
+    .await?
+  }
+
+  #[test]
+  fn stream_priority_tracker_scales_continuously_and_decays_after_idle() {
+    let t0 = Instant::now();
+    let mut tracker = StreamPriorityTracker::new(t0);
+
+    assert_eq!(tracker.refresh_urgency(t0), Some(0));
+    assert_eq!(tracker.refresh_urgency(t0), None);
+
+    // 200 B interactive write stays near top urgency.
+    assert_eq!(tracker.record_send(200, t0), Some(4));
+
+    // Stepping monotonically raises urgency through intermediate and bulk scales.
+    assert_eq!(tracker.record_send(1024 - 200, t0), Some(16));
+    assert_eq!(tracker.record_send(15 * 1024, t0), Some(65));
+    assert_eq!(tracker.record_send(1024 * 1024, t0), Some(160));
+    assert_eq!(tracker.record_send(64 * 1024 * 1024, t0), Some(255));
+
+    // After multiple half-lives of idle time, urgency decays smoothly back down.
+    let u_after_2s = tracker.refresh_urgency(t0 + Duration::from_secs(2)).unwrap();
+    let u_after_8s = tracker.refresh_urgency(t0 + Duration::from_secs(8)).unwrap();
+    assert!(u_after_2s < 255);
+    assert!(u_after_8s < u_after_2s);
+
+    let u_idle = tracker.refresh_urgency(t0 + Duration::from_secs(60)).unwrap();
+    assert_eq!(u_idle, 0);
+  }
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn small_stream_preempts_saturated_bulk_stream_in_small_packets() -> anyhow::Result<()> {
+    timeout(Duration::from_secs(10), async {
+      let [mut hub_quiche_config, mut out_quiche_config] = get_quiche_configs().await?;
+
+      let (hub_to_out_packet_sender, hub_to_out_packet_receiver) =
+        flume::bounded::<QuicBytesPacket>(0);
+      let (raw_out_sender, raw_out_receiver) = flume::bounded::<QuicBytesPacket>(0);
+      let (out_to_hub_packet_sender, out_to_hub_packet_receiver) =
+        flume::bounded::<QuicBytesPacket>(0);
+
+      let pace_packets = Arc::new(AtomicBool::new(false));
+      let record_packets = Arc::new(AtomicBool::new(false));
+      let recorded_sizes = Arc::new(Mutex::new(Vec::<usize>::new()));
+
+      tokio::spawn({
+        let pace_packets = pace_packets.clone();
+        let record_packets = record_packets.clone();
+        let recorded_sizes = recorded_sizes.clone();
+        async move {
+          while let Ok(packet) = raw_out_receiver.recv_async().await {
+            if record_packets.load(atomic::Ordering::Acquire) {
+              recorded_sizes.lock().unwrap().push(packet.len());
+            }
+            if pace_packets.load(atomic::Ordering::Acquire) {
+              sleep(Duration::from_millis(8)).await;
+            }
+            if out_to_hub_packet_sender.send_async(packet).await.is_err() {
+              break;
+            }
+          }
+        }
+      });
+
+      let connection_id = QuicConnection::generate_connection_id();
+      let out_connection = QuicConnection::connect_with_sink_and_stream(
+        &connection_id,
+        &mut out_quiche_config,
+        raw_out_sender.into_sink(),
+        hub_to_out_packet_receiver.into_stream(),
+      );
+      let hub_connection = QuicConnection::accept_with_sink_and_stream(
+        out_connection.id(),
+        &mut hub_quiche_config,
+        hub_to_out_packet_sender.into_sink(),
+        out_to_hub_packet_receiver.into_stream(),
+      );
+
+      tokio::try_join!(out_connection.established(), hub_connection.established())?;
+
+      pace_packets.store(true, atomic::Ordering::Release);
+
+      // Start a 512 KiB bulk stream first so its urgency climbs well above interactive streams
+      // while the paced sink keeps quiche backpressured.
+      let mut bulk_stream = out_connection.open_stream();
+      let bulk_chunk = vec![0x11u8; 64 * 1024];
+      let bulk_write_task = tokio::spawn(async move {
+        for _ in 0..8 {
+          if bulk_stream.write_all(&bulk_chunk).await.is_err() {
+            return;
+          }
+        }
+        let _ = bulk_stream.shutdown().await;
+      });
+
+      // Let bulk data saturate the paced connection before opening the small stream.
+      sleep(Duration::from_millis(80)).await;
+
+      let small_done = Arc::new(AtomicBool::new(false));
+      let bulk_done = Arc::new(AtomicBool::new(false));
+      let small_preempted = Arc::new(AtomicBool::new(false));
+
+      let accept_task = tokio::spawn({
+        let small_done = small_done.clone();
+        let bulk_done = bulk_done.clone();
+        let small_preempted = small_preempted.clone();
+        async move {
+          let mut handlers = JoinSet::new();
+          while let Ok(Some(mut stream)) = hub_connection.accept_stream().await {
+            let small_done = small_done.clone();
+            let bulk_done = bulk_done.clone();
+            let small_preempted = small_preempted.clone();
+            handlers.spawn(async move {
+              let mut first = [0u8; 1];
+              if stream.read_exact(&mut first).await.is_err() {
+                return;
+              }
+              let mut rest = Vec::new();
+              let _ = stream.read_to_end(&mut rest).await;
+              if first[0] == 0x5a && rest.len() + 1 == 200 {
+                small_preempted.store(!bulk_done.load(atomic::Ordering::Acquire), atomic::Ordering::Release);
+                small_done.store(true, atomic::Ordering::Release);
+              } else {
+                bulk_done.store(true, atomic::Ordering::Release);
+              }
+            });
+          }
+          let _ = handlers.join_all().await;
+        }
+      });
+
+      record_packets.store(true, atomic::Ordering::Release);
+      let mut small_stream = out_connection.open_stream();
+      small_stream.write_all(&[0x5au8; 200]).await?;
+      small_stream.shutdown().await?;
+
+      timeout(Duration::from_secs(3), async {
+        while !small_done.load(atomic::Ordering::Acquire) {
+          sleep(Duration::from_millis(10)).await;
+        }
+      })
+      .await?;
+
+      assert!(
+        small_preempted.load(atomic::Ordering::Acquire),
+        "small stream finished only after saturated bulk stream drained",
+      );
+      assert!(
+        recorded_sizes.lock().unwrap().iter().any(|&len| len < 1024),
+        "expected small stream frame to be emitted in a small QUIC packet (< 1024 B), saw {:?}",
+        *recorded_sizes.lock().unwrap(),
+      );
+
+      pace_packets.store(false, atomic::Ordering::Release);
+      let _ = bulk_write_task.await;
+      drop(out_connection);
+      let _ = accept_task.await;
       anyhow::Ok(())
     })
     .await?

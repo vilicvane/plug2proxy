@@ -151,6 +151,10 @@ nftables 和 policy routing 的 `network` 子命令由 systemd 以 root 短暂�
 - `hijack_dns`：是否把所有透明入口中原目标端口为 `53` 的 TCP/UDP 请求
   强制交给顶层 Plug2Proxy DNS，默认 `false`。保持默认值时，客户端显式
   指定的 DNS 服务器仍是实际目标；仅在明确需要强制 DNS 策略时启用。
+- `reject_http3`：是否拒绝原目标端口为 `443` 的透明 UDP（HTTP/3）报文，省略时
+  继承 `inbounds.reject_http3`（默认 `false`）。设为 `true` 时直接丢弃
+  `UDP :443` 并在具备 `CAP_NET_RAW` 时回发 ICMPv4 Port Unreachable，使浏览器
+  立即回退到原生 TCP/HTTP2。
 - `network.bypass_user`：运行 Plug2Proxy 数据平面的专用用户，默认
   `plug2proxy`。启动时会校验进程有效 UID 必须与该用户的 UID 相同；网络
   规则也按这个 UID 绕过代理。

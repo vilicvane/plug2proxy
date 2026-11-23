@@ -2441,6 +2441,7 @@ mod tests {
         listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
         sniff: true,
         hijack_dns: false,
+        reject_http3: None,
         network: TproxyNetworkConfig::default(),
       },
       None,
@@ -2496,6 +2497,7 @@ mod tests {
       listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
       sniff: true,
       hijack_dns: false,
+      reject_http3: None,
       network: TproxyNetworkConfig::default(),
     };
 
@@ -2911,6 +2913,7 @@ mod tests {
       listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
       sniff: true,
       hijack_dns: false,
+      reject_http3: None,
       network: config,
     };
     assert!(
@@ -2928,6 +2931,7 @@ mod tests {
       listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
       sniff: true,
       hijack_dns: false,
+      reject_http3: None,
       network: config,
     };
     assert!(
@@ -2948,6 +2952,7 @@ mod tests {
       listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
       sniff: true,
       hijack_dns: false,
+      reject_http3: None,
       network: config,
     };
 
@@ -2971,6 +2976,7 @@ mod tests {
       listen: SerdeSocketAddress::from("127.0.0.1:12345".parse::<SocketAddr>().unwrap()),
       sniff: true,
       hijack_dns: false,
+      reject_http3: None,
       network: TproxyNetworkConfig::default(),
     };
     let dns_listen = "[::1]:5353".parse().unwrap();

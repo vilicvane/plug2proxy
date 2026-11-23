@@ -318,6 +318,6 @@ mod tests {
       parsed += 1;
     }
 
-    assert_eq!(parsed, 5, "unexpected number of complete config examples");
+    assert_eq!(parsed, 7, "unexpected number of complete config examples");
   }
 }

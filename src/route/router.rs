@@ -105,33 +105,37 @@ impl Router {
       None
     };
 
-    let routes = rules
-      .iter()
-      .filter(|rule| !rule.dns_only())
-      .filter_map(|rule| {
-        rule
-          .test(&address, &domain, &protocol, &region_codes, &self.geosite)
-          .map(|rule_kinds| (rule, rule_kinds))
-      })
-      .fold(Vec::new(), |mut routes, (rule, rule_kinds)| {
-        if matches!(**rule, AnyRule::Fallback(_)) && !routes.is_empty() {
-          return routes;
+    let mut routes = Vec::<RouteMatch>::new();
+
+    for rule in rules.iter().filter(|rule| !rule.dns_only()) {
+      let Some(rule_kinds) = rule.test(&address, &domain, &protocol, &region_codes, &self.geosite)
+      else {
+        continue;
+      };
+      let exclusive = matches!(**rule, AnyRule::ExclusiveAnd(_));
+
+      if exclusive {
+        routes.clear();
+      } else if matches!(**rule, AnyRule::Fallback(_)) && !routes.is_empty() {
+        continue;
+      }
+
+      for exit in rule.exits() {
+        if routes.iter().any(|route| route.exit == *exit) {
+          continue;
         }
 
-        for exit in rule.exits() {
-          if routes.iter().any(|route: &RouteMatch| route.exit == *exit) {
-            continue;
-          }
+        routes.push(RouteMatch {
+          exit: exit.clone(),
+          rule_kinds: rule_kinds.clone(),
+          matched_address: address,
+        });
+      }
 
-          routes.push(RouteMatch {
-            exit: exit.clone(),
-            rule_kinds: rule_kinds.clone(),
-            matched_address: address,
-          });
-        }
-
-        routes
-      });
+      if exclusive {
+        break;
+      }
+    }
 
     self
       .cache
@@ -259,7 +263,7 @@ mod tests {
   use super::*;
   use crate::{
     primitives::{SniffedProtocol, SocketDestination, SocketDestinationHost},
-    route::{AddressRule, AndRule, DomainRule, ProtocolRule, RuleKind},
+    route::{AddressRule, AndRule, DomainRule, ProtocolRule, RouteConfig, RuleKind},
     test::test_dir,
   };
 
@@ -486,6 +490,116 @@ mod tests {
 
     // 端口不命中时 AND 规则不命中，只剩单条域名规则。
     destination.port = 80;
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::Direct]
+    );
+  }
+
+  #[tokio::test]
+  async fn exclusive_ssh_routes_override_overlaps_and_survive_hub_disconnect() {
+    let router = Router::new(test_dir());
+    // Use a port condition so this test does not depend on GeoIP downloads.
+    let local: RouteConfig = serde_json::from_str(
+      r#"{
+        "rules": [{
+          "type": "and",
+          "match": [
+            { "type": "protocol", "match": "ssh" },
+            { "type": "address", "match_port": 22 }
+          ],
+          "priority": 900,
+          "exit": "hk",
+          "exclusive": true
+        }]
+      }"#,
+    )
+    .unwrap();
+    router.register_local_rules(local.into());
+
+    let hub: RouteConfig = serde_json::from_str(
+      r#"{
+        "rules": [
+          { "type": "domain", "match": "example.com", "priority": 10, "exit": "us" },
+          {
+            "type": "and",
+            "match": [
+              { "type": "protocol", "match": "ssh" },
+              { "type": "address", "match_port": 22 }
+            ],
+            "priority": 950,
+            "exit": "mo",
+            "exclusive": true
+          },
+          { "type": "protocol", "match": "ssh", "priority": 1000, "exit": "DIRECT" },
+          { "type": "address", "match_port": 22, "priority": 1100, "exit": "us" }
+        ]
+      }"#,
+    )
+    .unwrap();
+    let hub_rules: Vec<AnyRule> = hub.into();
+    let mut hub_rules: Vec<AnyRule> =
+      postcard::from_bytes(&postcard::to_allocvec(&hub_rules).unwrap()).unwrap();
+    let hub_id = NodeId::new();
+    router.register_node_rules(hub_id, hub_rules.clone());
+
+    let mut destination = SocketDestination {
+      host: SocketDestinationHost::IpAddress("203.0.113.8".parse().unwrap()),
+      port: 22,
+      routing_domain: Some("example.com".to_owned()),
+      routing_protocol: Some(SniffedProtocol::Ssh),
+    };
+    assert_eq!(
+      router.match_routes(&destination).await,
+      vec![RouteMatch {
+        exit: OutExit::from("hk"),
+        rule_kinds: vec![RuleKind::Protocol, RuleKind::Address],
+        matched_address: Some("203.0.113.8:22".parse().unwrap()),
+      }]
+    );
+
+    // The same target still uses its ordinary route for every non-SSH case,
+    // including an unidentified protocol. DNS remains the standalone domain rule.
+    for protocol in [
+      None,
+      Some(SniffedProtocol::Tls),
+      Some(SniffedProtocol::Http),
+      Some(SniffedProtocol::Quic),
+    ] {
+      destination.routing_protocol = protocol;
+      assert_eq!(
+        router.match_exits(&destination).await,
+        vec![OutExit::from("us")]
+      );
+    }
+    assert_eq!(router.match_dns("example.com")[0].exit, OutExit::from("us"));
+
+    // Among exclusive matches, numeric priority decides; the domain rule at
+    // priority 10 still cannot contribute a US candidate.
+    let AnyRule::ExclusiveAnd(earlier) = &mut hub_rules[1] else {
+      panic!("expected the HUB's exclusive AND rule");
+    };
+    earlier.0.priority = 800;
+    router.register_node_rules(hub_id, hub_rules);
+    destination.routing_protocol = Some(SniffedProtocol::Ssh);
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::from("mo")]
+    );
+
+    // Removing HUB rules must neither remove the local exclusive rule nor add
+    // the implicit DIRECT fallback to its selected HK candidate.
+    router.unregister_node_rules(hub_id);
+    assert_eq!(
+      router.match_exits(&destination).await,
+      vec![OutExit::from("hk")]
+    );
+    assert!(matches!(
+      router.build_rules().as_slice(),
+      [AnyRule::ExclusiveAnd(_)]
+    ));
+
+    destination.routing_protocol = None;
     assert_eq!(
       router.match_exits(&destination).await,
       vec![OutExit::Direct]

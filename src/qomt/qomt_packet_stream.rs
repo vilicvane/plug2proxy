@@ -7,7 +7,6 @@ use std::{
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
   task::{Context, Poll},
-  time::{Duration, Instant},
 };
 
 use futures::{Sink, Stream};
@@ -26,16 +25,13 @@ use crate::{
 };
 
 const QOMT_PACKET_STREAM_READY: &[u8; 4] = b"QPS1";
-// Logical frames can be ~16 KiB, so keep these per-association queues much
-// smaller than the connection-level ~1.4 KiB DATAGRAM queues.
-const QOMT_RELIABLE_PACKET_QUEUE_CAPACITY: usize = 16;
-const QOMT_INCOMING_PACKET_QUEUE_CAPACITY: usize = 16;
+const QOMT_RELIABLE_PACKET_QUEUE_CAPACITY: usize = 1024;
+const QOMT_INCOMING_PACKET_QUEUE_CAPACITY: usize = 1024;
+const QOMT_RELIABLE_WRITE_BATCH_BYTES: usize = 16 * 1024;
 // Preserve the existing UdpPacketStream logical frame limit. The real UDP
-// DATAGRAM limit is lower and dynamic; packets between the two limits fall
-// back to this reliable lane.
+// DATAGRAM limit is lower and dynamic; packets exceeding MTU or hitting UDP
+// QoS bottlenecks fall back cleanly to the reliable mTCP lane.
 const MAX_QOMT_PACKET_FRAME_SIZE: usize = MAX_DATAGRAM_SIZE;
-const UDP_LARGE_PACKET_THRESHOLD: usize = 1024;
-const PATH_DECISION_CACHE_TTL: Duration = Duration::from_millis(100);
 const MAX_MALFORMED_DATAGRAMS_PER_POLL: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,28 +126,6 @@ enum ReliableCloseState {
   Closed,
 }
 
-#[derive(Default)]
-struct PathDecisionCache {
-  sampled_at: Option<Instant>,
-  // This is only a short-lived memoized result of the fixed RTT predicate.
-  // The previous decision is never an input to the next sample.
-  cached_rtt_prefers_udp: bool,
-}
-
-impl PathDecisionCache {
-  fn get_or_sample(&mut self, now: Instant, sample: impl FnOnce() -> bool) -> bool {
-    if self
-      .sampled_at
-      .is_none_or(|sampled_at| now.duration_since(sampled_at) >= PATH_DECISION_CACHE_TTL)
-    {
-      self.sampled_at = Some(now);
-      self.cached_rtt_prefers_udp = sample();
-    }
-
-    self.cached_rtt_prefers_udp
-  }
-}
-
 /// Association-scoped packet transport.
 ///
 /// The reliable lane is one main QomT stream. The optional best-effort lane
@@ -168,7 +142,6 @@ pub struct QomtPacketStream<TSend: 'static, TReceive: 'static> {
   close_sender: watch::Sender<bool>,
   datagram_registration: Arc<Mutex<Option<QomtDatagramRegistration>>>,
   stats: Arc<AtomicPacketStreamStats>,
-  path_decision_cache: PathDecisionCache,
   read_closed: bool,
   _join_set: JoinSet<()>,
   packet_types: PhantomData<fn(TSend, TReceive)>,
@@ -183,6 +156,15 @@ where
     connection: Arc<QomtConnection>,
     mut stream: QomtStream,
   ) -> Result<Self, UdpPacketStreamError> {
+    if stream.is_udp_bypass() {
+      return Err(
+        std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "QomT packet stream control must use a main connection stream",
+        )
+        .into(),
+      );
+    }
     let association_id = stream.id();
     let (registration, datagram_receiver) =
       connection.register_datagram_association(association_id)?;
@@ -223,6 +205,15 @@ where
     connection: Arc<QomtConnection>,
     mut stream: QomtStream,
   ) -> Result<Self, UdpPacketStreamError> {
+    if stream.is_udp_bypass() {
+      return Err(
+        std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "QomT packet stream control must use a main connection stream",
+        )
+        .into(),
+      );
+    }
     let association_id = stream.id();
     let (registration, datagram_receiver) =
       connection.register_datagram_association(association_id)?;
@@ -266,6 +257,8 @@ where
 
       async move {
         let mut terminal = true;
+        let mut write_buf = Vec::with_capacity(QOMT_RELIABLE_WRITE_BATCH_BYTES);
+        let mut completions = Vec::new();
 
         loop {
           let command = tokio::select! {
@@ -297,22 +290,58 @@ where
             }
           };
 
-          let result = async {
-            reliable_write.write_u32(frame.encoded.len() as u32).await?;
-            reliable_write.write_all(&frame.encoded).await
+          write_buf.clear();
+          completions.clear();
+          write_buf.extend_from_slice(&(frame.encoded.len() as u32).to_be_bytes());
+          write_buf.extend_from_slice(&frame.encoded);
+          if let Some(completion) = frame.completion {
+            completions.push(completion);
           }
-          .await;
 
-          match result {
+          let mut pending_close = None;
+          while write_buf.len() < QOMT_RELIABLE_WRITE_BATCH_BYTES {
+            match reliable_receiver.try_recv() {
+              Ok(ReliableCommand::Frame(next)) => {
+                write_buf.extend_from_slice(&(next.encoded.len() as u32).to_be_bytes());
+                write_buf.extend_from_slice(&next.encoded);
+                if let Some(completion) = next.completion {
+                  completions.push(completion);
+                }
+              }
+              Ok(ReliableCommand::Close(close_tx)) => {
+                pending_close = Some(close_tx);
+                break;
+              }
+              Err(_) => break,
+            }
+          }
+
+          match reliable_write.write_all(&write_buf).await {
             Ok(()) => {
-              if let Some(completion) = frame.completion {
+              for completion in completions.drain(..) {
                 completion.send(Ok(())).ok();
+              }
+              if let Some(close_tx) = pending_close {
+                let result = reliable_write.shutdown().await;
+                terminal = result.is_err();
+                if terminal {
+                  close_sender.send(true).ok();
+                }
+                close_tx.send(result).ok();
+                break;
               }
             }
             Err(error) => {
               log::debug!("QomT reliable packet writer stopped: {error}");
-              if let Some(completion) = frame.completion {
-                completion.send(Err(error)).ok();
+              let kind = error.kind();
+              let message = error.to_string();
+              for completion in completions.drain(..) {
+                completion
+                  .send(Err(std::io::Error::new(kind, message.clone())))
+                  .ok();
+              }
+              if let Some(close_tx) = pending_close {
+                close_tx.send(Err(error)).ok();
               }
               close_sender.send(true).ok();
               break;
@@ -448,7 +477,6 @@ where
       close_sender,
       datagram_registration,
       stats,
-      path_decision_cache: PathDecisionCache::default(),
       read_closed: false,
       _join_set: join_set,
       packet_types: PhantomData,
@@ -517,28 +545,25 @@ where
       return Err(UdpPacketStreamError::Closed);
     }
 
-    if self.should_use_udp(encoded.len()) {
-      match self
-        .connection
-        .try_send_association_datagram(self.association_id, &encoded)
-      {
-        QomtDatagramSendOutcome::Queued => {
-          self.stats.datagram_queued.fetch_add(1, Ordering::Relaxed);
-          return Ok(QomtPacketSendOutcome::DatagramQueued);
-        }
-        QomtDatagramSendOutcome::QueueFull => {
-          self
-            .stats
-            .dropped_udp_queue_full
-            .fetch_add(1, Ordering::Relaxed);
-          return Ok(QomtPacketSendOutcome::Dropped(
-            QomtPacketDropReason::UdpQueueFull,
-          ));
-        }
-        QomtDatagramSendOutcome::Unavailable | QomtDatagramSendOutcome::TooLarge => {}
-        QomtDatagramSendOutcome::Failed(error) => {
-          log::debug!("QomT UDP DATAGRAM send failed, falling back to reliable lane: {error}");
-        }
+    match self
+      .connection
+      .try_send_association_datagram(self.association_id, &encoded)
+    {
+      QomtDatagramSendOutcome::Queued => {
+        self.stats.datagram_queued.fetch_add(1, Ordering::Relaxed);
+        return Ok(QomtPacketSendOutcome::DatagramQueued);
+      }
+      QomtDatagramSendOutcome::Unavailable
+      | QomtDatagramSendOutcome::TooLarge
+      | QomtDatagramSendOutcome::Bottlenecked => {}
+      QomtDatagramSendOutcome::QueueFull => {
+        self
+          .stats
+          .dropped_udp_queue_full
+          .fetch_add(1, Ordering::Relaxed);
+      }
+      QomtDatagramSendOutcome::Failed(error) => {
+        log::debug!("QomT UDP DATAGRAM send failed, falling back to reliable lane: {error}");
       }
     }
 
@@ -565,25 +590,6 @@ where
       }
       Err(flume::TrySendError::Disconnected(_)) => Err(UdpPacketStreamError::Closed),
     }
-  }
-
-  fn should_use_udp(&mut self, encoded_len: usize) -> bool {
-    let Some(max_payload_len) = self.connection.max_association_datagram_payload_len() else {
-      return false;
-    };
-
-    if encoded_len > max_payload_len {
-      return false;
-    }
-
-    if encoded_len >= UDP_LARGE_PACKET_THRESHOLD {
-      return true;
-    }
-
-    let connection = &self.connection;
-    self
-      .path_decision_cache
-      .get_or_sample(Instant::now(), || connection.rtt_prefers_udp())
   }
 
   fn is_send_closed(&self) -> bool {
@@ -747,47 +753,5 @@ impl<TSend: 'static, TReceive: 'static> Drop for QomtPacketStream<TSend, TReceiv
     // the route synchronously so a stale association ID cannot receive a
     // datagram after the public packet stream has gone away.
     self.datagram_registration.lock().unwrap().take();
-  }
-}
-
-#[cfg(test)]
-mod path_decision_cache_tests {
-  use std::cell::Cell;
-
-  use super::*;
-
-  #[test]
-  fn cached_rtt_decision_can_change_in_both_directions() {
-    let started_at = Instant::now();
-    let first_expiry = started_at + PATH_DECISION_CACHE_TTL;
-    let second_expiry = first_expiry + PATH_DECISION_CACHE_TTL;
-    let samples = Cell::new(0);
-    let mut cache = PathDecisionCache::default();
-
-    assert!(cache.get_or_sample(started_at, || {
-      samples.set(samples.get() + 1);
-      true
-    }));
-    assert!(
-      cache.get_or_sample(first_expiry - Duration::from_nanos(1), || {
-        samples.set(samples.get() + 1);
-        false
-      })
-    );
-    assert!(!cache.get_or_sample(first_expiry, || {
-      samples.set(samples.get() + 1);
-      false
-    }));
-    assert!(
-      !cache.get_or_sample(second_expiry - Duration::from_nanos(1), || {
-        samples.set(samples.get() + 1);
-        true
-      })
-    );
-    assert!(cache.get_or_sample(second_expiry, || {
-      samples.set(samples.get() + 1);
-      true
-    }));
-    assert_eq!(samples.get(), 3);
   }
 }

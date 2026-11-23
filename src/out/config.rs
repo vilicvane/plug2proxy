@@ -5,16 +5,19 @@ use lowkit::{SelfWrapExt, SerdeSocketAddress};
 use serde::{Deserialize, Deserializer};
 
 use crate::{
+  mt_connections::TunnelInterfaceConfig,
   node::{DefaultLocalExit, LocalOutDispatcher},
   out::OutHubOptions,
   primitives::{OutExit, OutExitTag},
-  utils::serde::deserialize_optional_listen_socket_address,
+  utils::serde::{SerdeOneOrMany, deserialize_optional_listen_socket_address},
 };
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct OutConfig {
   #[serde(alias = "hub", deserialize_with = "deserialize_out_hubs")]
   pub hubs: Vec<OutHubConfig>,
+  #[serde(default)]
+  pub interfaces: Vec<TunnelInterfaceConfig>,
   #[serde(default)]
   pub exits: Vec<ExitConfig>,
   #[serde(
@@ -37,9 +40,22 @@ impl OutConfig {
         self.advertise.is_none(),
         "OUT advertise requires a peer listener"
       );
+      anyhow::ensure!(
+        self
+          .interfaces
+          .iter()
+          .all(|iface| iface.advertise.is_none()),
+        "interface `advertise` requires a peer listener"
+      );
 
       return Ok(None);
     };
+
+    anyhow::ensure!(
+      self.interfaces.is_empty() || self.advertise.is_none(),
+      "top-level `advertise` cannot be combined with `interfaces`; set `interfaces[].advertise` \
+       instead"
+    );
 
     let advertise = self.advertise.map(SerdeSocketAddress::into_inner);
 
@@ -54,7 +70,7 @@ impl OutConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct OutHubConfig {
-  pub address: SerdeSocketAddress,
+  pub address: SerdeOneOrMany<SerdeSocketAddress>,
   pub connections: Option<usize>,
 }
 
@@ -78,15 +94,26 @@ where
     return Err(serde::de::Error::custom("OUT requires at least one HUB"));
   }
 
-  let mut addresses = HashSet::new();
+  let mut seen_addresses = HashSet::new();
 
   for hub in &hubs {
-    let address = hub.address.into_inner();
+    let addresses: Vec<SocketAddr> = match &hub.address {
+      SerdeOneOrMany::One(address) => vec![address.into_inner()],
+      SerdeOneOrMany::Many(addresses) => addresses.iter().map(|addr| addr.into_inner()).collect(),
+    };
 
-    if !addresses.insert(address) {
-      return Err(serde::de::Error::custom(format!(
-        "duplicate OUT HUB address {address}"
-      )));
+    if addresses.is_empty() {
+      return Err(serde::de::Error::custom(
+        "OUT HUB address list must not be empty",
+      ));
+    }
+
+    for address in addresses {
+      if !seen_addresses.insert(address) {
+        return Err(serde::de::Error::custom(format!(
+          "duplicate OUT HUB address {address}"
+        )));
+      }
     }
   }
 
@@ -101,7 +128,7 @@ impl From<OutHubConfig> for OutHubOptions {
     }: OutHubConfig,
   ) -> Self {
     OutHubOptions {
-      address: address.into(),
+      addresses: address.into(),
       connections: connections.unwrap_or(4),
     }
   }
@@ -208,7 +235,7 @@ mod tests {
       assert_eq!(config.hubs.len(), 1);
 
       let hub: OutHubOptions = config.hubs.into_iter().next().unwrap().into();
-      assert_eq!(hub.address, "127.0.0.1:1122".parse().unwrap());
+      assert_eq!(hub.addresses, vec!["127.0.0.1:1122".parse().unwrap()]);
       assert_eq!(hub.connections, 4);
     }
   }
@@ -219,7 +246,7 @@ mod tests {
       r#"{
         "hubs": [
           {"address": "127.0.0.1:1122", "connections": 2},
-          {"address": "[::1]:2233", "connections": 6}
+          {"address": ["[::1]:2233", "127.0.0.1:2233"], "connections": 6}
         ]
       }"#,
     )
@@ -227,9 +254,15 @@ mod tests {
     let hubs: Vec<OutHubOptions> = config.hubs.into_iter().map(Into::into).collect();
 
     assert_eq!(hubs.len(), 2);
-    assert_eq!(hubs[0].address, "127.0.0.1:1122".parse().unwrap());
+    assert_eq!(hubs[0].addresses, vec!["127.0.0.1:1122".parse().unwrap()]);
     assert_eq!(hubs[0].connections, 2);
-    assert_eq!(hubs[1].address, "[::1]:2233".parse().unwrap());
+    assert_eq!(
+      hubs[1].addresses,
+      vec![
+        "[::1]:2233".parse().unwrap(),
+        "127.0.0.1:2233".parse().unwrap()
+      ]
+    );
     assert_eq!(hubs[1].connections, 6);
   }
 
@@ -431,5 +464,65 @@ mod tests {
     .unwrap();
 
     assert!(build_local_out_dispatchers(config.exits).is_err());
+  }
+
+  #[test]
+  fn parses_interfaces_and_multi_hub_addresses() {
+    let config: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": {
+          "address": ["127.0.0.1:1122", "127.0.0.2:1122"]
+        },
+        "listen": "0.0.0.0:2233",
+        "interfaces": [
+          {
+            "address": "127.0.0.1",
+            "advertise": "203.0.113.10",
+            "bandwidth": "1Mbps"
+          },
+          {
+            "address": "127.0.0.2",
+            "metered": true
+          }
+        ]
+      }"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.hubs.len(), 1);
+    let hub_options = OutHubOptions::from(config.hubs[0].clone());
+    assert_eq!(hub_options.addresses.len(), 2);
+    assert!(config.peer_addresses().unwrap().is_some());
+  }
+
+  #[test]
+  fn validates_out_interface_and_hub_address_constraints() {
+    assert!(
+      serde_json::from_str::<OutConfig>(
+        r#"{"hub":{"address":["127.0.0.1:1122","127.0.0.1:1122"]}}"#
+      )
+      .is_err()
+    );
+    assert!(serde_json::from_str::<OutConfig>(r#"{"hub":{"address":[]}}"#).is_err());
+
+    let combined_advertise: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": { "address": "127.0.0.1:1122" },
+        "listen": "0.0.0.0:2233",
+        "advertise": "203.0.113.10:2233",
+        "interfaces": [{ "address": "127.0.0.1" }]
+      }"#,
+    )
+    .unwrap();
+    assert!(combined_advertise.peer_addresses().is_err());
+
+    let advertise_without_listen: OutConfig = serde_json::from_str(
+      r#"{
+        "hub": { "address": "127.0.0.1:1122" },
+        "interfaces": [{ "address": "127.0.0.1", "advertise": "203.0.113.10" }]
+      }"#,
+    )
+    .unwrap();
+    assert!(advertise_without_listen.peer_addresses().is_err());
   }
 }

@@ -146,7 +146,7 @@ UDP，并最终到达同一个本地 `listen`。`advertise` 应填写 IN 实际�
 同一条规则在 IN 收到的请求上表示 IN 直出，在 HUB 自己的 SOCKS5 inbound
 上表示 HUB 直出。它不是 IN–OUT peer 路径的名称。
 
-规则按较小的 `priority` 优先，但不是传统的命中一条就停止。多个规则命中
+普通规则按较小的 `priority` 优先，多个规则命中
 时，其 exit 会按优先级依次累计。例如 OKX 的 IP 也匹配非 CN GeoIP 时，
 候选顺序是 `hk`、`us`：`hk` 可用时优先，否则可以继续尝试 `us`。同一条
 规则的 `match` 数组是 any-of。
@@ -168,8 +168,13 @@ UDP，并最终到达同一个本地 `listen`。`advertise` 应填写 IN 实际�
 }
 ```
 
-`and` 规则与普通规则一样参与优先级排序和 exit 累计，也会随 HUB 的
-规则下发同步给 IN。
+`and` 规则默认参与普通规则的出口累计。设置 `"exclusive": true` 后，只要
+条件命中，连接就只使用该规则列出的出口。多个独占规则同时命中时，选
+`priority` 最小的一条。独占规则只参与连接路由。若列出的出口均不可用，
+新连接会失败。
+
+HUB 会把 `and` 规则同步给 IN。启用 HUB 的独占规则前，先更新所有连接到
+该 HUB 的 IN，使其能够读取这一规则类型。
 
 `protocol` 规则匹配嗅探得到的应用层协议，而不是端口号。当前可配置值为
 `"http"`、`"tls"`、`"quic"` 和 `"ssh"`；值必须小写。SSH 根据客户端
@@ -429,6 +434,12 @@ bit。活动布局不能通过 `network reconcile` 热切换，应 restart，或
 并像其他 TCP/UDP 流量一样经过透明入口。设为 `true` 才会把所有原目标端口
 为 53 的请求强制交给顶层 Plug2Proxy DNS。
 
+`reject_http3` 默认 `false`（可在 `inbounds` 顶层统一设置，也可在
+`inbounds.tproxy` 或 `inbounds.socks5` 下单独覆盖）。设为 `true` 时会直接
+拒绝入站目标端口为 `443` 的 UDP（HTTP/3）报文（TPROXY 在具备
+`CAP_NET_RAW` 时还会回发 ICMP Port Unreachable），促使浏览器立即回退到原生
+TCP/HTTP2。
+
 作为 Tailscale exit node 时，还应按原生 TPROXY 文档配置 tailnet 和云平台
 内部网段的 `exclude_ipv4`；否则发往其他 tailnet 节点的目标也会被透明接管。
 当前 TPROXY 只接管 IPv4；如果该节点没有可用的 IPv6 转发路径，推荐安装
@@ -571,3 +582,111 @@ sysctl net.ipv4.tcp_available_congestion_control
 
 输出应包含 `bbr`。内核提供模块但尚未加载时，应按发行版方式加载
 `tcp_bbr` 并设置开机自动加载。
+
+## 8. 多 IP 隧道与带宽分层（`interfaces`）
+
+当服务端和客户端位于同一条物理路线、但各自拥有多张网卡或多条 IP（例如一条固定
+小带宽不计流量的线路配一条按流量计费的线路）时，可以在 `hub`、`out`、`in` 的
+顶层配置 `interfaces`，并在连接端把 `hub.address` 设为多地址数组：
+
+- 建连时客户端先通过 mTLS 连接到 `hub.address` 中的任意可用地址，握手完成后双方
+  在 Control Stream（stream 0）上自动交换各自的 `interfaces` 声明并配对；
+- 配对顺序优先选择双端均未标记 `"metered": true` 的接口组合，其余组合作为按流量
+  溢出层级接管超出预算或主链路拥塞时的突发流量；同一节点的所有链路共享该节点各
+  接口的出站令牌桶（mTCP 在分组入队时按 `packet.len() + 56B` 估算扣减，UDP
+  旁路在发送前按估算线缆字节预扣并在 socket 发送完成时对差值记账，超出限速的
+  流量自动溢出到按流量层）；
+- **云主机 VPC 1:1 NAT**：在阿里云 ECS / AWS EC2 等存在公网 EIP NAT 映射的机器
+  上，`interfaces[].address` 必须填系统内真实绑定的网卡私网 IP（如 `172.21.x.x`），
+  并将对应公网 EIP 填到 `interfaces[].advertise`；否则多接口模式下若省略
+  `advertise`，对端可能收到私网 IP 导致无法扩连。
+- **Linux 多网卡策略路由**：当机器挂接多张独立网卡时，请为非主网卡配置基于源地址
+  的策略路由（例如 `ip rule add from <副网卡IP> lookup 101 priority 200` 与独立路由表
+  default 路由，注意优先级避开 Plug2Proxy 原生 TPROXY 占用的 `98`–`100` 与表
+  `20230`），并将相关网卡的反向路径过滤设为松散模式 `rp_filter=2`（严格模式
+  `rp_filter=1` 会丢弃经副网卡入站的回包，即使设置了 `SO_BINDTODEVICE`）。
+- 每个 `interfaces` 元素支持字段：
+  - `interface`：可选网卡名，用于通过 `SO_BINDTODEVICE` 绑定设备；
+  - `address`：源 bind IP（带监听角色的 `hub` 以及开启 peer `listen` 的 `out`
+    必须在每个接口填写非未指定 IP，各接口会复用顶层 `listen` 的端口）；
+  - `advertise`：可选对外通告地址（`IP` 复用监听端口，或 `IP:port`；不可与顶层
+    `advertise` 混用，且要求存在 listener）；
+  - `bandwidth`：支持字符串简写（如 `"850kbps"`，等价于 `in`/`out` 对称限速）或
+    `{"in": "...", "out": "..."}` 对象，单位支持 `bps`/`kbps`/`Kbps`/`mbps`/`Mbps`/
+    `gbps`/`Gbps` 与 `B/s`/`KB/s`/`MB/s`/`GB/s`/`KiB/s`/`MiB/s`/`GiB/s`；
+  - `metered`：布尔值，默认 `false`，`true` 表示按流量计费的备用接口；
+  - `connections_limit`：可选单配对组 mTCP 并发连接上限（最小 `1`，设为 `1` 时
+    会禁用 `+1` 轮转备用连接）；
+  - `udp`：布尔值，默认 `true`，设为 `false` 可禁用该接口的 QomT UDP 旁路。
+
+配置 `interfaces` 后，`in -> peer out` 直连也会自动沿用两端在 `interfaces` 中
+声明的多 IP 与限速策略。
+
+### 多 IP HUB 示例（云 VPC 双私网 IP + 公网 EIP）
+
+```jsonc
+{
+  "type": "hub",
+  // listen 的端口（1122）会被 interfaces 中每个地址复用。
+  "listen": "0.0.0.0:1122",
+  "interfaces": [
+    {
+      // 固定带宽、不计流量费用（metered: false，默认值）的接口优先承载流量；
+      // address 填网卡私网 IP，advertise 填公网 EIP。
+      "address": "172.21.184.40",
+      "advertise": "198.51.100.10",
+      "bandwidth": {
+        "in": "1Mbps",
+        "out": "850kbps"
+      },
+      "connections_limit": 2
+    },
+    {
+      // 按流量计费的备用接口；当主接口预算耗尽或不可用时自动溢出接管。
+      "address": "172.21.184.41",
+      "advertise": "203.0.113.20:2122",
+      "metered": true
+    }
+  ]
+}
+```
+
+### 多 IP Peer OUT 示例
+
+```jsonc
+{
+  "type": "out",
+  "hub": {
+    // 列出 HUB 的所有公网地址以便 mTLS 建连与主路径故障回退。
+    "address": [
+      "198.51.100.10:1122",
+      "203.0.113.20:2122"
+    ],
+    "connections": 4
+  },
+  // 同路线 peer 直连也支持多 IP；各接口复用端口 2233。
+  "listen": "0.0.0.0:2233",
+  "interfaces": [
+    {
+      "interface": "eth0",
+      "address": "192.0.2.10",
+      "advertise": "192.0.2.10",
+      // 简写等价于 {"in": "850kbps", "out": "850kbps"}。
+      "bandwidth": "850kbps",
+      "connections_limit": 2
+    },
+    {
+      "interface": "eth1",
+      "address": "192.0.2.20",
+      "metered": true,
+      "udp": true
+    }
+  ],
+  "exits": [
+    {
+      "type": "local",
+      "tags": ["us"]
+    }
+  ]
+}
+```

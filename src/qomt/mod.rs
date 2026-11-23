@@ -9,7 +9,7 @@ pub use qomt_packet_stream::*;
 pub use qomt_stream::*;
 
 pub(crate) use qomt_datagram_router::{
-  QomtDatagramRegistration, QomtDatagramRouter, QomtDatagramSendOutcome,
+  DatagramTierConfig, QomtDatagramRegistration, QomtDatagramRouter, QomtDatagramSendOutcome,
 };
 
 pub use crate::quic_connection::{QuicConnectionError, State};

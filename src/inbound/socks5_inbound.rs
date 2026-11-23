@@ -30,7 +30,7 @@ use crate::{
     InboundUdpPacketStream, IncomingUdpPacket, OutgoingUdpPacket, UdpPacketSource,
     UdpPacketStreamError,
   },
-  utils::task::reap_finished_tasks,
+  utils::{net::configure_udp_socket_buffers, task::reap_finished_tasks},
 };
 
 const TCP_PENDING_CONNECTIONS: usize = 1024;
@@ -49,15 +49,18 @@ pub struct Socks5Inbound {
 pub struct Socks5InboundOptions {
   pub listen: SocketAddr,
   pub sniff: bool,
+  pub reject_http3: bool,
 }
 
 impl Socks5Inbound {
   pub async fn new(options: Socks5InboundOptions) -> Result<Self, Error> {
     let sniff = options.sniff;
+    let reject_http3 = options.reject_http3;
     let tcp_listener = TcpListener::bind(options.listen).await?;
 
     let listen_address = tcp_listener.local_addr()?;
     let udp_socket = UdpSocket::bind(listen_address).await?;
+    configure_udp_socket_buffers(&udp_socket);
     let udp_relay_address = udp_socket.local_addr()?;
     let udp_socket = AssociatedUdpSocket::new(udp_socket, u16::MAX as usize).arc();
 
@@ -129,6 +132,7 @@ impl Socks5Inbound {
       udp_socket,
       outgoing_packet_sender,
       incoming_packet_receiver,
+      reject_http3,
     ));
 
     Self {
@@ -255,6 +259,7 @@ async fn run_udp_socket(
   socket: Arc<AssociatedUdpSocket>,
   outgoing_packet_sender: flume::Sender<OutgoingUdpPacket>,
   incoming_packet_receiver: flume::Receiver<IncomingUdpPacket>,
+  reject_http3: bool,
 ) {
   let mut dropped_packets = 0_u64;
   loop {
@@ -271,6 +276,9 @@ async fn run_udp_socket(
             }
 
             let destination: SocketDestination = header.address.into();
+            if reject_http3 && destination.port == 443 {
+              continue;
+            }
 
             let packet = OutgoingUdpPacket {
               source: UdpPacketSource {
@@ -429,6 +437,7 @@ mod tests {
     let inbound = Socks5Inbound::new(Socks5InboundOptions {
       listen: "127.0.0.1:0".parse()?,
       sniff: true,
+      reject_http3: false,
     })
     .await?;
     let listen_address = inbound.listen_address();
@@ -496,6 +505,7 @@ mod tests {
     let inbound = Socks5Inbound::new(Socks5InboundOptions {
       listen: "127.0.0.1:0".parse()?,
       sniff: true,
+      reject_http3: false,
     })
     .await?;
     let listen_address = inbound.listen_address();
@@ -547,6 +557,7 @@ mod tests {
     let inbound = Socks5Inbound::new(Socks5InboundOptions {
       listen: "127.0.0.1:0".parse()?,
       sniff: true,
+      reject_http3: false,
     })
     .await?;
     let mut client_stream = TcpStream::connect(inbound.listen_address()).await?;
@@ -590,6 +601,7 @@ mod tests {
     let inbound = Socks5Inbound::new(Socks5InboundOptions {
       listen: "127.0.0.1:0".parse()?,
       sniff: true,
+      reject_http3: false,
     })
     .await?;
     let listen_address = inbound.listen_address();
@@ -657,6 +669,7 @@ mod tests {
     let inbound = Socks5Inbound::new(Socks5InboundOptions {
       listen: "127.0.0.1:0".parse()?,
       sniff: true,
+      reject_http3: false,
     })
     .await?;
     let listen_address = inbound.listen_address();
@@ -745,6 +758,63 @@ mod tests {
       Some(SniffedProtocol::Quic)
     );
     assert_eq!(follow_up.payload, b"\x40encrypted-follow-up");
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn socks5_reject_http3_drops_udp_443_while_forwarding_other_ports() -> anyhow::Result<()> {
+    let inbound = Socks5Inbound::new(Socks5InboundOptions {
+      listen: "127.0.0.1:0".parse()?,
+      sniff: true,
+      reject_http3: true,
+    })
+    .await?;
+    let listen_address = inbound.listen_address();
+    let mut packet_stream = inbound.get_udp_packet_stream().await?;
+
+    let mut client_stream = TcpStream::connect(listen_address).await?;
+    socks5_server::proto::handshake::Request::new(vec![
+      socks5_server::proto::handshake::Method::NONE,
+    ])
+    .write_to(&mut client_stream)
+    .await?;
+    socks5_server::proto::handshake::Response::read_from(&mut client_stream).await?;
+
+    let udp_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let udp_client_address = udp_socket.local_addr()?;
+    socks5_server::proto::Request::new(
+      socks5_server::proto::Command::Associate,
+      Address::SocketAddress(udp_client_address),
+    )
+    .write_to(&mut client_stream)
+    .await?;
+    let associate_response =
+      socks5_server::proto::Response::read_from(&mut client_stream).await?;
+    let Address::SocketAddress(udp_relay_address) = associate_response.address else {
+      anyhow::bail!("expected socket address for UDP relay");
+    };
+
+    let udp_socket = AssociatedUdpSocket::new(udp_socket, u16::MAX as usize);
+    udp_socket
+      .send_to(
+        b"\xc3quic-http3",
+        &UdpHeader::new(0, Address::DomainAddress(b"i.ytimg.com".to_vec(), 443)),
+        udp_relay_address,
+      )
+      .await?;
+    udp_socket
+      .send_to(
+        b"dns-query",
+        &UdpHeader::new(0, Address::SocketAddress("8.8.8.8:53".parse()?)),
+        udp_relay_address,
+      )
+      .await?;
+
+    let forwarded = timeout(Duration::from_secs(3), packet_stream.next())
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("SOCKS5 UDP packet stream closed"))?;
+    assert_eq!(forwarded.destination.port, 53);
+    assert_eq!(forwarded.payload, b"dns-query");
     Ok(())
   }
 

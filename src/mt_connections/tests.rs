@@ -34,19 +34,25 @@ static RANDOM_DATA_2: LazyLock<Vec<u8>> = LazyLock::new(|| {
 
 fn tcp_info(bytes_acked: u64) -> MtTcpInfo {
   MtTcpInfo {
+    ca_state: 0,
+    probes: 0,
+    backoff: 0,
     rtt: Duration::from_millis(100),
     rttvar: Duration::from_millis(20),
     rto: Duration::from_millis(250),
+    snd_mss: 1448,
     unacked: 0,
+    notsent_bytes: 0,
     retrans: 0,
     total_retrans: 0,
     bytes_acked,
+    delivered: bytes_acked as u32,
   }
 }
 
 #[test]
 fn rotation_uses_the_window_minimum_and_preserves_the_target_count() {
-  let metrics = MtConnectionsUnderlayMetrics::default();
+  let metrics = MtConnectionsUnderlayMetrics::<QuicBytesPacket>::default();
   let now = Instant::now();
   let mut paths = Vec::new();
   for milliseconds in [80, 90, 70] {
@@ -75,7 +81,7 @@ fn rotation_uses_the_window_minimum_and_preserves_the_target_count() {
 
 #[test]
 fn rotation_expires_old_minima_and_ignores_stale_tcp_info() {
-  let metrics = MtConnectionsUnderlayMetrics::default();
+  let metrics = MtConnectionsUnderlayMetrics::<QuicBytesPacket>::default();
   let now = Instant::now();
   let oldest = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
   let stale = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
@@ -170,69 +176,119 @@ async fn rotation_adds_a_spare_then_replaces_one_path_after_it_drains() -> anyho
 }
 
 #[test]
-fn tcp_ack_progress_pauses_and_resumes_only_its_own_path() {
-  let metrics = MtConnectionsUnderlayMetrics::default();
+fn three_state_tcp_health_distinguishes_sack_stalling_from_dead_blackhole() {
+  let metrics = MtConnectionsUnderlayMetrics::<QuicBytesPacket>::default();
   let path = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
   let other = metrics.register_path(None, "127.0.0.1:1123".parse().unwrap());
   let now = Instant::now();
+
   metrics.update_path(path, tcp_info(1), now);
   metrics.update_path(other, tcp_info(1), now);
+
+  // Idle paths (`unacked == 0 && notsent_bytes == 0`) remain Clean indefinitely
+  // without sending keepalive probe frames.
+  let idle_later = now + Duration::from_secs(30);
+  metrics.update_path(path, tcp_info(1), idle_later);
+  metrics.update_path(other, tcp_info(1), idle_later);
+  assert_eq!(metrics.snapshot().active_paths, 2);
+  assert_eq!(metrics.snapshot().stalling_paths, 0);
+
   let mut packet: QuicBytesPacket = vec![1].into();
   let delivery = quiche::ReliablePacket::default();
   packet.delivery = Some(delivery.clone());
   assert!(metrics.bind_packet(path, &packet));
   assert!(!delivery.is_lost());
 
-  // Reverse traffic, duplicate ACKs, an idle socket, and a growing RTO do not
-  // acknowledge any new bytes and must not extend this generation's lifetime.
-  let later = now + Duration::from_millis(1100);
-  let mut unchanged = tcp_info(1);
-  unchanged.rto = Duration::from_secs(30);
-  metrics.update_path(path, unchanged, later);
-  metrics.update_path(other, tcp_info(10), later);
+  // State 2 (`Stalling`): cumulative `bytes_acked` is frozen behind a lost
+  // segment for >1s and even hits backoff=2, while SACK (`tcpi_delivered`) keeps
+  // advancing. Assignment pauses on `path`, but `delivery` MUST NOT be marked lost!
+  let sack_hole_time = idle_later + Duration::from_millis(1500);
+  let mut sack_recovering = tcp_info(1);
+  sack_recovering.ca_state = MT_TCP_CA_RECOVERY;
+  sack_recovering.unacked = 12;
+  sack_recovering.retrans = 1;
+  sack_recovering.delivered = 25;
+  metrics.update_path(path, sack_recovering, sack_hole_time);
+  metrics.update_path(other, tcp_info(10), sack_hole_time);
   assert_eq!(metrics.snapshot().active_paths, 1);
-  assert!(delivery.is_lost());
+  assert_eq!(metrics.snapshot().stalling_paths, 1);
+  assert!(!delivery.is_lost());
 
-  // An ACK of new bytes re-enables assignment but never revives old packets.
-  metrics.update_path(path, tcp_info(5), later + Duration::from_millis(50));
+  // Even after 5 seconds of head-of-line delay, continuous `tcpi_delivered`
+  // progress (SACKs arriving) proves the uplink is alive and prevents `Dead`.
+  let mut ongoing_sack = sack_recovering;
+  ongoing_sack.backoff = 3;
+  ongoing_sack.delivered = 40;
+  let five_sec = sack_hole_time + Duration::from_secs(4);
+  metrics.update_path(path, ongoing_sack, five_sec);
+  assert!(!delivery.is_lost());
+
+  // Kernel patches the hole (`bytes_acked` advances, `backoff == 0`, `ca_state == Open`):
+  // `path` returns to Clean on the exact same unbroken ReliableTransport generation!
+  let mut healed = tcp_info(50_000);
+  healed.delivered = 42;
+  let healed_at = five_sec + Duration::from_millis(100);
+  metrics.update_path(path, healed, healed_at);
   assert_eq!(metrics.snapshot().active_paths, 2);
-  assert!(delivery.is_lost());
-  let resumed = quiche::ReliablePacket::default();
-  packet.delivery = Some(resumed.clone());
-  assert!(metrics.bind_packet(path, &packet));
-  assert!(!resumed.is_lost());
-  metrics.remove_path(path);
-  assert!(resumed.is_lost());
+  assert_eq!(metrics.snapshot().stalling_paths, 0);
+  assert!(!delivery.is_lost());
+
+  // State 3 (`Dead`): uplink blackhole with `unacked > 0`, ZERO `delivered` and
+  // ZERO `bytes_acked` progress across `>= 3s` and `backoff >= 3` (even if RTO grows).
+  let mut blackholed = healed;
+  blackholed.ca_state = MT_TCP_CA_LOSS;
+  blackholed.unacked = 6;
+  blackholed.backoff = 1;
+  blackholed.rto = Duration::from_secs(2);
+  metrics.update_path(path, blackholed, healed_at + Duration::from_millis(500));
   assert_eq!(metrics.snapshot().active_paths, 1);
+  assert_eq!(metrics.snapshot().stalling_paths, 1);
+  assert!(!delivery.is_lost());
+
+  blackholed.backoff = MT_TCP_DEAD_BACKOFF;
+  blackholed.rto = Duration::from_secs(8);
+  metrics.update_path(path, blackholed, healed_at + Duration::from_millis(3600));
+  assert!(delivery.is_lost());
+  // With `other` alive (`live_paths == 2`), `path` is immediately marked dead (`!is_live()`).
+  assert_eq!(metrics.available_path_count(), 1);
 }
 
 #[test]
-fn tcp_ack_updates_extend_the_activity_window() {
-  let metrics = MtConnectionsUnderlayMetrics::default();
-  let path = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
+fn sole_dead_path_waits_for_replacement_before_closing_socket() {
+  let metrics = MtConnectionsUnderlayMetrics::<QuicBytesPacket>::default();
+  let sole = metrics.register_path(None, "127.0.0.1:1122".parse().unwrap());
   let now = Instant::now();
-  metrics.update_path(path, tcp_info(1), now);
-  for step in 1..=20 {
-    metrics.update_path(
-      path,
-      tcp_info(step + 1),
-      now + Duration::from_millis(step * 900),
-    );
-    assert_eq!(metrics.snapshot().active_paths, 1);
-  }
-  metrics.update_path(path, tcp_info(21), now + Duration::from_millis(19_100));
-  assert_eq!(metrics.snapshot().active_paths, 0);
+  metrics.update_path(sole, tcp_info(1), now);
+
   let mut packet: QuicBytesPacket = vec![1].into();
   let delivery = quiche::ReliablePacket::default();
   packet.delivery = Some(delivery.clone());
-  // A packet claimed in the pause race is recovered, not written to this TCP.
-  assert!(!metrics.bind_packet(path, &packet));
+  assert!(metrics.bind_packet(sole, &packet));
+
+  let mut blackholed = tcp_info(1);
+  blackholed.ca_state = MT_TCP_CA_LOSS;
+  blackholed.unacked = 4;
+  blackholed.backoff = MT_TCP_DEAD_BACKOFF;
+  metrics.update_path(sole, blackholed, now + Duration::from_secs(4));
+
+  // Unacked generation fails immediately, while the sole socket stays open until
+  // either TCP_USER_TIMEOUT or a replacement path registers.
   assert!(delivery.is_lost());
+  assert_eq!(metrics.available_path_count(), 1);
+  let mut raced_packet: QuicBytesPacket = vec![2].into();
+  let raced_delivery = quiche::ReliablePacket::default();
+  raced_packet.delivery = Some(raced_delivery.clone());
+  assert!(!metrics.bind_packet(sole, &raced_packet));
+  assert!(raced_delivery.is_lost());
+
+  // Registering a replacement path immediately reaps the pending dead path.
+  let _replacement = metrics.register_path(None, "127.0.0.1:1123".parse().unwrap());
+  assert_eq!(metrics.available_path_count(), 1);
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn idle_tcp_probes_preserve_activity_without_delivering_quic_packets() -> anyhow::Result<()> {
+async fn idle_tcp_paths_remain_clean_without_probe_frames() -> anyhow::Result<()> {
   timeout(Duration::from_secs(8), async {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -623,6 +679,119 @@ async fn udp_side_channel_is_delivered_between_sides() -> anyhow::Result<()> {
     );
 
     anyhow::Ok(())
+  })
+  .await?
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn rejects_invalid_extend_token_and_wrong_binding() -> anyhow::Result<()> {
+  use crate::utils::{net::bind_tcp_listener, postcard::postcard_read_stream};
+  use std::collections::HashMap;
+  use tokio::io::AsyncWriteExt;
+
+  timeout(duration!("10s"), async {
+    let configs: Vec<TunnelInterfaceConfig> = serde_json::from_str(
+      r#"[
+        {"address": "127.0.0.1"},
+        {"address": "127.0.0.2", "metered": true}
+      ]"#,
+    )?;
+    let local_interfaces = build_local_interfaces(configs, Some("0.0.0.0:0".parse()?))?;
+    let tcp0 = bind_tcp_listener(local_interfaces[0].listen_address.unwrap(), None)?;
+    let tcp1 = bind_tcp_listener(local_interfaces[1].listen_address.unwrap(), None)?;
+    let addr0 = tcp0.local_addr()?;
+    let addr1 = tcp1.local_addr()?;
+
+    let mut listener = MtConnectionsListener::<QuicBytesPacket>::from_bindings(vec![
+      MtListenerBinding {
+        interface_id: local_interfaces[0].id,
+        local_interface: local_interfaces[0].with_resolved_port(addr0.port()),
+        tcp_listener: tcp0,
+        udp_socket: None,
+      },
+      MtListenerBinding {
+        interface_id: local_interfaces[1].id,
+        local_interface: local_interfaces[1].with_resolved_port(addr1.port()),
+        tcp_listener: tcp1,
+        udp_socket: None,
+      },
+    ]);
+
+    let (client_mt, _plan_sender, _, _) =
+      mt_connections_connect_multi::<QuicBytesPacket>(vec![MtDialTarget {
+        local_interface: LocalInterface::default_implicit(),
+        remote_address: addr0,
+      }])
+      .await?;
+
+    let mut server_mt = listener.accept().await?;
+    let session_handle = server_mt
+      .take_listener_handle()
+      .ok_or_else(|| anyhow::anyhow!("missing server session handle"))?;
+    let server_metrics = server_mt.underlay_metrics();
+    let token = [0x42u8; 32];
+    session_handle.install_extend_plan(
+      token,
+      HashMap::from([(0, 0)]),
+      HashMap::from([(0, 2)]),
+      &server_metrics,
+    );
+
+    let probe_extend = |target: std::net::SocketAddr,
+                        id: MtConnectionsId,
+                        pair_id: u16,
+                        extend_token: [u8; 32]| async move {
+      let mut stream = TcpStream::connect(target).await?;
+      let head =
+        postcard::to_vec::<_, MT_CONNECTIONS_REQUEST_HEAD_BUFFER_SIZE>(&MtConnectionsRequestHead {
+          magic: MtConnectionsMagic,
+          data: MtConnectionsRequestHeadData::Extend {
+            id,
+            pair_id,
+            token: extend_token,
+          },
+        })
+        .unwrap();
+      stream.write_all(&head).await?;
+      let response = postcard_read_stream::<MtConnectionsResponseHead>(&mut stream).await?;
+      anyhow::Ok((response.data, stream))
+    };
+
+    assert_eq!(
+      probe_extend(addr0, client_mt.id(), 0, [0x99u8; 32])
+        .await?
+        .0,
+      MtConnectionsResponseHeadData::AlreadyClosed,
+      "invalid extend token must be rejected",
+    );
+    assert_eq!(
+      probe_extend(addr1, client_mt.id(), 0, token).await?.0,
+      MtConnectionsResponseHeadData::AlreadyClosed,
+      "valid extend token on wrong server interface binding must be rejected",
+    );
+    let (valid_extend, _held_extend_stream) = probe_extend(addr0, client_mt.id(), 0, token).await?;
+    assert_eq!(
+      valid_extend,
+      MtConnectionsResponseHeadData::Extended,
+      "matching extend token on assigned server interface binding must succeed",
+    );
+
+    timeout(duration!("3s"), async {
+      while server_metrics.available_path_count_in_group(0) < 2 {
+        sleep(duration!("10ms")).await;
+      }
+    })
+    .await?;
+
+    assert_eq!(
+      probe_extend(addr0, client_mt.id(), 0, token).await?.0,
+      MtConnectionsResponseHeadData::AlreadyClosed,
+      "extend beyond server per-pair max paths must be rejected",
+    );
+
+    let _client = client_mt;
+    Ok(())
   })
   .await?
 }

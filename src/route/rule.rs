@@ -49,6 +49,7 @@ pub enum AnyRule {
   Fallback(FallbackRule),
   // 新增变体必须保持在末尾，保证 postcard 线上兼容。
   And(AndRule),
+  ExclusiveAnd(ExclusiveAndRule),
 }
 
 /// 命中原因（按什么种类的条件匹配的）。
@@ -440,6 +441,38 @@ impl Rule for AndRule {
   }
 }
 
+/// 保留 AndRule 的线上字段布局；排他匹配通过新的枚举变体传递给 IN。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExclusiveAndRule(pub AndRule);
+
+impl Rule for ExclusiveAndRule {
+  fn priority(&self) -> i64 {
+    self.0.priority()
+  }
+
+  fn exits(&self) -> &[OutExit] {
+    self.0.exits()
+  }
+
+  fn requires_geosite(&self) -> bool {
+    self.0.requires_geosite()
+  }
+
+  fn test(
+    &self,
+    address: &Option<SocketAddr>,
+    domain: &Option<String>,
+    protocol: &Option<SniffedProtocol>,
+    region_codes: &Option<Vec<String>>,
+    geosite: &Geosite,
+  ) -> Option<Vec<RuleKind>> {
+    self
+      .0
+      .test(address, domain, protocol, region_codes, geosite)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use moka::sync::Cache;
@@ -586,6 +619,27 @@ mod tests {
     assert_eq!(decoded.rules.len(), 2);
     assert_eq!(decoded.priority, 10);
     assert_eq!(decoded.exits, [OutExit::Proxy]);
+  }
+
+  #[test]
+  fn legacy_and_postcard_encoding_is_unchanged() {
+    // And (5), one Protocol (3) condition matching SSH (3), and the hk tag.
+    let encoded = [5, 1, 3, 1, 3, 0, 0, 0, 0, 1, 1, 2, b'h', b'k'];
+    let decoded: AnyRule = postcard::from_bytes(&encoded).unwrap();
+    let AnyRule::And(rule) = &decoded else {
+      panic!("expected the legacy AND variant");
+    };
+
+    assert_eq!(rule.priority, 0);
+    assert_eq!(rule.exits, [OutExit::from("hk")]);
+    let [AnyRule::Protocol(protocol)] = rule.rules.as_slice() else {
+      panic!("expected the legacy protocol condition");
+    };
+    assert_eq!(protocol.matches, [SniffedProtocol::Ssh]);
+    assert_eq!(protocol.priority, 0);
+    assert!(!protocol.negate);
+    assert!(protocol.exits.is_empty());
+    assert_eq!(postcard::to_allocvec(&decoded).unwrap(), encoded);
   }
 
   fn empty_geosite() -> Geosite {

@@ -24,14 +24,17 @@ use crate::{
   cert::NODE_PEM_FILE_NAME,
   r#in::{InConfig, InLike},
   inbound::AnyInbound,
-  mt_connections::MT_CONNECTIONS_HANDSHAKE_TIMEOUT,
+  mt_connections::{LocalInterface, MT_CONNECTIONS_HANDSHAKE_TIMEOUT, build_local_interfaces},
   node::{
     DefaultLocalExit, LocalOutDispatcher, Node, NodeHello, NodeHelloAck, NodeId, NodeMessageToIn,
     NodeMessageToInUpdate, NodeOutDispatcher, OutDispatcher,
   },
   out::PeerOut,
   primitives::OutExits,
-  qomt::{QomtConnection, QomtStream, State as QuicConnectionState, qomt_connect},
+  qomt::{
+    QomtConnection, QomtStream, QomtUdpReconnectPolicy, State as QuicConnectionState,
+    qomt_connect_with_options,
+  },
   quic_connection::{create_quiche_config, create_udp_quiche_config},
   route::Router,
   utils::postcard::postcard_read_stream,
@@ -49,18 +52,16 @@ pub struct In {
   peer_out_task_receiver: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<PeerOutTaskFuture>>>,
   out_dispatcher_revision: AtomicU64,
   hub_options: InHubOptions,
+  local_interfaces: Vec<Arc<LocalInterface>>,
   context_dir: PathBuf,
 }
 
 type PeerOutTaskFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct PeerOutKey {
-  provider_id: NodeId,
-  address: SocketAddr,
-}
+type PeerOutKey = NodeId;
 
 struct PeerOutTask {
+  addresses: Vec<SocketAddr>,
   exits: OutExits,
   generation: NodeId,
   cancel_sender: oneshot::Sender<()>,
@@ -95,11 +96,12 @@ impl Drop for PeerOutDispatcherRegistration {
 
 pub struct InOptions {
   pub hub: InHubOptions,
+  pub local_interfaces: Vec<Arc<LocalInterface>>,
   pub context_dir: PathBuf,
 }
 
 pub struct InHubOptions {
-  pub address: SocketAddr,
+  pub addresses: Vec<SocketAddr>,
   pub connections: usize,
 }
 
@@ -109,10 +111,16 @@ impl In {
     router: Router,
     InOptions {
       hub: hub_options,
+      local_interfaces,
       context_dir,
     }: InOptions,
   ) -> Self {
     let (peer_out_task_sender, peer_out_task_receiver) = mpsc::unbounded_channel();
+    let local_interfaces = if local_interfaces.is_empty() {
+      vec![LocalInterface::default_implicit()]
+    } else {
+      local_interfaces
+    };
 
     Self {
       id: NodeId::new(),
@@ -127,6 +135,7 @@ impl In {
       peer_out_task_receiver: Some(peer_out_task_receiver).tokio_mutex(),
       out_dispatcher_revision: AtomicU64::new(0),
       hub_options,
+      local_interfaces,
       context_dir,
     }
   }
@@ -180,11 +189,13 @@ impl In {
     loop {
       async {
         let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
-        let qomt_connection = qomt_connect(
+        let qomt_connection = qomt_connect_with_options(
           &mut quiche_config,
           udp_quiche_config,
-          self.hub_options.address,
+          &self.hub_options.addresses,
+          &self.local_interfaces,
           self.hub_options.connections,
+          QomtUdpReconnectPolicy::default(),
         )
         .await?
         .arc();
@@ -211,30 +222,30 @@ impl In {
           .context("timed out waiting for HUB hello acknowledgement")?
         };
 
-        async {
-          let (hub_id, stream) = tokio::select! {
-            hub_id = hub_id_future => hub_id,
-            result = qomt_connection.accept_stream() => {
-              if result?.is_none() {
-                return Ok(());
-              }
+        let handshake = tokio::select! {
+          hub_id = hub_id_future => hub_id.map(Some),
+          result = qomt_connection.accept_stream() => match result {
+            Ok(None) => Ok(None),
+            Ok(Some(_)) => Err(anyhow::anyhow!("not expecting stream from HUB now.")),
+            Err(error) => Err(error.into()),
+          },
+        };
 
-              anyhow::anyhow!("not expecting stream from HUB now.").wrap_err()
-            },
-          }?;
-
-          self
-            .clone()
-            .handle_hub_node(hub_id, stream, qomt_connection.clone())
-            .await?;
-
-          anyhow::Ok(())
+        match handshake {
+          Ok(Some((hub_id, stream))) => {
+            if let Err(error) = self
+              .clone()
+              .handle_hub_node(hub_id, stream, qomt_connection.clone())
+              .await
+            {
+              log::error!("error handling HUB updates: {}", error);
+            }
+          }
+          Ok(None) => {}
+          Err(error) => {
+            log::error!("error sending hello to HUB: {}", error);
+          }
         }
-        .await
-        .inspect_err(|error| {
-          log::error!("error sending hello to HUB: {}", error);
-        })
-        .ok();
 
         log::info!("connection to HUB closed.");
 
@@ -315,23 +326,28 @@ impl In {
   }
 
   fn update_peer_outs(self: &Arc<Self>, peer_outs: Vec<PeerOut>) {
-    let mut desired = HashMap::<PeerOutKey, OutExits>::new();
+    let mut desired = HashMap::<PeerOutKey, (Vec<SocketAddr>, OutExits)>::new();
 
     for PeerOut {
       provider_id,
       exits,
-      address,
+      addresses,
     } in peer_outs
     {
-      let key = PeerOutKey {
-        provider_id,
-        address,
-      };
+      if addresses.is_empty() {
+        continue;
+      }
 
-      if let Some(existing) = desired.insert(key, exits.clone()) {
+      if let Some((existing_addresses, existing_exits)) =
+        desired.insert(provider_id, (addresses.clone(), exits.clone()))
+      {
         assert_eq!(
-          existing, exits,
-          "one peer OUT endpoint was declared with inconsistent exits"
+          existing_addresses, addresses,
+          "one peer OUT provider was declared with inconsistent addresses"
+        );
+        assert_eq!(
+          existing_exits, exits,
+          "one peer OUT provider was declared with inconsistent exits"
         );
       }
     }
@@ -343,7 +359,7 @@ impl In {
         .filter_map(|(key, task)| {
           desired
             .get(key)
-            .is_none_or(|exits| exits != &task.exits)
+            .is_none_or(|(addresses, exits)| addresses != &task.addresses || exits != &task.exits)
             .then_some(*key)
         })
         .collect::<Vec<_>>();
@@ -353,7 +369,7 @@ impl In {
         .collect::<Vec<_>>();
       let mut added_tasks = Vec::new();
 
-      for (key, exits) in desired {
+      for (key, (addresses, exits)) in desired {
         if task_map.contains_key(&key) {
           continue;
         }
@@ -364,12 +380,13 @@ impl In {
         task_map.insert(
           key,
           PeerOutTask {
+            addresses: addresses.clone(),
             exits: exits.clone(),
             generation,
             cancel_sender,
           },
         );
-        added_tasks.push((key, exits, generation, cancel_receiver));
+        added_tasks.push((key, addresses, exits, generation, cancel_receiver));
       }
 
       (removed_tasks, added_tasks)
@@ -390,11 +407,11 @@ impl In {
       task.cancel_sender.send(()).ok();
     }
 
-    for (key, exits, generation, cancel_receiver) in added_tasks {
+    for (provider_id, addresses, exits, generation, cancel_receiver) in added_tasks {
       log::info!(
-        "peer OUT {} ({}) declared with exits {:?}.",
-        key.address,
-        key.provider_id,
+        "peer OUT {:?} ({}) declared with exits {:?}.",
+        addresses,
+        provider_id,
         exits
       );
 
@@ -402,7 +419,8 @@ impl In {
         .peer_out_task_sender
         .send(Box::pin(Self::run_peer_out(
           Arc::downgrade(self),
-          key,
+          provider_id,
+          addresses,
           exits,
           generation,
           cancel_receiver,
@@ -413,7 +431,8 @@ impl In {
 
   async fn run_peer_out(
     in_node: Weak<Self>,
-    key: PeerOutKey,
+    provider_id: NodeId,
+    addresses: Vec<SocketAddr>,
     exits: OutExits,
     generation: NodeId,
     mut cancel_receiver: oneshot::Receiver<()>,
@@ -427,7 +446,8 @@ impl In {
         _ = &mut cancel_receiver => break,
         result = Self::run_peer_out_connection(
           in_node.clone(),
-          key,
+          provider_id,
+          addresses.clone(),
           exits.clone(),
           generation,
         ) => result,
@@ -436,9 +456,9 @@ impl In {
       connection_result
         .inspect_err(|error| {
           log::warn!(
-            "peer OUT {} ({}) connection error: {error}",
-            key.address,
-            key.provider_id
+            "peer OUT {:?} ({}) connection error: {error}",
+            addresses,
+            provider_id
           );
         })
         .ok();
@@ -450,15 +470,16 @@ impl In {
     }
 
     log::info!(
-      "peer OUT {} ({}) declaration removed.",
-      key.address,
-      key.provider_id
+      "peer OUT {:?} ({}) declaration removed.",
+      addresses,
+      provider_id
     );
   }
 
   async fn run_peer_out_connection(
     in_node: Weak<Self>,
-    key: PeerOutKey,
+    provider_id: NodeId,
+    addresses: Vec<SocketAddr>,
     exits: OutExits,
     generation: NodeId,
   ) -> anyhow::Result<()> {
@@ -468,21 +489,24 @@ impl In {
 
     let node_id = in_node_arc.id;
     let connections = in_node_arc.hub_options.connections.max(1);
+    let local_interfaces = in_node_arc.local_interfaces.clone();
     let pem_path = in_node_arc.context_dir.join(NODE_PEM_FILE_NAME);
     drop(in_node_arc);
 
     let mut quiche_config = create_quiche_config(&pem_path)?;
     let udp_quiche_config = create_udp_quiche_config(&pem_path).ok();
-    let qomt_connection = qomt_connect(
+    let qomt_connection = qomt_connect_with_options(
       &mut quiche_config,
       udp_quiche_config,
-      key.address,
+      &addresses,
+      &local_interfaces,
       connections,
+      QomtUdpReconnectPolicy::default(),
     )
     .await?;
     let qomt_connection = qomt_connection.arc();
 
-    let NodeHelloAck(provider_id) = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
+    let NodeHelloAck(acknowledged_provider_id) = timeout(MT_CONNECTIONS_HANDSHAKE_TIMEOUT, async {
       let mut stream = qomt_connection.open_stream();
 
       stream
@@ -498,7 +522,7 @@ impl In {
     .context("timed out waiting for peer OUT hello acknowledgement")??;
 
     assert_eq!(
-      provider_id, key.provider_id,
+      acknowledged_provider_id, provider_id,
       "peer OUT endpoint acknowledged an unexpected provider id"
     );
 
@@ -516,7 +540,7 @@ impl In {
       let task_map = in_node_arc.peer_out_task_map.lock().unwrap();
 
       if !task_map
-        .get(&key)
+        .get(&provider_id)
         .is_some_and(|task| task.generation == generation)
       {
         return Ok(());
@@ -526,37 +550,37 @@ impl In {
         .peer_out_dispatcher_map
         .lock()
         .unwrap()
-        .insert(key, (generation, registered_dispatcher.clone()));
+        .insert(provider_id, (generation, registered_dispatcher.clone()));
       in_node_arc.mark_out_dispatchers_changed();
     }
     drop(in_node_arc);
 
     let _registration = PeerOutDispatcherRegistration {
       in_node: in_node.clone(),
-      key,
+      key: provider_id,
       generation,
       dispatcher: registered_dispatcher,
     };
 
     log::info!(
-      "connection to peer OUT {} ({provider_id}) established: QOMT {}.",
-      key.address,
+      "connection to peer OUT {:?} ({provider_id}) established: QOMT {}.",
+      addresses,
       qomt_connection.diagnostic_id(),
     );
 
     while let Some(unexpected_stream) = qomt_connection.accept_stream().await? {
       log::warn!(
-        "unexpected stream {} received from peer OUT {} ({}) on QOMT {}.",
+        "unexpected stream {} received from peer OUT {:?} ({}) on QOMT {}.",
         unexpected_stream.id(),
-        key.address,
-        key.provider_id,
+        addresses,
+        provider_id,
         qomt_connection.diagnostic_id(),
       );
     }
 
     log::info!(
-      "connection to peer OUT {} ({provider_id}) closed.",
-      key.address
+      "connection to peer OUT {:?} ({provider_id}) closed.",
+      addresses
     );
 
     Ok(())
@@ -611,6 +635,7 @@ pub async fn run_in(
   context_dir: impl AsRef<Path>,
   InConfig {
     hub,
+    interfaces,
     route: route_config,
     inbounds: inbounds_config,
     dns: dns_config,
@@ -618,6 +643,7 @@ pub async fn run_in(
 ) -> anyhow::Result<()> {
   let context_dir = context_dir.as_ref();
   let dns_hijack = dns_config.as_ref().map(|config| *config.listen);
+  let local_interfaces = build_local_interfaces(interfaces, None)?;
 
   let inbounds = if let Some(inbounds_config) = inbounds_config {
     inbounds_config.into_inbounds(dns_hijack).await?
@@ -636,6 +662,7 @@ pub async fn run_in(
     router,
     InOptions {
       hub: hub.into(),
+      local_interfaces,
       context_dir: context_dir.to_owned(),
     },
   )
@@ -683,9 +710,10 @@ mod tests {
       Router::new(&context_dir),
       InOptions {
         hub: InHubOptions {
-          address: "127.0.0.1:1".parse().unwrap(),
+          addresses: vec!["127.0.0.1:1".parse().unwrap()],
           connections: 1,
         },
+        local_interfaces: vec![],
         context_dir,
       },
     )
@@ -709,24 +737,22 @@ mod tests {
       Router::new(&context_dir),
       InOptions {
         hub: InHubOptions {
-          address: "127.0.0.1:1".parse().unwrap(),
+          addresses: vec!["127.0.0.1:1".parse().unwrap()],
           connections: 1,
         },
+        local_interfaces: vec![],
         context_dir,
       },
     )
     .arc();
     let provider_id = NodeId::new();
     let address = "127.0.0.1:2".parse().unwrap();
-    let key = PeerOutKey {
-      provider_id,
-      address,
-    };
+    let key = provider_id;
     let first_exits = OutExits::new([OutExit::Proxy, OutExit::from("system")]);
     let first_snapshot = PeerOut {
       provider_id,
       exits: first_exits.clone(),
-      address,
+      addresses: vec![address],
     };
 
     in_node.update_peer_outs(vec![first_snapshot.clone()]);
@@ -757,7 +783,7 @@ mod tests {
         OutExit::from("system"),
         OutExit::from("video"),
       ]),
-      address,
+      addresses: vec![address],
     }]);
     assert_ne!(
       in_node
@@ -808,10 +834,11 @@ mod tests {
             tags: vec![OutExitTag::from("system")],
           },
         )],
+        local_interfaces: vec![],
         listen: None,
         advertise: None,
         hubs: vec![OutHubOptions {
-          address: "127.0.0.1:1".parse()?,
+          addresses: vec!["127.0.0.1:1".parse()?],
           connections: 1,
         }],
         context_dir: out_dir,
@@ -827,9 +854,10 @@ mod tests {
         Router::new(&in_dir),
         InOptions {
           hub: InHubOptions {
-            address: "127.0.0.1:1".parse()?,
+            addresses: vec!["127.0.0.1:1".parse()?],
             connections: 1,
           },
+          local_interfaces: vec![],
           context_dir: in_dir,
         },
       )
@@ -838,12 +866,9 @@ mod tests {
       let peer_out = PeerOut {
         provider_id,
         exits: OutExits::new([OutExit::Proxy, OutExit::from("system")]),
-        address: peer_endpoint,
+        addresses: vec![peer_endpoint],
       };
-      let key = PeerOutKey {
-        provider_id,
-        address: peer_endpoint,
-      };
+      let key = provider_id;
       let destination = SocketDestination {
         host: SocketDestinationHost::IpAddress(target_address.ip()),
         port: target_address.port(),
