@@ -5,7 +5,7 @@ use std::{
   net::SocketAddr,
   pin::Pin,
   sync::{
-    Arc, Mutex, OnceLock,
+    Arc, Mutex,
     atomic::{self, AtomicU64, AtomicUsize},
   },
   task::{Context, Poll},
@@ -66,14 +66,6 @@ const EXPRESS_QUEUE_CAPACITY: usize = 16;
 const TCP_WIRE_OVERHEAD_BYTES: u64 = 56;
 const SUGGESTED_SERIALIZATION_TARGET_MILLIS: u128 = 30;
 const MIN_DYNAMIC_DATAGRAM_SIZE: usize = 2048;
-#[cfg(any(target_os = "linux", test))]
-const POLICER_WINDOW_MIN_DATA_SEGS_OUT: u32 = 250;
-#[cfg(any(target_os = "linux", test))]
-const POLICER_LOSS_NUMERATOR: u64 = 1;
-#[cfg(any(target_os = "linux", test))]
-const POLICER_LOSS_DENOMINATOR: u64 = 10;
-#[cfg(any(target_os = "linux", test))]
-const POLICER_CONSECUTIVE_WINDOWS: u8 = 3;
 
 fn group_bulk_queue_capacity(writable_paths: usize) -> usize {
   writable_paths.saturating_sub(1).max(MIN_GROUP_QUEUE_CAPACITY)
@@ -205,7 +197,6 @@ pub(crate) struct MtTcpInfo {
   pub(crate) notsent_bytes: u32,
   pub(crate) retrans: u32,
   pub(crate) total_retrans: u32,
-  pub(crate) data_segs_out: u32,
   pub(crate) bytes_acked: u64,
   pub(crate) delivered: u32,
 }
@@ -1779,148 +1770,11 @@ impl<TPacket: MtConnectionsPacket> UnderlayControl for MtConnectionsUnderlayMetr
   }
 }
 
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn is_bbr_module_version_loss_aware(version: Option<&str>) -> bool {
-  let Some(trimmed) = version.map(str::trim).filter(|value| !value.is_empty()) else {
-    return false;
-  };
-
-  trimmed
-    .split(|ch: char| !ch.is_ascii_digit())
-    .next()
-    .and_then(|major| major.parse::<u32>().ok())
-    .is_some_and(|major| major >= 2)
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn congestion_control_needs_policer_guard(
-  congestion_control: &str,
-  bbr_module_is_loss_aware: bool,
-) -> bool {
-  congestion_control.trim() == "bbr" && !bbr_module_is_loss_aware
-}
-
 #[cfg(target_os = "linux")]
-fn kernel_bbr_module_is_loss_aware() -> bool {
-  static LOSS_AWARE: OnceLock<bool> = OnceLock::new();
-
-  *LOSS_AWARE.get_or_init(|| {
-    let version = std::fs::read_to_string("/sys/module/tcp_bbr/version").ok();
-    is_bbr_module_version_loss_aware(version.as_deref())
-  })
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PolicerLossTrigger {
-  pub window_data_segs: u32,
-  pub window_retrans: u32,
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct PolicerLossDetector {
-  baseline: Option<(u32, u32)>,
-  consecutive_lossy_windows: u8,
-  triggered: bool,
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl PolicerLossDetector {
-  pub(super) fn observe(
-    &mut self,
-    data_segs_out: u32,
-    total_retrans: u32,
-  ) -> Option<PolicerLossTrigger> {
-    if self.triggered {
-      return None;
-    }
-
-    let Some((base_data_segs, base_retrans)) = self.baseline else {
-      self.baseline = Some((data_segs_out, total_retrans));
-      return None;
-    };
-
-    let delta_data_segs = data_segs_out.wrapping_sub(base_data_segs);
-    if delta_data_segs < POLICER_WINDOW_MIN_DATA_SEGS_OUT {
-      return None;
-    }
-
-    let delta_retrans = total_retrans.wrapping_sub(base_retrans);
-    self.baseline = Some((data_segs_out, total_retrans));
-
-    if u64::from(delta_retrans) * POLICER_LOSS_DENOMINATOR
-      >= u64::from(delta_data_segs) * POLICER_LOSS_NUMERATOR
-    {
-      self.consecutive_lossy_windows = self.consecutive_lossy_windows.saturating_add(1);
-      if self.consecutive_lossy_windows >= POLICER_CONSECUTIVE_WINDOWS {
-        self.triggered = true;
-        return Some(PolicerLossTrigger {
-          window_data_segs: delta_data_segs,
-          window_retrans: delta_retrans,
-        });
-      }
-    } else {
-      self.consecutive_lossy_windows = 0;
-    }
-
-    None
-  }
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn read_mt_tcp_congestion(raw_fd: std::os::fd::RawFd) -> std::io::Result<String> {
-  let mut buf = [0u8; 16];
-  let mut length = buf.len() as libc::socklen_t;
-  let result = unsafe {
-    libc::getsockopt(
-      raw_fd,
-      libc::IPPROTO_TCP,
-      libc::TCP_CONGESTION,
-      buf.as_mut_ptr().cast(),
-      &mut length,
-    )
-  };
-  if result != 0 {
-    return Err(std::io::Error::last_os_error());
-  }
-
-  let valid_len = (length as usize).min(buf.len());
-  let end = buf[..valid_len]
-    .iter()
-    .position(|&byte| byte == 0)
-    .unwrap_or(valid_len);
-
-  Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn set_mt_tcp_congestion(
-  raw_fd: std::os::fd::RawFd,
-  algorithm: &[u8],
-) -> std::io::Result<()> {
-  let result = unsafe {
-    libc::setsockopt(
-      raw_fd,
-      libc::IPPROTO_TCP,
-      libc::TCP_CONGESTION,
-      algorithm.as_ptr().cast(),
-      algorithm.len() as libc::socklen_t,
-    )
-  };
-  if result != 0 {
-    return Err(std::io::Error::last_os_error());
-  }
-
-  Ok(())
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn read_mt_tcp_info(raw_fd: std::os::fd::RawFd) -> std::io::Result<MtTcpInfo> {
+fn read_mt_tcp_info(raw_fd: std::os::fd::RawFd) -> std::io::Result<MtTcpInfo> {
   // Linux UAPI struct tcp_info through tcpi_bytes_acked (offset 120),
-  // tcpi_notsent_bytes (offset 144), tcpi_data_segs_out (offset 156), and
-  // tcpi_delivered (offset 192). Fixed UAPI offsets and native-endian reads
-  // work identically on x86_64 and aarch64.
+  // tcpi_notsent_bytes (offset 144), and tcpi_delivered (offset 192). Fixed
+  // UAPI offsets and native-endian reads work identically on x86_64 and aarch64.
   let mut info = [0u8; 232];
   let mut length = info.len() as libc::socklen_t;
   let result = unsafe {
@@ -1956,7 +1810,6 @@ pub(super) fn read_mt_tcp_info(raw_fd: std::os::fd::RawFd) -> std::io::Result<Mt
     notsent_bytes: if len >= 148 { u32_at(144) } else { 0 },
     retrans: u32_at(36),
     total_retrans: u32_at(100),
-    data_segs_out: if len >= 160 { u32_at(156) } else { 0 },
     bytes_acked: u64_at(120),
     delivered: if len >= 196 { u32_at(192) } else { 0 },
   })
@@ -1968,49 +1821,13 @@ async fn monitor_mt_tcp_info<TPacket: MtConnectionsPacket>(
   path_id: u64,
   metrics: Arc<MtConnectionsUnderlayMetrics<TPacket>>,
 ) -> std::io::Result<()> {
-  let mut policer_guard = read_mt_tcp_congestion(raw_fd)
-    .ok()
-    .filter(|cc| congestion_control_needs_policer_guard(cc, kernel_bbr_module_is_loss_aware()))
-    .map(|_| PolicerLossDetector::default());
-
   let mut interval = interval_at(TokioInstant::now(), MT_CONNECTIONS_TCP_INFO_INTERVAL);
   interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
   loop {
     interval.tick().await;
     match read_mt_tcp_info(raw_fd) {
-      Ok(info) => {
-        if let Some(detector) = policer_guard.as_mut()
-          && let Some(trigger) = detector.observe(info.data_segs_out, info.total_retrans)
-        {
-          policer_guard = None;
-          match set_mt_tcp_congestion(raw_fd, b"cubic") {
-            Ok(()) => {
-              log::info!(
-                "mTCP {} detected sustained BBRv1 policer loss ({}/{} data segs retransmitted, \
-                 {:.1}% in window {}/{}), switching congestion control to cubic",
-                metrics.describe_path(path_id),
-                trigger.window_retrans,
-                trigger.window_data_segs,
-                (f64::from(trigger.window_retrans) * 100.0) / f64::from(trigger.window_data_segs),
-                POLICER_CONSECUTIVE_WINDOWS,
-                POLICER_CONSECUTIVE_WINDOWS,
-              );
-            }
-            Err(error) => {
-              log::warn!(
-                "mTCP {} detected sustained BBRv1 policer loss ({}/{} data segs retransmitted), \
-                 but failed to switch congestion control to cubic: {error}",
-                metrics.describe_path(path_id),
-                trigger.window_retrans,
-                trigger.window_data_segs,
-              );
-            }
-          }
-        }
-
-        metrics.update_path(path_id, info, Instant::now());
-      }
+      Ok(info) => metrics.update_path(path_id, info, Instant::now()),
       Err(error) => {
         if error.kind() == std::io::ErrorKind::Unsupported {
           return Err(error);
@@ -2120,24 +1937,6 @@ pub(crate) fn configure_mt_tcp_stream(tcp_stream: &TcpStream) -> std::io::Result
   tcp_stream.set_nodelay(true)?;
 
   let socket = SockRef::from(tcp_stream);
-
-  #[cfg(target_os = "linux")]
-  if socket.set_tcp_congestion(b"bbr2").is_err()
-    && let Err(error) = socket.set_tcp_congestion(b"bbr")
-  {
-    static LOGGED_BBR_UNAVAILABLE: atomic::AtomicBool = atomic::AtomicBool::new(false);
-
-    if !LOGGED_BBR_UNAVAILABLE.swap(true, atomic::Ordering::Relaxed) {
-      if error.raw_os_error() == Some(libc::ENOENT) {
-        log::info!(
-          "kernel tcp_bbr/bbr2 congestion control is not loaded ({error}); \
-           using system default TCP congestion control",
-        );
-      } else {
-        log::warn!("failed to enable BBR for mTCP connection: {error}");
-      }
-    }
-  }
 
   #[cfg(any(target_os = "android", target_os = "linux"))]
   socket.set_tcp_notsent_lowat(MT_CONNECTIONS_TCP_NOTSENT_LOWAT)?;
@@ -3150,7 +2949,6 @@ mod tests {
       notsent_bytes: 0,
       retrans: 0,
       total_retrans: 0,
-      data_segs_out: 0,
       bytes_acked,
       delivered: bytes_acked as u32,
     }
